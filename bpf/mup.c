@@ -785,10 +785,15 @@ int mup_server_ingress(struct __sk_buff *skb)
 	    packet.ipv4->source == configuration->target_ip &&
 	    packet.ipv4->destination == configuration->source_ip &&
 	    packet.source_port == configuration->target_port) {
+		/*
+		 * The target can also answer other programs on this host, for
+		 * example a target on 127.0.0.1. A port without a route is not a
+		 * mup port, so the packet goes to the next program.
+		 */
 		reverse = bpf_map_lookup_elem(&server_route_by_port,
 					      &packet.destination_port);
 		if (!reverse)
-			return count_and_drop(skb, MUP_DROP_ROUTE_MISS);
+			return MUP_TCX_NEXT;
 		result = validate_wg(&packet, 0, &peer_token);
 		if (result != MUP_DROP_NONE)
 			return count_and_drop(skb, result);
