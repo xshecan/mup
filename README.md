@@ -41,7 +41,7 @@ Each group has one of three path modes. Fallback uses the first healthy path. Ba
   <img alt="UDP and ICMP paths with direct or reflected replies" src=".docs/images/return-modes-light.svg">
 </picture>
 
-The return IP of a group sets its return mode. The client `-r` flag or the `return_ip` key sets it. Without a return IP, the server replies directly with the transport of the path. On a UDP path, the server sends replies from the return IP. On an ICMP path, the server sends an Echo Request to the return IP, and that host answers the client.
+Each path has its own return mode. The optional `via RETURN_IP` after a path sets it, and the client `-r` flag sets it for each path without one. Without a return IP, the server replies directly with the transport of the path. On a UDP path, the server sends replies with the return IP as their source. On an ICMP path, the server sends an Echo Request to the return IP, and that host answers the client.
 
 [PROTOCOL.md](PROTOCOL.md) describes every packet, map, timer, and drop reason.
 
@@ -106,7 +106,7 @@ The WireGuard server then sees the MUP server as the endpoint of each peer. Wire
 
 ## Configuration file
 
-The flags of the daemon configure one server, or one client with one group. A YAML file can do the same, and it can configure more groups. The file selects the role. The directory `configs` has one example for each role.
+The flags of the daemon configure one server, or one client with one group. A YAML file can do the same, and it can configure more groups. In the file, the list `servers` holds the groups, and the list `routes` of each entry holds its paths. The file selects the role. The directory `configs` has one example for each role.
 
 ```sh
 sudo ./mup --config configs/client.yaml
@@ -115,16 +115,17 @@ sudo ./mup --config configs/client.yaml
 ```yaml
 client:
   advertise: 192.0.2.10
-  groups:
+  servers:
     - port: 51820
       mode: fallback
-      paths:
+      routes:
         - 203.0.113.5:5000/udp
         - 203.0.113.6:5000/icmp
     - port: 51821
       mode: burst
-      paths:
-        - 198.51.100.20:6000/udp
+      routes:
+        - 198.51.100.20:6000/udp via 1.1.1.1
+        - 198.51.100.20:6000/icmp via 9.9.9.9
 ```
 
 ```yaml
@@ -137,10 +138,9 @@ server:
 | --- | --- | --- |
 | `client.advertise` | `-s` | The advertised IP. |
 | `client.control_socket` | `--control-socket` | Optional. The socket for `mupctl`. An empty value turns the socket off. |
-| `client.groups[].port` | `-p` | The port where the group receives packets from its peers. |
-| `client.groups[].mode` | `--mode` | Optional. The path mode of the group. The default is `fallback`. |
-| `client.groups[].return_ip` | `-r` | Optional. The return IP of the group. |
-| `client.groups[].paths` | `-u` | The paths of the group, in the form of the `-u` flag. |
+| `client.servers[].port` | `-p` | The port where the group receives packets from its peers. |
+| `client.servers[].mode` | `--mode` | Optional. The path mode of the group. The default is `fallback`. |
+| `client.servers[].routes` | `-u` | The paths of the group, in the form of the `-u` flag. A path can end with `via RETURN_IP`. |
 | `server.port` | `-p` | The UDP port and the ICMP Echo identifier that the server accepts. |
 | `server.target` | `-r` | The WireGuard target that receives all traffic. |
 | `server.control_socket` | `--control-socket` | Optional. The socket for `mupctl`. An empty value turns the socket off. |
@@ -152,13 +152,13 @@ The daemon does not start with an unknown key in the file. A value can use `${VA
 To reach several WireGuard targets from one client, do these steps:
 
 1. For each target, start one or more MUP servers that forward to that target.
-2. In the client configuration file, add one group for each target. Add the paths to the servers of that target.
+2. In the client configuration file, add one entry under `servers` for each target. Add the routes to the servers of that target.
 3. In the configuration of each WireGuard peer, set the port in `Endpoint` to the listen port of its group.
 
 These rules apply to groups:
 
 - All servers of a group must forward to the same target, because a WireGuard handshake fails against another identity.
-- A server address and port can be in one group only. The server keeps one return IP and one listen port for each client.
+- A server address and port can be in one group only. The server keeps one listen port for each client.
 - The client cannot detect one host with two addresses in two groups. Do not configure this.
 - All groups share the 8 paths and the 4095 peers of a client.
 - If no path of a group is healthy, its peers have no path. MUP does not move them to another group, because that group leads to another target.
@@ -196,16 +196,16 @@ The command `mup --config FILE` reads a [configuration file](#configuration-file
 ### Client
 
 ```text
-mup client -p LISTEN_PORT -u SERVER_IP[%IFACE]:PORT/udp|icmp [-u ...] -s CLIENT_IP [-r RETURN_IP]
-           [--mode fallback|balancer|burst] [--control-socket PATH]
+mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT/udp|icmp [via RETURN_IP]" [-u ...] -s CLIENT_IP
+           [-r RETURN_IP] [--mode fallback|balancer|burst] [--control-socket PATH]
 ```
 
 | Flag | Value | Meaning |
 | --- | --- | --- |
 | `-p` | port | The UDP port where the client receives WireGuard packets from the peers. |
-| `-u` | `SERVER_IP[%IFACE]:PORT/udp` or `/icmp` | One path to a server. Repeat the flag for up to 8 paths. The optional `%IFACE` binds the path to one interface. |
+| `-u` | `SERVER_IP[%IFACE]:PORT/udp` or `/icmp`, then optionally `via RETURN_IP` | One path to a server. Repeat the flag for up to 8 paths. The optional `%IFACE` binds the path to one interface. The optional `via RETURN_IP` sets the return IP of the path. |
 | `-s` | IPv4 | The advertised IP. It must be an address of the client host, and no other active client of the server can use it. |
-| `-r` | IPv4 | Optional. On UDP paths, the spoofed source of replies. On ICMP paths, the reflector host. |
+| `-r` | IPv4 | Optional. The return IP of each `-u` path without its own `via`. On UDP paths, it is the spoofed source of replies. On ICMP paths, it is the reflector host. |
 | `--mode` | `fallback`, `balancer`, `burst` | The path mode. The default is `fallback`. |
 | `--control-socket` | path | The socket for `mupctl`. The default is `/run/mup/client.sock`. An empty value turns the socket off. |
 
@@ -230,12 +230,12 @@ There are no authentication keys. WireGuard authenticates the payload end to end
 | Command | Role | What it does |
 | --- | --- | --- |
 | `mupctl status` | both | Shows an overview. A client lists its groups and paths, and a server lists its clients. |
-| `mupctl get groups` | client | Lists the groups with their mode, return IP, healthy paths, and peers. |
-| `mupctl get paths` | client | Lists the paths with their health, last ACK, and round-trip time. |
+| `mupctl get groups` | client | Lists the groups with their mode, healthy paths, and peers. |
+| `mupctl get paths` | client | Lists the paths with their return IP, health, last ACK, and round-trip time. |
 | `mupctl get peers` | both | Lists the WireGuard peers of a client, or the peer routes of a server. |
 | `mupctl get clients` | server | Lists the registered clients with their paths, peers, and lease. |
 | `mupctl get drops` | both | Lists the nonzero drop counters. |
-| `mupctl add path SERVER[%IFACE]:PORT/udp` | client | Adds a path to a group. The value uses the form of the `-u` flag. |
+| `mupctl add path SERVER[%IFACE]:PORT/udp [via RETURN_IP]` | client | Adds a path to a group. The value uses the form of the `-u` flag. |
 | `mupctl delete path ID` | client | Removes a path. |
 | `mupctl set mode burst` | client | Changes the path mode of a group to `fallback`, `balancer`, or `burst`. |
 
@@ -251,14 +251,14 @@ Peers:           3
 Peer tokens:     4092 free, 0 quarantined
 Drops:           37 (NO_PATH 30, WG_LENGTH 7)
 
-GROUP   MODE       RETURN IP   PATHS         PEERS
-51820   fallback   none        2/2 healthy   2
-51821   burst      none        0/1 healthy   1
+GROUP   MODE       PATHS         PEERS
+51820   fallback   2/2 healthy   2
+51821   burst      0/1 healthy   1
 
-ID   GROUP   SERVER               TRANSPORT   INTERFACE   STATUS      IN USE   LAST ACK   RTT
-0    51820   203.0.113.5:5000     udp         eth0        healthy     yes      4s         12.3ms
-1    51820   203.0.113.6:5000     icmp        eth1        healthy     no       7s         18.7ms
-2    51821   198.51.100.20:6000   udp         wwan0       unhealthy   no       2m10s      64.1ms
+ID   GROUP   SERVER               TRANSPORT   VIA       INTERFACE   STATUS      IN USE   LAST ACK   RTT
+0    51820   203.0.113.5:5000     udp         -         eth0        healthy     yes      4s         12.3ms
+1    51820   203.0.113.6:5000     icmp        -         eth1        healthy     no       7s         18.7ms
+2    51821   198.51.100.20:6000   udp         1.1.1.1   wwan0       unhealthy   no       2m10s      64.1ms
 ```
 
 The IN USE column shows the paths that carry traffic in the mode of their group. In fallback mode, only the first healthy path of the group carries traffic.
@@ -354,4 +354,5 @@ MUP has no authentication of its own. A host can spoof the source address of a r
 - Up to 8 paths and up to 4095 peers per client, shared by all of its groups.
 - Up to 41000 routes per server, and up to 4096 registered clients.
 - A UDP packet without a checksum is dropped. WireGuard always sends UDP checksums.
+- If the target is on the server host, for example `127.0.0.1`, the network device completes the checksum of each reply. On an ICMP path, the device writes it into the Echo sequence field, so these replies have no fixed sequence.
 - MUP attaches only to the interfaces that are up at start. After you add an interface, restart MUP.

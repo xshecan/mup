@@ -62,13 +62,13 @@ func buildPlan(appConfig config.App, nonce uint64, resolver routeResolver) (runt
 					ServerPort:    path.ServerPort,
 					Transport:     path.Transport,
 					Priority:      uint8(slot),
+					ReturnIP:      path.ReturnIP,
 				})
 				pathMask |= 1 << slot
 			}
 			settings.Groups = append(settings.Groups, dataplane.GroupSettings{
 				ListenPort: group.ListenPort,
 				Mode:       group.Mode,
-				ReturnIP:   group.ReturnIP,
 				PathMask:   pathMask,
 			})
 		}

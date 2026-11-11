@@ -62,11 +62,13 @@ func TestParseArgsClientExamples(t *testing.T) {
 					t.Fatalf("unexpected path: %#v", path)
 				}
 			}
-			if tt.reflected && group.ReturnIP != netip.MustParseAddr("1.1.1.1") {
-				t.Fatalf("return IP = %v", group.ReturnIP)
-			}
-			if !tt.reflected && group.ReturnIP.IsValid() {
-				t.Fatalf("unexpected return IP = %v", group.ReturnIP)
+			for _, path := range group.Paths {
+				if tt.reflected && path.ReturnIP != netip.MustParseAddr("1.1.1.1") {
+					t.Fatalf("return IP = %v", path.ReturnIP)
+				}
+				if !tt.reflected && path.ReturnIP.IsValid() {
+					t.Fatalf("unexpected return IP = %v", path.ReturnIP)
+				}
 			}
 		})
 	}

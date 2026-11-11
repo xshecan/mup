@@ -26,12 +26,12 @@ func clientStatus() api.Status {
 			TokensFree:   4081,
 			Groups: []api.Group{
 				{ListenPort: 51820, Mode: "fallback", Paths: 2, HealthyPaths: 2, Peers: 12},
-				{ListenPort: 51821, Mode: "burst", ReturnIP: "1.1.1.1", Paths: 1, Peers: 2},
+				{ListenPort: 51821, Mode: "burst", Paths: 1, Peers: 2},
 			},
 			Paths: []api.Path{
 				{ID: 0, ListenPort: 51820, Server: "203.0.113.5", Port: 5000, Transport: "udp", Interface: "eth0", Healthy: true, InUse: true, LastACK: testNow.Add(-4 * time.Second), RTTSeconds: 0.0123},
 				{ID: 1, ListenPort: 51820, Server: "203.0.113.6", Port: 5000, Transport: "icmp", Interface: "eth1", Healthy: true, Priority: 1},
-				{ID: 2, ListenPort: 51821, Server: "198.51.100.7", Port: 6000, Transport: "udp", Priority: 2, Misses: 3},
+				{ID: 2, ListenPort: 51821, Server: "198.51.100.7", Port: 6000, Transport: "udp", ReturnIP: "1.1.1.1", Priority: 2, Misses: 3},
 			},
 		},
 		Drops: []api.Drop{
@@ -119,12 +119,12 @@ func TestStatusShowsTheClientOverview(t *testing.T) {
 		"Uptime:          3h12m",
 		"Paths:           2/3 healthy, generation 7",
 		"Drops:           37 (NO_PATH 30, WG_LENGTH 7)",
-		"GROUP   MODE       RETURN IP   PATHS         PEERS",
-		"51820   fallback   none        2/2 healthy   12",
-		"51821   burst      1.1.1.1     0/1 healthy   2",
-		"ID   GROUP   SERVER              TRANSPORT   INTERFACE   STATUS      IN USE   LAST ACK   RTT",
-		"0    51820   203.0.113.5:5000    udp         eth0        healthy     yes      4s         12.3ms",
-		"2    51821   198.51.100.7:6000   udp         -           unhealthy   no       never      -",
+		"GROUP   MODE       PATHS         PEERS",
+		"51820   fallback   2/2 healthy   12",
+		"51821   burst      0/1 healthy   2",
+		"ID   GROUP   SERVER              TRANSPORT   VIA       INTERFACE   STATUS      IN USE   LAST ACK   RTT",
+		"0    51820   203.0.113.5:5000    udp         -         eth0        healthy     yes      4s         12.3ms",
+		"2    51821   198.51.100.7:6000   udp         1.1.1.1   -           unhealthy   no       never      -",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("status output misses %q:\n%s", want, stdout)
@@ -188,7 +188,7 @@ func TestGroupCommands(t *testing.T) {
 
 	daemon := fakeDaemon(t, clientStatus())
 	code, stdout, stderr := runCommand(t, daemon, "get", "groups")
-	if code != 0 || !strings.Contains(stdout, "51821   burst      1.1.1.1") {
+	if code != 0 || !strings.Contains(stdout, "51821   burst      0/1 healthy") {
 		t.Fatalf("get groups = %d, %q, %q", code, stdout, stderr)
 	}
 	if code, stdout, stderr := runCommand(t, daemon, "set", "mode", "burst", "--group=51821"); code != 0 || stdout != "mode set to burst\n" {

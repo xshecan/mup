@@ -67,17 +67,17 @@ func (a App) Validate() error {
 type Client struct {
 	AdvertisedIP  netip.Addr `yaml:"advertise"`
 	ControlSocket string     `yaml:"control_socket"`
-	Groups        []Group    `yaml:"groups"`
+	Groups        []Group    `yaml:"servers"`
 }
 
 // Group is the set of servers for the peers of one listen port. All servers of
 // a group forward to the same WireGuard target, because a WireGuard handshake
-// fails against another identity.
+// fails against another identity. The configuration file calls a group a
+// server and its paths routes.
 type Group struct {
-	ListenPort uint16     `yaml:"port"`
-	Mode       Mode       `yaml:"mode"`
-	ReturnIP   netip.Addr `yaml:"return_ip"`
-	Paths      []Path     `yaml:"paths"`
+	ListenPort uint16 `yaml:"port"`
+	Mode       Mode   `yaml:"mode"`
+	Paths      []Path `yaml:"routes"`
 }
 
 // UnmarshalYAML keeps the default socket when the file does not set one. An
@@ -93,7 +93,7 @@ func (c Client) Validate() error {
 		return errors.New("client advertised IP must be a nonzero IPv4 address")
 	}
 	if len(c.Groups) == 0 {
-		return errors.New("client requires at least one group")
+		return errors.New("client requires at least one server")
 	}
 	listenPorts := make(map[uint16]struct{}, len(c.Groups))
 	owners := make(map[netip.AddrPort]uint16, MaxPaths)
@@ -103,17 +103,17 @@ func (c Client) Validate() error {
 			return err
 		}
 		if _, exists := listenPorts[group.ListenPort]; exists {
-			return fmt.Errorf("duplicate group for listen port %d", group.ListenPort)
+			return fmt.Errorf("duplicate server for listen port %d", group.ListenPort)
 		}
 		listenPorts[group.ListenPort] = struct{}{}
 		for _, path := range group.Paths {
-			if _, exists := seen[path]; exists {
-				return fmt.Errorf("duplicate client path %s", path)
+			if _, exists := seen[path.Route()]; exists {
+				return fmt.Errorf("duplicate client route %s", path.Route())
 			}
-			seen[path] = struct{}{}
+			seen[path.Route()] = struct{}{}
 			owner, exists := owners[path.Endpoint()]
 			if exists && owner != group.ListenPort {
-				return fmt.Errorf("server %s is in the groups of listen ports %d and %d, but a server can serve one group", path.Endpoint(), owner, group.ListenPort)
+				return fmt.Errorf("%s is in the servers of listen ports %d and %d, but an address and port can serve one listen port", path.Endpoint(), owner, group.ListenPort)
 			}
 			owners[path.Endpoint()] = group.ListenPort
 		}
@@ -126,40 +126,52 @@ func (c Client) Validate() error {
 
 func (g Group) validate() error {
 	if g.ListenPort == 0 {
-		return errors.New("group listen port must be between 1 and 65535")
-	}
-	if g.ReturnIP.IsValid() && !isNonzeroIPv4(g.ReturnIP) {
-		return fmt.Errorf("group %d: return IP must be a nonzero IPv4 address", g.ListenPort)
+		return errors.New("server listen port must be between 1 and 65535")
 	}
 	if g.Mode > ModeBurst {
-		return fmt.Errorf("group %d: invalid mode %d", g.ListenPort, uint8(g.Mode))
+		return fmt.Errorf("server %d: invalid mode %d", g.ListenPort, uint8(g.Mode))
 	}
 	if len(g.Paths) == 0 {
-		return fmt.Errorf("group %d: requires at least one path", g.ListenPort)
+		return fmt.Errorf("server %d: requires at least one route", g.ListenPort)
 	}
 	for index, path := range g.Paths {
 		if err := path.validate(); err != nil {
-			return fmt.Errorf("group %d: path %d: %w", g.ListenPort, index, err)
+			return fmt.Errorf("server %d: route %d: %w", g.ListenPort, index, err)
 		}
 	}
 	return nil
 }
 
+// Path is one route to a server. If ReturnIP is set, the server returns the
+// replies of the path through it: a UDP reply has the return IP as its source,
+// and an ICMP reply goes to the return IP as an Echo Request.
 type Path struct {
 	Server     netip.Addr
 	ServerPort uint16
 	Transport  protocol.TransportID
 	Interface  string
+	ReturnIP   netip.Addr
 }
 
-// String formats the path as SERVER[%IFACE]:PORT/TRANSPORT, the form that
-// ParsePath accepts.
+// String formats the path as SERVER[%IFACE]:PORT/TRANSPORT [via RETURN_IP],
+// the form that ParsePath accepts.
 func (p Path) String() string {
 	host := p.Server.String()
 	if p.Interface != "" {
 		host += "%" + p.Interface
 	}
-	return fmt.Sprintf("%s:%d/%s", host, p.ServerPort, p.Transport)
+	text := fmt.Sprintf("%s:%d/%s", host, p.ServerPort, p.Transport)
+	if p.ReturnIP.IsValid() {
+		text += " via " + p.ReturnIP.String()
+	}
+	return text
+}
+
+// Route returns the path without its return IP. Two paths with the same route
+// are the same path.
+func (p Path) Route() Path {
+	p.ReturnIP = netip.Addr{}
+	return p
 }
 
 // Endpoint returns the address and port of the server of the path.
@@ -188,6 +200,9 @@ func (p Path) validate() error {
 	if p.Transport > protocol.TransportICMP {
 		return fmt.Errorf("invalid transport %d", uint8(p.Transport))
 	}
+	if p.ReturnIP.IsValid() && !isNonzeroIPv4(p.ReturnIP) {
+		return errors.New("return IP must be a nonzero IPv4 address")
+	}
 	return nil
 }
 
@@ -215,8 +230,23 @@ func (s Server) Validate() error {
 	return nil
 }
 
-// ParsePath parses SERVER[%IFACE]:PORT/udp or SERVER[%IFACE]:PORT/icmp.
+// ParsePath parses SERVER[%IFACE]:PORT/udp or SERVER[%IFACE]:PORT/icmp, with
+// an optional "via RETURN_IP" after it.
 func ParsePath(raw string) (Path, error) {
+	fields := strings.Fields(raw)
+	var returnIP netip.Addr
+	switch {
+	case len(fields) == 1:
+	case len(fields) == 3 && fields[1] == "via":
+		address, err := netip.ParseAddr(fields[2])
+		if err != nil || !isNonzeroIPv4(address) {
+			return Path{}, errors.New("return IP must be a nonzero IPv4 address")
+		}
+		returnIP = address
+	default:
+		return Path{}, errors.New("path must use IPv4:PORT/udp or /icmp, with an optional via RETURN_IP")
+	}
+	raw = fields[0]
 	slash := strings.LastIndexByte(raw, '/')
 	if slash <= 0 || slash == len(raw)-1 {
 		return Path{}, errors.New("path must use IPv4:PORT/udp or /icmp")
@@ -238,7 +268,7 @@ func ParsePath(raw string) (Path, error) {
 	if err != nil {
 		return Path{}, errors.New("server path address must be a nonzero IPv4")
 	}
-	path := Path{Server: address, ServerPort: serverPort, Transport: transportID, Interface: interfaceName}
+	path := Path{Server: address, ServerPort: serverPort, Transport: transportID, Interface: interfaceName, ReturnIP: returnIP}
 	if err := path.validate(); err != nil {
 		return Path{}, err
 	}

@@ -63,6 +63,68 @@ func TestRewriteBetweenTransportsKeepsChecksumsValid(t *testing.T) {
 	}
 }
 
+func TestRewriteUDPPartialLetsTheDeviceCompleteTheChecksum(t *testing.T) {
+	t.Parallel()
+
+	random := rand.New(rand.NewPCG(92, 2))
+	payload := randomWireGuardPayload(random, MessageHandshakeResponse, HandshakeResponseLength)
+	packet := buildPacket(t, IPProtocolUDP, payload)
+	l4 := packet[20:]
+	pseudo := wordAt(packet, 12) + wordAt(packet, 14) + wordAt(packet, 16) +
+		wordAt(packet, 18) + uint32(IPProtocolUDP) + uint32(len(l4))
+	binary.BigEndian.PutUint16(l4[6:8], checksumFold(pseudo))
+
+	returnIP := netip.MustParseAddr("192.0.2.10")
+	if err := RewriteUDPPartial(packet, returnIP, testClientIP, 9000, 51821, 2); err != nil {
+		t.Fatalf("RewriteUDPPartial: %v", err)
+	}
+	binary.BigEndian.PutUint16(l4[6:8], internetChecksum(l4))
+	assertChecksumsValid(t, packet)
+
+	parsed, err := ParseIPv4L4(packet)
+	if err != nil {
+		t.Fatalf("parse rewritten packet: %v", err)
+	}
+	if parsed.Source != returnIP || parsed.Destination != testClientIP ||
+		parsed.SourcePort != 9000 || parsed.DestinationPort != 51821 {
+		t.Fatalf("rewritten header = %#v", parsed)
+	}
+	if parsed.Payload[3] != 2 {
+		t.Fatalf("peer token byte = %d, want 2", parsed.Payload[3])
+	}
+}
+
+func TestRewriteICMPPartialLetsTheDeviceCompleteTheChecksum(t *testing.T) {
+	t.Parallel()
+
+	for _, length := range []int{HandshakeResponseLength, 1424} {
+		random := rand.New(rand.NewPCG(uint64(length), 3))
+		payload := randomWireGuardPayload(random, MessageHandshakeResponse, length)
+		packet := buildPacket(t, IPProtocolUDP, payload)
+		l4 := packet[20:]
+		pseudo := wordAt(packet, 12) + wordAt(packet, 14) + wordAt(packet, 16) +
+			wordAt(packet, 18) + uint32(IPProtocolUDP) + uint32(len(l4))
+		binary.BigEndian.PutUint16(l4[6:8], checksumFold(pseudo))
+
+		reflector := netip.MustParseAddr("192.0.2.10")
+		if err := RewriteICMPPartial(packet, testClientIP, reflector, 8, 9000, 2); err != nil {
+			t.Fatalf("RewriteICMPPartial: %v", err)
+		}
+		// The device writes the checksum at the UDP checksum offset.
+		binary.BigEndian.PutUint16(l4[6:8], internetChecksum(l4))
+		assertChecksumsValid(t, packet)
+
+		parsed, err := ParseIPv4L4(packet)
+		if err != nil {
+			t.Fatalf("parse rewritten packet: %v", err)
+		}
+		if parsed.Protocol != IPProtocolICMP || parsed.Destination != reflector ||
+			binary.BigEndian.Uint16(l4[4:6]) != 9000 || parsed.Payload[3] != 2 {
+			t.Fatalf("rewritten packet = %#v", parsed)
+		}
+	}
+}
+
 func TestRewriteChainKeepsChecksumsValid(t *testing.T) {
 	t.Parallel()
 

@@ -62,6 +62,13 @@ type mupPathGroupV1 struct {
 	Padding  uint8
 }
 
+type mupPathReturnV1 struct {
+	_        structs.HostLayout
+	ReturnIp uint32
+	Flags    uint8
+	Padding  [3]uint8
+}
+
 type mupPathStateV1 struct {
 	_           structs.HostLayout
 	Generation  uint32
@@ -104,7 +111,9 @@ type mupRegisteredPathValueV1 struct {
 	Client      mupClientKeyV1
 	ExpiresAtNs uint64
 	PathId      uint16
-	Padding     [6]uint8
+	Flags       uint8
+	Padding     uint8
+	ReturnIp    uint32
 }
 
 type mupRegistrationValueV1 struct {
@@ -167,6 +176,7 @@ const (
 	mupMapFreeTargetPorts          = "free_target_ports"
 	mupMapPathConfig               = "path_config"
 	mupMapPathGroups               = "path_groups"
+	mupMapPathReturns              = "path_returns"
 	mupMapPathState                = "path_state"
 	mupMapRegisteredPaths          = "registered_paths"
 	mupMapRegistrationByKey        = "registration_by_key"
@@ -247,6 +257,7 @@ type mupMapSpecs struct {
 	FreeTargetPorts       *ebpf.MapSpec `ebpf:"free_target_ports"`
 	PathConfig            *ebpf.MapSpec `ebpf:"path_config"`
 	PathGroups            *ebpf.MapSpec `ebpf:"path_groups"`
+	PathReturns           *ebpf.MapSpec `ebpf:"path_returns"`
 	PathState             *ebpf.MapSpec `ebpf:"path_state"`
 	RegisteredPaths       *ebpf.MapSpec `ebpf:"registered_paths"`
 	RegistrationByKey     *ebpf.MapSpec `ebpf:"registration_by_key"`
@@ -293,6 +304,7 @@ type mupMaps struct {
 	FreeTargetPorts       *ebpf.Map `ebpf:"free_target_ports"`
 	PathConfig            *ebpf.Map `ebpf:"path_config"`
 	PathGroups            *ebpf.Map `ebpf:"path_groups"`
+	PathReturns           *ebpf.Map `ebpf:"path_returns"`
 	PathState             *ebpf.Map `ebpf:"path_state"`
 	RegisteredPaths       *ebpf.Map `ebpf:"registered_paths"`
 	RegistrationByKey     *ebpf.Map `ebpf:"registration_by_key"`
@@ -315,6 +327,7 @@ func (m *mupMaps) Close() error {
 		m.FreeTargetPorts,
 		m.PathConfig,
 		m.PathGroups,
+		m.PathReturns,
 		m.PathState,
 		m.RegisteredPaths,
 		m.RegistrationByKey,

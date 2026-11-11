@@ -35,7 +35,6 @@ type ClientStatus struct {
 type Group struct {
 	ListenPort   uint16 `json:"listen_port"`
 	Mode         string `json:"mode"`
-	ReturnIP     string `json:"return_ip,omitempty"`
 	Paths        int    `json:"paths"`
 	HealthyPaths int    `json:"healthy_paths"`
 	Peers        int    `json:"peers"`
@@ -60,6 +59,7 @@ type Path struct {
 	Server     string    `json:"server"`
 	Port       uint16    `json:"port"`
 	Transport  string    `json:"transport"`
+	ReturnIP   string    `json:"return_ip,omitempty"`
 	Interface  string    `json:"interface,omitempty"`
 	Priority   uint8     `json:"priority"`
 	Healthy    bool      `json:"healthy"`

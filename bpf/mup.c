@@ -103,6 +103,14 @@ struct {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 8);
+	MUP_PINNED;
+	__type(key, __u32);
+	__type(value, struct path_return_v1);
+} path_returns SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 1);
 	MUP_PINNED;
 	__type(key, __u32);
@@ -332,10 +340,16 @@ static __always_inline struct path_config_v1 *select_client_path(
 	return bpf_map_lookup_elem(&path_config, &selected_index);
 }
 
-static __always_inline int is_direct_client_source(
+/*
+ * A downstream packet must come from a path of the group of its peer: from
+ * the server of the path, or from the return IP of the path if it has one.
+ */
+static __always_inline int is_client_downstream_source(
 	const struct mup_packet *packet, __u32 path_mask)
 {
 	struct path_config_v1 *path;
+	struct path_return_v1 *path_return;
+	__be32 expected_ip;
 	__u16 observed_port = packet->transport == MUP_TRANSPORT_UDP ?
 				  packet->source_port : packet->server_port;
 
@@ -345,9 +359,13 @@ static __always_inline int is_direct_client_source(
 			continue;
 		__u32 key = index;
 		path = bpf_map_lookup_elem(&path_config, &key);
-		if (!path)
+		path_return = bpf_map_lookup_elem(&path_returns, &key);
+		if (!path || !path_return)
 			continue;
-		if (path->destination_ip == packet->ipv4->source &&
+		expected_ip = (path_return->flags & MUP_FLAG_RETURN_IP) ?
+				      path_return->return_ip :
+				      path->destination_ip;
+		if (expected_ip == packet->ipv4->source &&
 		    path->server_port == observed_port &&
 		    path->transport == packet->transport)
 			return 1;
@@ -694,12 +712,8 @@ int mup_client_ingress(struct __sk_buff *skb)
 					    &reverse->endpoint.listen_port);
 		if (!group)
 			return count_and_drop(skb, MUP_DROP_DOWNSTREAM_SOURCE);
-		if (group->flags & MUP_FLAG_RETURN_IP) {
-			if (packet.ipv4->source != group->return_ip)
-				return count_and_drop(skb, MUP_DROP_DOWNSTREAM_SOURCE);
-		} else if (!is_direct_client_source(&packet, group->path_mask)) {
+		if (!is_client_downstream_source(&packet, group->path_mask))
 			return count_and_drop(skb, MUP_DROP_DOWNSTREAM_SOURCE);
-		}
 		reverse->last_seen_ns = bpf_ktime_get_ns();
 		forward = bpf_map_lookup_elem(&client_peer_by_endpoint,
 					      &reverse->endpoint);
@@ -773,6 +787,7 @@ int mup_server_ingress(struct __sk_buff *skb)
 	__u16 target_port = 0;
 	__u64 now;
 	int result;
+	int local;
 
 	result = parse_ipv4_l4(skb, &packet);
 	if (result != MUP_DROP_NONE)
@@ -808,17 +823,34 @@ int mup_server_ingress(struct __sk_buff *skb)
 		if (!forward || forward->target_port != packet.destination_port)
 			return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
 		forward->last_seen_ns = now;
-		if (mup_set_peer_token(&packet, reverse->route_key.peer_token))
+		/*
+		 * A target on this host answers from a local socket, so its
+		 * packets have CHECKSUM_PARTIAL, and the device completes the
+		 * checksum. The partial rewrites leave the checksum to it.
+		 */
+		local = configuration->target_ip == configuration->source_ip;
+		if (!local &&
+		    mup_set_peer_token(&packet, reverse->route_key.peer_token))
 			return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
 		if (reverse->route_value.transport == MUP_TRANSPORT_UDP) {
 			__be32 source_ip =
 				(reverse->route_value.flags & MUP_FLAG_RETURN_IP) ?
 				reverse->route_value.return_ip :
 				reverse->route_value.server_local_ip;
-			if (mup_rewrite_udp(&packet, source_ip,
-					    reverse->route_key.client.advertised_ip,
-					    reverse->route_value.server_port,
-					    registration->listen_port))
+			if (local)
+				result = mup_rewrite_udp_partial(
+					&packet, source_ip,
+					reverse->route_key.client.advertised_ip,
+					reverse->route_value.server_port,
+					registration->listen_port,
+					reverse->route_key.peer_token);
+			else
+				result = mup_rewrite_udp(
+					&packet, source_ip,
+					reverse->route_key.client.advertised_ip,
+					reverse->route_value.server_port,
+					registration->listen_port);
+			if (result)
 				return count_and_drop(skb, MUP_DROP_CHECKSUM);
 		} else if (reverse->route_value.transport == MUP_TRANSPORT_ICMP) {
 			__be32 source_ip;
@@ -835,9 +867,17 @@ int mup_server_ingress(struct __sk_buff *skb)
 					reverse->route_key.client.advertised_ip;
 				type = MUP_ICMP_ECHO_REPLY;
 			}
-			if (mup_rewrite_icmp(&packet, source_ip, destination_ip,
-					     type, reverse->route_value.server_port,
-					     (__u16)reverse->route_key.peer_token))
+			if (local)
+				result = mup_rewrite_icmp_partial(
+					&packet, source_ip, destination_ip, type,
+					reverse->route_value.server_port,
+					reverse->route_key.peer_token);
+			else
+				result = mup_rewrite_icmp(
+					&packet, source_ip, destination_ip, type,
+					reverse->route_value.server_port,
+					(__u16)reverse->route_key.peer_token);
+			if (result)
 				return count_and_drop(skb, MUP_DROP_CHECKSUM);
 		} else {
 			return count_and_drop(skb, MUP_DROP_TRANSPORT);
@@ -880,11 +920,11 @@ int mup_server_ingress(struct __sk_buff *skb)
 		return count_and_drop(skb, result);
 	observed.server_port = packet.server_port;
 	observed.transport = packet.transport;
-	observed.flags = registration->flags;
+	observed.flags = path->flags;
 	observed.path_id = path->path_id;
 	observed.client_source_ip = packet.ipv4->source;
 	observed.server_local_ip = packet.ipv4->destination;
-	observed.return_ip = registration->return_ip;
+	observed.return_ip = path->return_ip;
 	observed.ifindex = skb->ifindex;
 	result = get_or_create_server_route(&route_key, &observed, &target_port);
 	if (result != MUP_DROP_NONE)

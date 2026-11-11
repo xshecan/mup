@@ -20,8 +20,8 @@ import (
 const usage = `usage:
   mup --config FILE
   mup server -p PORT -r TARGET_IP:PORT [--control-socket PATH]
-  mup client -p LISTEN_PORT -u SERVER_IP[%IFACE]:PORT/udp|icmp [-u ...] -s CLIENT_IP [-r RETURN_IP]
-             [--mode fallback|balancer|burst] [--control-socket PATH]
+  mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT/udp|icmp [via RETURN_IP]" [-u ...] -s CLIENT_IP
+             [-r RETURN_IP] [--mode fallback|balancer|burst] [--control-socket PATH]
 `
 
 type applicationRunner func(context.Context, config.App) error
@@ -129,7 +129,7 @@ func parseClientArgs(args []string) (*config.Client, error) {
 	fs.IntVar(&port, "p", 0, "local WireGuard UDP listen port")
 	fs.Var(&rawPaths, "u", "server path as IPv4:PORT/udp or /icmp")
 	fs.StringVar(&advertisedText, "s", "", "advertised client IPv4")
-	fs.StringVar(&returnIPText, "r", "", "spoofed UDP source or ICMP reflector IPv4")
+	fs.StringVar(&returnIPText, "r", "", "return IPv4 of each -u path without its own via")
 	fs.StringVar(&modeName, "mode", "fallback", "fallback, balancer, or burst")
 	fs.StringVar(&controlSocket, "control-socket", api.DefaultClientSocket, "Unix socket for mupctl, or empty to disable")
 	if err := fs.Parse(args); err != nil {
@@ -163,12 +163,15 @@ func parseClientArgs(args []string) (*config.Client, error) {
 		if err != nil {
 			return nil, fmt.Errorf("client -u[%d]: %w", i, err)
 		}
+		if !path.ReturnIP.IsValid() {
+			path.ReturnIP = returnIP
+		}
 		paths = append(paths, path)
 	}
 	client := &config.Client{
 		AdvertisedIP:  advertised,
 		ControlSocket: controlSocket,
-		Groups:        []config.Group{{ListenPort: listenPort, Mode: mode, ReturnIP: returnIP, Paths: paths}},
+		Groups:        []config.Group{{ListenPort: listenPort, Mode: mode, Paths: paths}},
 	}
 	if err := client.Validate(); err != nil {
 		return nil, err

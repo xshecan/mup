@@ -13,11 +13,12 @@ type configurationMap interface {
 }
 
 type configurationMaps struct {
-	client configurationMap
-	server configurationMap
-	groups configurationMap
-	paths  configurationMap
-	state  configurationMap
+	client  configurationMap
+	server  configurationMap
+	groups  configurationMap
+	paths   configurationMap
+	returns configurationMap
+	state   configurationMap
 }
 
 func applyClientSettings(maps configurationMaps, settings ClientSettings) error {
@@ -32,6 +33,15 @@ func applyClientSettings(maps configurationMaps, settings ClientSettings) error 
 		return fmt.Errorf("disable client paths: %w", err)
 	}
 	for index, path := range paths {
+		var pathReturn mupPathReturnV1
+		if index < len(settings.Paths) {
+			if pathReturn, err = encodePathReturn(index, settings.Paths[index]); err != nil {
+				return err
+			}
+		}
+		if err := maps.returns.Update(uint32(index), pathReturn, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("update return IP of client path %d: %w", index, err)
+		}
 		if err := maps.paths.Update(uint32(index), path, ebpf.UpdateAny); err != nil {
 			return fmt.Errorf("update client path %d: %w", index, err)
 		}
@@ -83,10 +93,17 @@ func applyGroup(groups configurationMap, group GroupSettings) error {
 	return nil
 }
 
-func applyPath(paths configurationMap, slot int, path PathSettings) error {
+func applyPath(paths, returns configurationMap, slot int, path PathSettings) error {
 	encoded, err := encodePathSettings(slot, path)
 	if err != nil {
 		return err
+	}
+	pathReturn, err := encodePathReturn(slot, path)
+	if err != nil {
+		return err
+	}
+	if err := returns.Update(uint32(slot), pathReturn, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("update return IP of client path %d: %w", slot, err)
 	}
 	if err := paths.Update(uint32(slot), encoded, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("update client path %d: %w", slot, err)
@@ -96,12 +113,15 @@ func applyPath(paths configurationMap, slot int, path PathSettings) error {
 
 // clearPath writes an empty entry. The client program skips a slot without a
 // destination address.
-func clearPath(paths configurationMap, slot int) error {
+func clearPath(paths, returns configurationMap, slot int) error {
 	if slot < 0 || slot >= config.MaxPaths {
 		return fmt.Errorf("path slot %d is outside 0 to %d", slot, config.MaxPaths-1)
 	}
 	if err := paths.Update(uint32(slot), mupPathConfigV1{}, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("clear client path %d: %w", slot, err)
+	}
+	if err := returns.Update(uint32(slot), mupPathReturnV1{}, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("clear return IP of client path %d: %w", slot, err)
 	}
 	return nil
 }

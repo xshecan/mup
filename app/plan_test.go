@@ -49,8 +49,8 @@ func TestBuildClientPlan(t *testing.T) {
 			{ListenPort: 51820, Mode: config.ModeFallback, Paths: []config.Path{
 				{Server: netip.MustParseAddr("198.51.100.1"), ServerPort: 5000, Transport: protocol.TransportUDP, Interface: "eth9"},
 			}},
-			{ListenPort: 51821, Mode: config.ModeBurst, ReturnIP: netip.MustParseAddr("1.1.1.1"), Paths: []config.Path{
-				{Server: netip.MustParseAddr("198.51.100.2"), ServerPort: 6000, Transport: protocol.TransportICMP},
+			{ListenPort: 51821, Mode: config.ModeBurst, Paths: []config.Path{
+				{Server: netip.MustParseAddr("198.51.100.2"), ServerPort: 6000, Transport: protocol.TransportICMP, ReturnIP: netip.MustParseAddr("1.1.1.1")},
 			}},
 		},
 	}}, 42, resolver)
@@ -71,12 +71,12 @@ func TestBuildClientPlan(t *testing.T) {
 	}
 	want := []dataplane.GroupSettings{
 		{ListenPort: 51820, Mode: config.ModeFallback, PathMask: 0b01},
-		{ListenPort: 51821, Mode: config.ModeBurst, ReturnIP: netip.MustParseAddr("1.1.1.1"), PathMask: 0b10},
+		{ListenPort: 51821, Mode: config.ModeBurst, PathMask: 0b10},
 	}
 	if !slices.Equal(plan.client.Groups, want) {
 		t.Fatalf("groups = %#v, want %#v", plan.client.Groups, want)
 	}
-	if got := plan.client.Paths[1]; got.ServerPort != 6000 || got.Priority != 1 || got.Ifindex != 7 {
+	if got := plan.client.Paths[1]; got.ServerPort != 6000 || got.Priority != 1 || got.Ifindex != 7 || got.ReturnIP != netip.MustParseAddr("1.1.1.1") {
 		t.Fatalf("second path = %#v", got)
 	}
 }

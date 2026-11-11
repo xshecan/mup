@@ -3,20 +3,22 @@ client:
   # The address of this host that the servers send replies to.
   advertise: 192.0.2.10
 
-  # Each group is one WireGuard target. Peers select a group with the listen
-  # port in their Endpoint. A client has at most 8 paths in all groups.
-  groups:
+  # Each server entry is one WireGuard target. Peers select an entry with the
+  # listen port in their Endpoint. A client has at most 8 routes in all entries.
+  servers:
     # Peers that use port 51820 reach the WireGuard target behind these servers.
     - port: 51820
       mode: fallback
-      paths:
+      routes:
         - 203.0.113.5:5000/udp
         - 203.0.113.6:5000/icmp
 
-    # Peers that use port 51821 reach another WireGuard target. The return_ip
-    # key is optional, and each group has its own value.
+    # Peers that use port 51821 reach another WireGuard target. "via" is
+    # optional, and each route has its own value. A UDP route gets its replies
+    # with the via address as the source. An ICMP route gets its replies from
+    # the via address, which answers an Echo Request of the server.
     - port: 51821
       mode: burst
-      return_ip: 1.1.1.1
-      paths:
-        - 198.51.100.20:6000/udp
+      routes:
+        - 198.51.100.20:6000/udp via 1.1.1.1
+        - 198.51.100.20:6000/icmp via 9.9.9.9

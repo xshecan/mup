@@ -30,7 +30,7 @@ This document describes version 1 of the MUP protocol as the code implements it.
 | WireGuard peer | A WireGuard endpoint that sends its packets to the MUP client. |
 | WireGuard target | The one WireGuard endpoint behind the MUP server. The server `-r` flag sets it. |
 | Path | One way from the client to a server. One client `-u` flag sets one path. |
-| Group | One listen port with its mode, its optional return IP, and its paths. |
+| Group | One listen port with its mode and its paths. Each path has an optional return IP. |
 | Port | The number in `-u SERVER:PORT` and in server `-p`. For UDP, it is the destination port. For ICMP, it is the Echo identifier. |
 | Listen port | The client `-p` port of a group. The peers send to it, and downstream packets arrive on it. |
 | Advertised IP | The client address in client `-s`. The server sends all replies to it. |
@@ -62,11 +62,11 @@ MUP has two eBPF programs. `mup_client_ingress` runs on the client host, and `mu
   <img alt="Two path groups and their targets" src=".docs/images/groups-light.svg">
 </picture>
 
-A client can serve several WireGuard targets, with one group for each. A group joins one listen port to a mode, an optional return IP, and a set of paths. The port that a peer sends to selects its group. All servers of a group must forward to the same target, because a WireGuard handshake fails against another identity.
+A client can serve several WireGuard targets, with one group for each. A group joins one listen port to a mode and a set of paths, and each path has an optional return IP. The port that a peer sends to selects its group. All servers of a group must forward to the same target, because a WireGuard handshake fails against another identity.
 
 The groups share the advertised IP, the instance nonce, the eight path slots, and the pool of tokens. A token is unique in the client, so a downstream token gives the peer and its group. The client never moves a peer to another group.
 
-The client configuration rejects one server address and port in two groups. The server keeps one return IP and one listen port for each client key. Two groups on one server thus overwrite these values.
+The client configuration rejects one server address and port in two groups. The server keeps one listen port for each client key. Two groups on one server thus overwrite this value. The server keeps the return IP of each registered path.
 
 ## The peer token
 
@@ -91,6 +91,8 @@ A valid checksum stays valid after a rewrite, and a corrupt checksum stays corru
 
 If a UDP packet arrives without a checksum, MUP drops it and counts reason 20. A zero checksum field gives no payload sum to update. WireGuard implementations always send UDP checksums.
 
+A target on the server host, for example `127.0.0.1`, answers from a local socket. Its replies have a partial checksum (`CHECKSUM_PARTIAL`): the UDP checksum field holds only the pseudo-header sum, and the network device adds the UDP header and the payload when it sends the packet. The server detects this case when the target IP equals the source IP of the target route. On a UDP path, the server writes the new pseudo-header sum and leaves the rest to the device. On an ICMP path, the device still writes the checksum at the UDP checksum offset, which is the Echo sequence field. A one's complement checksum is valid when all words add up to 0xffff, wherever the checksum word is. So the server clears the checksum and the sequence fields, and the device makes the ICMP checksum valid. The client does not read the sequence, because the peer token is in the WireGuard bytes.
+
 `protocol/rewrite.go` is a copy of the algorithm in `bpf/include/rewrite.h`. Its tests make sure that each incremental result matches a full checksum of the packet.
 
 ## Transports and return modes
@@ -100,24 +102,24 @@ If a UDP packet arrives without a checksum, MUP drops it and counts reason 20. A
   <img alt="UDP and ICMP paths with direct or reflected replies" src=".docs/images/return-modes-light.svg">
 </picture>
 
-Each path uses UDP or ICMP. The return IP of a group sets the return mode for all paths of that group. The table shows the outer headers of each packet. In the table, "listen" is the listen port, "port" is the port of the path, and "token" is the peer token.
+Each path uses UDP or ICMP. The return IP of a path sets the return mode of that path. The table shows the outer headers of each packet. In the table, "listen" is the listen port, "port" is the port of the path, and "token" is the peer token.
 
 | Direction | Mode | Source | Destination | Transport header |
 | --- | --- | --- | --- | --- |
 | Upstream | UDP | `-s`:listen | server:port | UDP |
 | Upstream | ICMP | `-s` | server | Echo Request, identifier = port, sequence = token |
 | Downstream | UDP direct | server:port | `-s`:listen | UDP |
-| Downstream | UDP reflected | `-r`:port | `-s`:listen | UDP with a spoofed source |
+| Downstream | UDP reflected | return IP:port | `-s`:listen | UDP with a spoofed source |
 | Downstream | ICMP direct | server | `-s` | Echo Reply, identifier = port, sequence = token |
-| Downstream | ICMP reflected | `-s` | `-r` | Echo Request, identifier = port, sequence = token |
+| Downstream | ICMP reflected | `-s` | return IP | Echo Request, identifier = port, sequence = token |
 
 In a downstream packet, "server" is the server address that received the latest upstream packet of the route.
 
-In the UDP reflected mode, the `-r` host never receives the packet. The server only writes the `-r` address as the source. The networks between the server and the client must accept a spoofed source. A network that filters source addresses (BCP 38) drops these packets.
+In the UDP reflected mode, the return IP host never receives the packet. The server only writes the return IP as the source. The networks between the server and the client must accept a spoofed source. A network that filters source addresses (BCP 38) drops these packets.
 
 In the ICMP reflected mode, the server sends an Echo Request from `-s` to the reflector. The reflector answers with an Echo Reply to `-s`, which is the client. Any host that answers ping can be the reflector. The network between the server and the reflector must accept the spoofed source.
 
-The client accepts a downstream packet only from a source that the group of the peer expects. If the group has a return IP, the source must equal it. If the group has no return IP, the source must be the server address of a group path, with the same port and transport. The client drops any other downstream packet and counts reason 22.
+The client accepts a downstream packet only from a source that a path of the group of the peer expects, with the port and the transport of that path. If the path has a return IP, the source must equal it. If the path has no return IP, the source must be the server address of the path. The client drops any other downstream packet and counts reason 22.
 
 ## Packet flow
 
@@ -203,7 +205,7 @@ The server does not select paths. It replies on the path of the latest upstream 
 
 ### Registration
 
-The client registers each path on its own. It sends a REGISTER frame from `-s` to the server address of the path. A UDP path sends the frame in a UDP datagram to the server port. An ICMP path sends the frame as the payload of an Echo Request, with the port as identifier. The frame holds the listen port and the return IP of the group of the path. The TCX programs pass these frames to the kernel, and the Go control plane answers them.
+The client registers each path on its own. It sends a REGISTER frame from `-s` to the server address of the path. A UDP path sends the frame in a UDP datagram to the server port. An ICMP path sends the frame as the payload of an Echo Request, with the port as identifier. The frame holds the listen port of the group and the return IP of the path. The TCX programs pass these frames to the kernel, and the Go control plane answers them.
 
 For each REGISTER, the server makes sure that all of these conditions are true:
 
@@ -243,7 +245,7 @@ The control frame is 48 bytes long, and all integers are big-endian.
 | 16 | 2 | server port | The server port. |
 | 18 | 2 | reserved | Zero. |
 | 20 | 4 | advertised IP | The client `-s` address. |
-| 24 | 4 | return IP | The return IP of the group of the path, or zero. |
+| 24 | 4 | return IP | The return IP of the path, or zero. |
 | 28 | 8 | instance nonce | The nonzero random number of the client process. |
 | 36 | 4 | sequence | A counter that goes up by one with each REGISTER on the path. |
 | 40 | 4 | lease seconds | 30. |
@@ -264,15 +266,16 @@ Pinned BPF maps hold all dataplane state. Go writes the configuration and the re
 | Map | Type | Capacity | Key and value | Writer |
 | --- | --- | ---: | --- | --- |
 | `client_config` | array | 1 | Nonce, `-s`, and generation. | Go |
-| `path_groups` | hash | 8 | Listen port to return IP, flags, mode, and path mask. | Go |
+| `path_groups` | hash | 8 | Listen port to mode and path mask. The return IP and flags fields are not used. | Go |
 | `path_config` | array | 8 | Destination, source, interface, port, transport, and priority of each path. | Go |
+| `path_returns` | array | 8 | Return IP and flags of each path. | Go |
 | `path_state` | array | 1 | Healthy mask and generation. | Go |
 | `client_peer_by_endpoint` | hash | 4096 | Peer endpoint to token and last-seen time. | Program |
 | `client_endpoint_by_token` | hash | 4096 | Token to peer endpoint, interface, and last-seen time. | Program |
 | `free_peer_tokens` | queue | 4095 | Unused tokens. | Both |
 | `server_config` | array | 1 | Target, source IP, interface, and port. | Go |
-| `registration_by_key` | hash | 4096 | Client key to lease end, return IP, listen port, and flags. | Go |
-| `registered_paths` | hash | 32768 | Source IP, local IP, port, and transport to client key. | Go |
+| `registration_by_key` | hash | 4096 | Client key to lease end and listen port, with the return IP and flags of the latest REGISTER. The programs do not read the return IP. | Go |
+| `registered_paths` | hash | 32768 | Source IP, local IP, port, and transport to client key, return IP, and flags. | Go |
 | `server_route_by_key` | hash | 41000 | Client key and token to target port and return path. | Program |
 | `server_route_by_port` | hash | 41000 | Target port to route key and return path. | Program |
 | `free_target_ports` | queue | 41000 | Unused target ports. | Both |
@@ -437,7 +440,7 @@ MUP has no keys and no authentication of its own. It relies on these facts:
 
 - WireGuard authenticates its handshake and its encrypted payload end to end.
 - The server accepts data only on a live registered path, and the path gives the client key.
-- The client accepts downstream packets only from the servers of the group of the peer, or only from its return IP.
+- The client accepts downstream packets only from the paths of the group of the peer: from the server of a path, or from the return IP of a path.
 - The target accepts only valid WireGuard messages.
 
 A host can spoof the source address of a registered client. That host can then register paths for the client, change its return mode, and drop or misroute its traffic. It cannot read or forge WireGuard payloads. Use MUP only on networks where you control the hosts and the routing.
@@ -453,4 +456,4 @@ The duplicate cache is a filter for burst copies, not a replay defense. WireGuar
 - Each active client of a server needs its own advertised IP.
 - MUP attaches only to the interfaces that are up at start.
 - The server treats every UDP packet from the target address and port to its source IP as a reply. Do not run other clients of the same target on the server host with that source IP.
-- MUP needs a complete transport checksum on each input packet. Local traffic through a veth pair with checksum offload can carry an unfinished checksum, and MUP does not support it.
+- MUP needs a complete transport checksum on each input packet. The one exception is a reply of a target on the server host, which the server handles as a partial checksum. Other local traffic through a veth pair with checksum offload can carry an unfinished checksum, and MUP does not support it.

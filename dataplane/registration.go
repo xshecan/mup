@@ -102,6 +102,8 @@ func encodeRegistrationSettings(settings RegistrationSettings) (
 		Client:      key,
 		ExpiresAtNs: settings.ExpiresAtNS,
 		PathId:      settings.Path.PathID,
+		Flags:       flags,
+		ReturnIp:    returnIP,
 	}
 	return key, value, pathKey, pathValue, nil
 }

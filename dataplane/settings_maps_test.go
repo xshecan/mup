@@ -25,10 +25,11 @@ func TestApplyClientSettingsPublishesHealthyStateLast(t *testing.T) {
 
 	var log []string
 	maps := configurationMaps{
-		client: recordingMap{name: "client", log: &log},
-		groups: recordingMap{name: "group", log: &log},
-		paths:  recordingMap{name: "path", log: &log},
-		state:  recordingMap{name: "state", log: &log},
+		client:  recordingMap{name: "client", log: &log},
+		groups:  recordingMap{name: "group", log: &log},
+		paths:   recordingMap{name: "path", log: &log},
+		returns: recordingMap{name: "return", log: &log},
+		state:   recordingMap{name: "state", log: &log},
 	}
 	settings := ClientSettings{
 		InstanceNonce: 1,
@@ -46,13 +47,16 @@ func TestApplyClientSettingsPublishesHealthyStateLast(t *testing.T) {
 	if err := applyClientSettings(maps, settings); err != nil {
 		t.Fatalf("applyClientSettings: %v", err)
 	}
-	if len(log) != 12 {
-		t.Fatalf("update count = %d, want 12: %v", len(log), log)
+	if len(log) != 20 {
+		t.Fatalf("update count = %d, want 20: %v", len(log), log)
 	}
 	if log[0] != "state" || log[len(log)-1] != "state" {
 		t.Fatalf("state publication order = %v", log)
 	}
-	if log[9] != "group" || log[10] != "client" {
+	if log[1] != "return" || log[2] != "path" {
+		t.Fatalf("return IP and path update order = %v", log)
+	}
+	if log[17] != "group" || log[18] != "client" {
 		t.Fatalf("group and client config update order = %v", log)
 	}
 }

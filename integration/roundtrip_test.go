@@ -133,11 +133,11 @@ func TestPrivilegedTwoTargets(t *testing.T) {
 	content := fmt.Sprintf(`client:
   advertise: 10.210.1.1
   control_socket: %s
-  groups:
+  servers:
     - port: 51820
-      paths: [10.210.1.2:5000/udp]
+      routes: [10.210.1.2:5000/udp]
     - port: 51821
-      paths: [10.210.5.2:6000/icmp]
+      routes: [10.210.5.2:6000/icmp]
 `, filepath.Join(directory, "mup.sock"))
 	if err := os.WriteFile(configuration, []byte(content), 0o600); err != nil {
 		t.Fatalf("write client configuration: %v", err)

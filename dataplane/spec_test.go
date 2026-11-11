@@ -38,6 +38,7 @@ func TestMupCollectionSpec(t *testing.T) {
 		"server_route_by_port":     {ebpf.Hash, 41000},
 		"free_target_ports":        {ebpf.Queue, 41000},
 		"path_config":              {ebpf.Array, 8},
+		"path_returns":             {ebpf.Array, 8},
 		"path_groups":              {ebpf.Hash, 8},
 		"path_state":               {ebpf.Array, 1},
 		"duplicate_cache":          {ebpf.LRUHash, 16384},

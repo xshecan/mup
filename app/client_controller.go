@@ -179,7 +179,7 @@ func (c *clientController) registrationLocked(group *pathGroup, path config.Path
 	return pathRegistration{
 		advertisedIP: c.client.AdvertisedIP,
 		listenPort:   group.settings.ListenPort,
-		returnIP:     group.settings.ReturnIP,
+		returnIP:     path.ReturnIP,
 		path:         path,
 		nonce:        c.nonce,
 		pathID:       uint16(slot),
@@ -290,7 +290,7 @@ func (c *clientController) AddPath(raw string, listenPort uint16) (api.Path, err
 			}
 			continue
 		}
-		if current.path == path {
+		if current.path.Route() == path.Route() {
 			return api.Path{}, conflict("path %s already exists as path %d", path, index)
 		}
 		if current.group != group && current.path.Endpoint() == path.Endpoint() {
@@ -326,6 +326,7 @@ func (c *clientController) AddPath(raw string, listenPort uint16) (api.Path, err
 		ServerPort:    path.ServerPort,
 		Transport:     path.Transport,
 		Priority:      priority,
+		ReturnIP:      path.ReturnIP,
 	}
 	if err := c.dataplane.SetPath(slot, settings); err != nil {
 		_ = conn.Close()
@@ -431,9 +432,6 @@ func (c *clientController) groupsLocked(paths []api.Path, routes []dataplane.Cli
 	groups := make([]api.Group, 0, len(c.groups))
 	for _, group := range c.groups {
 		converted := api.Group{ListenPort: group.settings.ListenPort, Mode: group.settings.Mode.String()}
-		if group.settings.ReturnIP.IsValid() {
-			converted.ReturnIP = group.settings.ReturnIP.String()
-		}
 		for _, path := range paths {
 			if path.ListenPort != converted.ListenPort {
 				continue
@@ -495,12 +493,17 @@ func (c *clientController) pathLocked(slot int, inUse [config.MaxPaths]bool) api
 	if name == "" {
 		name = c.interfaceName(current.ifindex)
 	}
+	var returnIP string
+	if current.path.ReturnIP.IsValid() {
+		returnIP = current.path.ReturnIP.String()
+	}
 	return api.Path{
 		ID:         slot,
 		ListenPort: current.group.settings.ListenPort,
 		Server:     current.path.Server.String(),
 		Port:       current.path.ServerPort,
 		Transport:  current.path.Transport.String(),
+		ReturnIP:   returnIP,
 		Interface:  name,
 		Priority:   current.priority,
 		Healthy:    health.Healthy,

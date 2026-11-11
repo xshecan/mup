@@ -69,12 +69,11 @@ func printGroups(w io.Writer, groups []api.Group) {
 		return
 	}
 	table := newTable(w)
-	row(table, "GROUP", "MODE", "RETURN IP", "PATHS", "PEERS")
+	row(table, "GROUP", "MODE", "PATHS", "PEERS")
 	for _, group := range groups {
 		row(table,
 			strconv.Itoa(int(group.ListenPort)),
 			group.Mode,
-			orNone(group.ReturnIP),
 			fmt.Sprintf("%d/%d healthy", group.HealthyPaths, group.Paths),
 			strconv.Itoa(group.Peers),
 		)
@@ -88,7 +87,7 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 		return
 	}
 	table := newTable(w)
-	header := []string{"ID", "GROUP", "SERVER", "TRANSPORT", "INTERFACE", "STATUS", "IN USE", "LAST ACK", "RTT"}
+	header := []string{"ID", "GROUP", "SERVER", "TRANSPORT", "VIA", "INTERFACE", "STATUS", "IN USE", "LAST ACK", "RTT"}
 	if wide {
 		header = append(header, "PRIORITY", "MISSES")
 	}
@@ -103,6 +102,7 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 			strconv.Itoa(int(path.ListenPort)),
 			fmt.Sprintf("%s:%d", path.Server, path.Port),
 			path.Transport,
+			orDash(path.ReturnIP),
 			orDash(path.Interface),
 			healthText(path.Healthy),
 			yesNo(path.InUse),
@@ -290,13 +290,6 @@ func yesNo(value bool) string {
 func orDash(value string) string {
 	if value == "" {
 		return "-"
-	}
-	return value
-}
-
-func orNone(value string) string {
-	if value == "" {
-		return "none"
 	}
 	return value
 }

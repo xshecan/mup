@@ -24,7 +24,6 @@ type ClientSettings struct {
 type GroupSettings struct {
 	ListenPort uint16
 	Mode       config.Mode
-	ReturnIP   netip.Addr
 	PathMask   uint8
 }
 
@@ -35,6 +34,7 @@ type PathSettings struct {
 	ServerPort    uint16
 	Transport     protocol.TransportID
 	Priority      uint8
+	ReturnIP      netip.Addr
 }
 
 type ServerSettings struct {
@@ -119,16 +119,20 @@ func encodeGroupSettings(group GroupSettings) (mupPathGroupV1, error) {
 	if group.PathMask == 0 {
 		return mupPathGroupV1{}, fmt.Errorf("path group of listen port %d has no paths", group.ListenPort)
 	}
-	encoded := mupPathGroupV1{Mode: uint8(group.Mode), PathMask: group.PathMask}
-	if group.ReturnIP.IsValid() {
-		returnIP, err := requiredIPv4Word(group.ReturnIP, "path group return IP")
-		if err != nil {
-			return mupPathGroupV1{}, err
-		}
-		encoded.ReturnIp = returnIP
-		encoded.Flags = protocol.ControlFlagReturnIP
+	return mupPathGroupV1{Mode: uint8(group.Mode), PathMask: group.PathMask}, nil
+}
+
+// encodePathReturn encodes the return IP of a path slot. A path without a
+// return IP has an empty entry.
+func encodePathReturn(index int, path PathSettings) (mupPathReturnV1, error) {
+	if !path.ReturnIP.IsValid() {
+		return mupPathReturnV1{}, nil
 	}
-	return encoded, nil
+	returnIP, err := requiredIPv4Word(path.ReturnIP, fmt.Sprintf("path %d return IP", index))
+	if err != nil {
+		return mupPathReturnV1{}, err
+	}
+	return mupPathReturnV1{ReturnIp: returnIP, Flags: protocol.ControlFlagReturnIP}, nil
 }
 
 func encodePathSettings(index int, path PathSettings) (mupPathConfigV1, error) {

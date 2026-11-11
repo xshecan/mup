@@ -26,7 +26,7 @@ func testClientSettings() ClientSettings {
 		Generation:    7,
 		HealthyMask:   0b111,
 		Groups: []GroupSettings{
-			{ListenPort: 51820, Mode: config.ModeBurst, ReturnIP: netip.MustParseAddr("1.1.1.1"), PathMask: 0b011},
+			{ListenPort: 51820, Mode: config.ModeBurst, PathMask: 0b011},
 			{ListenPort: 51821, Mode: config.ModeFallback, PathMask: 0b100},
 		},
 		Paths: []PathSettings{
@@ -51,8 +51,7 @@ func TestEncodeClientSettings(t *testing.T) {
 		t.Fatalf("advertised IP bytes = %v", got)
 	}
 	first := groups[51820]
-	if first.Mode != uint8(config.ModeBurst) || first.Flags != 1 || first.PathMask != 0b011 ||
-		nativeIPv4Bytes(first.ReturnIp) != [4]byte{1, 1, 1, 1} {
+	if first.Mode != uint8(config.ModeBurst) || first.PathMask != 0b011 {
 		t.Fatalf("first group = %#v", first)
 	}
 	second := groups[51821]
@@ -78,7 +77,6 @@ func TestEncodeClientSettingsRejectsInvalidGroups(t *testing.T) {
 		"shared path":      func(s *ClientSettings) { s.Groups[1].PathMask = 0b110 },
 		"path in no group": func(s *ClientSettings) { s.Groups[0].PathMask = 0b001 },
 		"unconfigured bit": func(s *ClientSettings) { s.Groups[1].PathMask = 0b1100 },
-		"bad return IP":    func(s *ClientSettings) { s.Groups[0].ReturnIP = netip.MustParseAddr("0.0.0.0") },
 	}
 	for name, change := range tests {
 		t.Run(name, func(t *testing.T) {

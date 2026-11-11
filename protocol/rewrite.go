@@ -30,6 +30,88 @@ func RewriteUDP(packet []byte, source, destination netip.Addr, sourcePort, desti
 	return nil
 }
 
+// RewriteUDPPartial rewrites a UDP packet with CHECKSUM_PARTIAL in place. A
+// local socket sends such a packet: its checksum field holds only the
+// pseudo-header sum, and the device adds the UDP header and the payload. The
+// rewrite stores the peer token and writes the new pseudo-header sum.
+func RewriteUDPPartial(packet []byte, source, destination netip.Addr, sourcePort, destinationPort uint16, token uint32) error {
+	if !source.Is4() || !destination.Is4() {
+		return ErrRewriteAddress
+	}
+	if token == 0 || token > MaxPeerToken {
+		return ErrPeerTokenRange
+	}
+	parsed, err := ParseIPv4L4(packet)
+	if err != nil {
+		return err
+	}
+	if parsed.Protocol != IPProtocolUDP {
+		return ErrRewriteChecksum
+	}
+	if len(parsed.Payload) < 4 {
+		return ErrWireGuardLength
+	}
+	l4 := packet[20 : 28+len(parsed.Payload)]
+	parsed.Payload[1] = byte(token >> 16)
+	parsed.Payload[2] = byte(token >> 8)
+	parsed.Payload[3] = byte(token)
+	sourceBytes := source.As4()
+	destinationBytes := destination.As4()
+	copy(packet[12:16], sourceBytes[:])
+	copy(packet[16:20], destinationBytes[:])
+	binary.BigEndian.PutUint16(l4[0:2], sourcePort)
+	binary.BigEndian.PutUint16(l4[2:4], destinationPort)
+	binary.BigEndian.PutUint16(l4[4:6], uint16(len(l4)))
+	sum := wordAt(packet, 12) + wordAt(packet, 14) + wordAt(packet, 16) +
+		wordAt(packet, 18) + uint32(IPProtocolUDP) + uint32(len(l4))
+	binary.BigEndian.PutUint16(l4[6:8], checksumFold(sum))
+	packet[10] = 0
+	packet[11] = 0
+	binary.BigEndian.PutUint16(packet[10:12], internetChecksum(packet[:20]))
+	return nil
+}
+
+// RewriteICMPPartial rewrites a UDP packet with CHECKSUM_PARTIAL in place into
+// an ICMP Echo packet. The device writes the checksum at the UDP checksum
+// offset, which is the ICMP sequence field, so the rewrite clears the sequence
+// and the checksum. The device then makes the sum of all ICMP words valid.
+func RewriteICMPPartial(packet []byte, source, destination netip.Addr, icmpType uint8, identifier uint16, token uint32) error {
+	if !source.Is4() || !destination.Is4() {
+		return ErrRewriteAddress
+	}
+	if token == 0 || token > MaxPeerToken {
+		return ErrPeerTokenRange
+	}
+	parsed, err := ParseIPv4L4(packet)
+	if err != nil {
+		return err
+	}
+	if parsed.Protocol != IPProtocolUDP {
+		return ErrRewriteChecksum
+	}
+	if len(parsed.Payload) < 4 {
+		return ErrWireGuardLength
+	}
+	l4 := packet[20 : 28+len(parsed.Payload)]
+	parsed.Payload[1] = byte(token >> 16)
+	parsed.Payload[2] = byte(token >> 8)
+	parsed.Payload[3] = byte(token)
+	sourceBytes := source.As4()
+	destinationBytes := destination.As4()
+	copy(packet[12:16], sourceBytes[:])
+	copy(packet[16:20], destinationBytes[:])
+	packet[9] = IPProtocolICMP
+	l4[0] = icmpType
+	l4[1] = 0
+	binary.BigEndian.PutUint16(l4[2:4], 0)
+	binary.BigEndian.PutUint16(l4[4:6], identifier)
+	binary.BigEndian.PutUint16(l4[6:8], 0)
+	packet[10] = 0
+	packet[11] = 0
+	binary.BigEndian.PutUint16(packet[10:12], internetChecksum(packet[:20]))
+	return nil
+}
+
 // RewriteICMP rewrites a UDP or ICMP packet in place into an ICMP Echo packet.
 func RewriteICMP(packet []byte, source, destination netip.Addr, icmpType uint8, identifier, sequence uint16) error {
 	l4, payloadSum, err := beginRewrite(packet, source, destination)

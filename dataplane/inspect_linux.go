@@ -18,7 +18,7 @@ func (r *Runtime) SetPath(slot int, path PathSettings) error {
 	if r.closed {
 		return errors.New("set path: MUP dataplane is closed")
 	}
-	return applyPath(r.objects.PathConfig, slot, path)
+	return applyPath(r.objects.PathConfig, r.objects.PathReturns, slot, path)
 }
 
 // ClearPath removes the configuration of one client path slot.
@@ -28,10 +28,10 @@ func (r *Runtime) ClearPath(slot int) error {
 	if r.closed {
 		return errors.New("clear path: MUP dataplane is closed")
 	}
-	return clearPath(r.objects.PathConfig, slot)
+	return clearPath(r.objects.PathConfig, r.objects.PathReturns, slot)
 }
 
-// SetGroup writes the mode, the return IP, and the path mask of one group.
+// SetGroup writes the mode and the path mask of one group.
 func (r *Runtime) SetGroup(group GroupSettings) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

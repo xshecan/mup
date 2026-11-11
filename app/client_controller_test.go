@@ -351,8 +351,7 @@ func TestSetModeChangesInUsePaths(t *testing.T) {
 func twoGroupsFixture(t *testing.T) controllerFixture {
 	t.Helper()
 	first := testGroup(t, 51820, config.ModeFallback, "198.51.100.1:5000/udp", "198.51.100.2:5000/icmp")
-	second := testGroup(t, 51821, config.ModeBurst, "203.0.113.1:6000/udp", "203.0.113.2:6000/udp")
-	second.ReturnIP = netip.MustParseAddr("1.1.1.1")
+	second := testGroup(t, 51821, config.ModeBurst, "203.0.113.1:6000/udp via 1.1.1.1", "203.0.113.2:6000/udp via 1.1.1.1")
 	return newGroupsFixture(t, first, second)
 }
 
@@ -425,17 +424,20 @@ func TestAddPathGoesToTheNamedGroup(t *testing.T) {
 	if _, err := fixture.controller.AddPath("203.0.113.1:6000/icmp", 51820); statusOf(err) != http.StatusConflict {
 		t.Fatalf("AddPath of a server of another group error = %v, want status 409", err)
 	}
-	added, err := fixture.controller.AddPath("198.51.100.3:7000/udp", 51821)
+	added, err := fixture.controller.AddPath("198.51.100.3:7000/udp via 192.0.2.77", 51821)
 	if err != nil {
 		t.Fatalf("AddPath: %v", err)
 	}
-	if added.ID != 4 || added.ListenPort != 51821 || added.Port != 7000 {
+	if added.ID != 4 || added.ListenPort != 51821 || added.Port != 7000 || added.ReturnIP != "192.0.2.77" {
 		t.Fatalf("added path = %#v", added)
 	}
-	if got := fixture.dataplane.groups[51821]; got.PathMask != 0b11100 || got.ReturnIP != netip.MustParseAddr("1.1.1.1") || got.Mode != config.ModeBurst {
+	if got := fixture.dataplane.groups[51821]; got.PathMask != 0b11100 || got.Mode != config.ModeBurst {
 		t.Fatalf("group settings = %#v", got)
 	}
-	if got := fixture.registrations[4]; got.listenPort != 51821 || !got.returnIP.IsValid() {
+	if got := fixture.dataplane.paths[4]; got.ReturnIP != netip.MustParseAddr("192.0.2.77") {
+		t.Fatalf("path settings = %#v", got)
+	}
+	if got := fixture.registrations[4]; got.listenPort != 51821 || got.returnIP != netip.MustParseAddr("192.0.2.77") {
 		t.Fatalf("registration = %#v", got)
 	}
 }
@@ -476,7 +478,7 @@ func TestStatusReportsEachGroup(t *testing.T) {
 	}
 	want := []api.Group{
 		{ListenPort: 51820, Mode: "fallback", Paths: 2, HealthyPaths: 2, Peers: 1},
-		{ListenPort: 51821, Mode: "burst", ReturnIP: "1.1.1.1", Paths: 2, HealthyPaths: 2, Peers: 2},
+		{ListenPort: 51821, Mode: "burst", Paths: 2, HealthyPaths: 2, Peers: 2},
 	}
 	if !slices.Equal(status.Client.Groups, want) {
 		t.Fatalf("groups = %#v, want %#v", status.Client.Groups, want)

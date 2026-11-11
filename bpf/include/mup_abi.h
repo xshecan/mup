@@ -129,7 +129,9 @@ struct registered_path_value_v1 {
 	struct client_key_v1 client;
 	__u64 expires_at_ns;
 	__be16 path_id;
-	__u8 padding[6];
+	__u8 flags;
+	__u8 padding;
+	__be32 return_ip;
 };
 
 struct peer_endpoint_key_v1 {
@@ -178,6 +180,13 @@ struct path_config_v1 {
 	__u8 priority;
 };
 
+/* The return IP of a client path slot, set when flags has MUP_FLAG_RETURN_IP. */
+struct path_return_v1 {
+	__be32 return_ip;
+	__u8 flags;
+	__u8 padding[3];
+};
+
 struct path_state_v1 {
 	__u32 generation;
 	__u32 healthy_mask;
@@ -216,6 +225,7 @@ _Static_assert(sizeof(struct peer_endpoint_value_v1) == 24, "peer_endpoint_value
 _Static_assert(sizeof(struct server_route_value_v1) == 32, "server_route_value_v1 ABI");
 _Static_assert(sizeof(struct server_reverse_value_v1) == 56, "server_reverse_value_v1 ABI");
 _Static_assert(sizeof(struct path_config_v1) == 16, "path_config_v1 ABI");
+_Static_assert(sizeof(struct path_return_v1) == 8, "path_return_v1 ABI");
 _Static_assert(sizeof(struct path_state_v1) == 8, "path_state_v1 ABI");
 _Static_assert(sizeof(struct duplicate_key_v1) == 48, "duplicate_key_v1 ABI");
 _Static_assert(sizeof(struct event_v1) == 32, "event_v1 ABI");

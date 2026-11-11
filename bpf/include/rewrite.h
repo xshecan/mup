@@ -187,6 +187,87 @@ static __always_inline int mup_rewrite_udp(struct mup_packet *packet,
 	return 0;
 }
 
+/*
+ * A packet from a local socket has CHECKSUM_PARTIAL. Its UDP checksum field
+ * holds only the pseudo-header sum, and the device adds the UDP header and
+ * the payload when it sends the packet. So this rewrite does not derive a
+ * payload sum. It writes the new pseudo-header sum, and the device completes
+ * the checksum.
+ */
+static __always_inline int mup_rewrite_udp_partial(struct mup_packet *packet,
+						   __be32 source_ip,
+						   __be32 destination_ip,
+						   __u16 source_port,
+						   __u16 destination_port,
+						   __u32 peer_token)
+{
+	struct mup_udphdr *udp = packet->l4;
+	const __u8 *ipv4 = (const __u8 *)packet->ipv4;
+	__u32 l4_length = (__u8 *)packet->packet_end - (__u8 *)udp;
+	__u32 sum;
+
+	if ((void *)(udp + 1) > packet->data_end ||
+	    (void *)(udp + 1) > packet->packet_end || l4_length > 0xffff)
+		return -1;
+	if (peer_token == 0 || peer_token > MUP_MAX_PEER_TOKEN ||
+	    !mup_payload_fits(packet, 4))
+		return -1;
+	packet->payload[1] = peer_token >> 16;
+	packet->payload[2] = peer_token >> 8;
+	packet->payload[3] = peer_token;
+	packet->ipv4->source = source_ip;
+	packet->ipv4->destination = destination_ip;
+	mup_write_be16(&udp->source, source_port);
+	mup_write_be16(&udp->destination, destination_port);
+	mup_write_be16(&udp->length, l4_length);
+	sum = mup_read_be16(ipv4 + 12) + mup_read_be16(ipv4 + 14) +
+	      mup_read_be16(ipv4 + 16) + mup_read_be16(ipv4 + 18) +
+	      MUP_IPPROTO_UDP + l4_length;
+	mup_write_be16((__be16 *)((__u8 *)udp + 6), mup_csum_fold(sum));
+	mup_refresh_ipv4_checksum(packet->ipv4);
+	return 0;
+}
+
+/*
+ * The device of a CHECKSUM_PARTIAL packet writes the checksum at the UDP
+ * checksum offset, which is the ICMP sequence field. A one's complement
+ * checksum is valid when the sum of all words is 0xffff, and the position of
+ * the checksum word does not change that sum. So this rewrite clears the
+ * sequence field, which takes the place of the checksum, and the device then
+ * makes the ICMP checksum valid. The client does not read the sequence,
+ * because the peer token is in the WireGuard bytes.
+ */
+static __always_inline int mup_rewrite_icmp_partial(struct mup_packet *packet,
+						    __be32 source_ip,
+						    __be32 destination_ip,
+						    __u8 type,
+						    __u16 identifier,
+						    __u32 peer_token)
+{
+	struct mup_icmphdr *icmp = packet->l4;
+
+	if ((void *)(icmp + 1) > packet->data_end ||
+	    (void *)(icmp + 1) > packet->packet_end)
+		return -1;
+	if (peer_token == 0 || peer_token > MUP_MAX_PEER_TOKEN ||
+	    !mup_payload_fits(packet, 4))
+		return -1;
+	packet->payload[1] = peer_token >> 16;
+	packet->payload[2] = peer_token >> 8;
+	packet->payload[3] = peer_token;
+	packet->ipv4->source = source_ip;
+	packet->ipv4->destination = destination_ip;
+	packet->ipv4->protocol = MUP_IPPROTO_ICMP;
+	packet->transport = MUP_TRANSPORT_ICMP;
+	icmp->type = type;
+	icmp->code = 0;
+	icmp->checksum = 0;
+	mup_write_be16(&icmp->identifier, identifier);
+	icmp->sequence = 0;
+	mup_refresh_ipv4_checksum(packet->ipv4);
+	return 0;
+}
+
 static __always_inline int mup_rewrite_icmp(struct mup_packet *packet,
 					    __be32 source_ip,
 					    __be32 destination_ip,

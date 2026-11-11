@@ -32,7 +32,8 @@ Commands:
   get peers                              List the peers of a client, or the peer routes of a server
   get clients                            List the clients that are registered on a server
   get drops                              List the drop counters
-  add path SERVER[%IFACE]:PORT/udp|icmp  Add a path to a group
+  add path SERVER[%IFACE]:PORT/udp|icmp [via RETURN_IP]
+                                         Add a path to a group
   delete path ID                         Remove a path from a client
   set mode fallback|balancer|burst       Change the path mode of a group
   version                                Print the version of mupctl
@@ -207,13 +208,13 @@ func parseCommand(opts options) (command, error) {
 		}
 		return nil, fmt.Errorf("unknown resource %q: use groups, paths, peers, clients, or drops", args[1])
 	case "add":
-		if err := expectArgs(args, 3); err != nil {
-			return nil, err
+		if len(args) != 3 && (len(args) != 5 || args[3] != "via") {
+			return nil, fmt.Errorf("add path takes SERVER[%%IFACE]:PORT/udp|icmp [via RETURN_IP]")
 		}
 		if !isPathResource(args[1]) {
 			return nil, fmt.Errorf("add supports only paths")
 		}
-		spec := args[2]
+		spec := strings.Join(args[2:], " ")
 		return func(ctx context.Context, s invocation, w io.Writer) error {
 			return addPath(ctx, s, w, spec, opts.group)
 		}, nil
@@ -356,7 +357,11 @@ func addPath(ctx context.Context, s invocation, w io.Writer, spec string, group 
 	if s.output == "json" {
 		return writeJSON(w, path)
 	}
-	_, err = fmt.Fprintf(w, "path/%d created in group %d (%s:%d/%s, unhealthy until the first ACK)\n", path.ID, path.ListenPort, path.Server, path.Port, path.Transport)
+	route := fmt.Sprintf("%s:%d/%s", path.Server, path.Port, path.Transport)
+	if path.ReturnIP != "" {
+		route += " via " + path.ReturnIP
+	}
+	_, err = fmt.Fprintf(w, "path/%d created in group %d (%s, unhealthy until the first ACK)\n", path.ID, path.ListenPort, route)
 	return err
 }
 
