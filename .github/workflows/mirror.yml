@@ -1,0 +1,30 @@
+name: mirror
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    if: vars.MIRROR_APP_ID != ''
+    runs-on: ubuntu-latest
+    steps:
+      - id: token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.MIRROR_APP_ID }}
+          private-key: ${{ secrets.MIRROR_APP_KEY }}
+          owner: xshecan
+          repositories: mup
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Push to the public repository
+        env:
+          TOKEN: ${{ steps.token.outputs.token }}
+        run: git push "https://x-access-token:${TOKEN}@github.com/xshecan/mup.git" "${GITHUB_SHA}:${GITHUB_REF}"

@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="576" viewBox="0 0 800 576" role="img" aria-labelledby="title desc" xml:space="preserve">
+<title id="title">Packet flow</title>
+<desc id="desc">A WireGuard packet goes from a peer to the MUP client, over a path to the MUP server, and to the target. The reply returns on the latest upstream path. Only the legs between client and server carry a peer token.</desc>
+<style>.s{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif}.m{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace;white-space:pre}</style>
+<text class="s" x="64" y="16" font-size="16" font-weight="500" fill="#111827" text-anchor="middle">WireGuard peer</text>
+<path d="M64 28 L64 568" fill="none" stroke="#d9dde4" stroke-width="1"/>
+<text class="s" x="304" y="16" font-size="16" font-weight="500" fill="#111827" text-anchor="middle">MUP client</text>
+<path d="M304 28 L304 568" fill="none" stroke="#d9dde4" stroke-width="1"/>
+<text class="s" x="528" y="16" font-size="16" font-weight="500" fill="#111827" text-anchor="middle">MUP server</text>
+<path d="M528 28 L528 568" fill="none" stroke="#d9dde4" stroke-width="1"/>
+<text class="s" x="732" y="16" font-size="16" font-weight="500" fill="#111827" text-anchor="middle">WireGuard target</text>
+<path d="M732 28 L732 568" fill="none" stroke="#d9dde4" stroke-width="1"/>
+<path d="M64 64 L298 64" fill="none" stroke="#4b5565" stroke-width="1.5"/>
+<polygon points="304,64 296,60 296,68" fill="#4b5565"/>
+<text class="s" x="184" y="56" font-size="14" font-weight="400" fill="#111827" text-anchor="middle">1  WireGuard over UDP</text>
+<text class="m" x="184" y="86" font-size="14" font-weight="400" fill="#6b7487" text-anchor="middle">00 00 00</text>
+<text class="s" x="316" y="112" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">allocate token, pick paths</text>
+<text class="s" x="316" y="132" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">write token, rewrite headers</text>
+<path d="M304 172 L522 172" fill="none" stroke="#b45309" stroke-width="2"/>
+<polygon points="528,172 520,168 520,176" fill="#b45309"/>
+<text class="s" x="416" y="164" font-size="14" font-weight="400" fill="#111827" text-anchor="middle">2  MUP packet on chosen paths</text>
+<rect x="376" y="179" width="80" height="21" rx="4" fill="#fdf3e3"/>
+<text class="m" x="416" y="194" font-size="14" font-weight="500" fill="#b45309" text-anchor="middle">00 00 11</text>
+<text class="s" x="540" y="220" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">match path, drop copies</text>
+<text class="s" x="540" y="240" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">take port, clear token</text>
+<path d="M528 280 L726 280" fill="none" stroke="#4b5565" stroke-width="1.5"/>
+<polygon points="732,280 724,276 724,284" fill="#4b5565"/>
+<text class="s" x="630" y="272" font-size="14" font-weight="400" fill="#111827" text-anchor="middle">3  UDP from the target port</text>
+<text class="m" x="630" y="302" font-size="14" font-weight="400" fill="#6b7487" text-anchor="middle">00 00 00</text>
+<path d="M732 344 L534 344" fill="none" stroke="#4b5565" stroke-width="1.5"/>
+<polygon points="528,344 536,348 536,340" fill="#4b5565"/>
+<text class="s" x="630" y="336" font-size="14" font-weight="400" fill="#111827" text-anchor="middle">4  WireGuard reply</text>
+<text class="m" x="630" y="366" font-size="14" font-weight="400" fill="#6b7487" text-anchor="middle">00 00 00</text>
+<text class="s" x="540" y="392" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">find route by port</text>
+<text class="s" x="540" y="412" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">write token, pick return</text>
+<path d="M528 452 L310 452" fill="none" stroke="#b45309" stroke-width="2"/>
+<polygon points="304,452 312,456 312,448" fill="#b45309"/>
+<text class="s" x="416" y="444" font-size="14" font-weight="400" fill="#111827" text-anchor="middle">5  On the latest upstream path</text>
+<rect x="376" y="459" width="80" height="21" rx="4" fill="#fdf3e3"/>
+<text class="m" x="416" y="474" font-size="14" font-weight="500" fill="#b45309" text-anchor="middle">00 00 11</text>
+<text class="s" x="316" y="500" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">check source, look up token</text>
+<text class="s" x="316" y="520" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">clear token, rewrite to UDP</text>
+<path d="M304 536 L70 536" fill="none" stroke="#4b5565" stroke-width="1.5"/>
+<polygon points="64,536 72,540 72,532" fill="#4b5565"/>
+<text class="s" x="184" y="528" font-size="14" font-weight="400" fill="#111827" text-anchor="middle">6  UDP from the listen port</text>
+<text class="m" x="184" y="558" font-size="14" font-weight="400" fill="#6b7487" text-anchor="middle">00 00 00</text>
+</svg>

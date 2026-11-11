@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="448" viewBox="0 0 800 448" role="img" aria-labelledby="title desc" xml:space="preserve">
+<title id="title">Transports and return modes</title>
+<desc id="desc">UDP direct, UDP reflected with a spoofed source, ICMP direct with Echo Request and Echo Reply, and ICMP reflected through a reflector host.</desc>
+<style>.s{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif}.m{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace;white-space:pre}</style>
+<text class="s" x="0" y="32" font-size="16" font-weight="500" fill="#eef0f5" text-anchor="start">UDP direct</text>
+<text class="m" x="0" y="52" font-size="14" font-weight="400" fill="#7a8296" text-anchor="start">-u SERVER:PORT/udp</text>
+<text class="s" x="216" y="16" font-size="14" font-weight="400" fill="#7a8296" text-anchor="start">client</text>
+<text class="s" x="798" y="16" font-size="14" font-weight="400" fill="#7a8296" text-anchor="end">server</text>
+<path d="M216 24 L216 100" fill="none" stroke="#eef0f5" stroke-width="2"/>
+<path d="M798 24 L798 100" fill="none" stroke="#eef0f5" stroke-width="2"/>
+<text class="m" x="507" y="28" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">UDP -s:listen → server:port</text>
+<path d="M217 36 L791 36" fill="none" stroke="#a3a9b8" stroke-width="1.5"/>
+<polygon points="797,36 789,32 789,40" fill="#a3a9b8"/>
+<path d="M797 64 L223 64" fill="none" stroke="#a3a9b8" stroke-width="1.5"/>
+<polygon points="217,64 225,68 225,60" fill="#a3a9b8"/>
+<text class="m" x="507" y="84" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">UDP server:port → -s:listen</text>
+<path d="M0 112 L800 112" fill="none" stroke="#2a2f3a" stroke-width="1"/>
+<text class="s" x="0" y="144" font-size="16" font-weight="500" fill="#eef0f5" text-anchor="start">UDP reflected</text>
+<text class="m" x="0" y="164" font-size="14" font-weight="400" fill="#7a8296" text-anchor="start">-u SERVER:PORT/udp</text>
+<text class="m" x="0" y="184" font-size="14" font-weight="400" fill="#7a8296" text-anchor="start">-r RETURN_IP</text>
+<text class="s" x="216" y="128" font-size="14" font-weight="400" fill="#7a8296" text-anchor="start">client</text>
+<text class="s" x="798" y="128" font-size="14" font-weight="400" fill="#7a8296" text-anchor="end">server</text>
+<path d="M216 136 L216 212" fill="none" stroke="#eef0f5" stroke-width="2"/>
+<path d="M798 136 L798 212" fill="none" stroke="#eef0f5" stroke-width="2"/>
+<text class="m" x="507" y="140" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">UDP -s:listen → server:port</text>
+<path d="M217 148 L791 148" fill="none" stroke="#a3a9b8" stroke-width="1.5"/>
+<polygon points="797,148 789,144 789,152" fill="#a3a9b8"/>
+<path d="M797 176 L223 176" fill="none" stroke="#a3a9b8" stroke-width="1.5"/>
+<polygon points="217,176 225,180 225,172" fill="#a3a9b8"/>
+<text class="m" x="507" y="196" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">UDP from -r (spoofed) → -s:listen</text>
+<path d="M0 224 L800 224" fill="none" stroke="#2a2f3a" stroke-width="1"/>
+<text class="s" x="0" y="256" font-size="16" font-weight="500" fill="#eef0f5" text-anchor="start">ICMP direct</text>
+<text class="m" x="0" y="276" font-size="14" font-weight="400" fill="#7a8296" text-anchor="start">-u SERVER:PORT/icmp</text>
+<text class="s" x="216" y="240" font-size="14" font-weight="400" fill="#7a8296" text-anchor="start">client</text>
+<text class="s" x="798" y="240" font-size="14" font-weight="400" fill="#7a8296" text-anchor="end">server</text>
+<path d="M216 248 L216 324" fill="none" stroke="#eef0f5" stroke-width="2"/>
+<path d="M798 248 L798 324" fill="none" stroke="#eef0f5" stroke-width="2"/>
+<text class="m" x="507" y="252" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">Echo Request, id = port</text>
+<path d="M217 260 L791 260" fill="none" stroke="#a3a9b8" stroke-width="1.5"/>
+<polygon points="797,260 789,256 789,264" fill="#a3a9b8"/>
+<path d="M797 288 L223 288" fill="none" stroke="#a3a9b8" stroke-width="1.5"/>
+<polygon points="217,288 225,292 225,284" fill="#a3a9b8"/>
+<text class="m" x="507" y="308" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">Echo Reply, id = port</text>
+<path d="M0 336 L800 336" fill="none" stroke="#2a2f3a" stroke-width="1"/>
+<text class="s" x="0" y="368" font-size="16" font-weight="500" fill="#eef0f5" text-anchor="start">ICMP reflected</text>
+<text class="m" x="0" y="388" font-size="14" font-weight="400" fill="#7a8296" text-anchor="start">-u SERVER:PORT/icmp</text>
+<text class="m" x="0" y="408" font-size="14" font-weight="400" fill="#7a8296" text-anchor="start">-r REFLECTOR_IP</text>
+<text class="s" x="216" y="352" font-size="14" font-weight="400" fill="#7a8296" text-anchor="start">client</text>
+<text class="s" x="798" y="352" font-size="14" font-weight="400" fill="#7a8296" text-anchor="end">server</text>
+<path d="M216 360 L216 436" fill="none" stroke="#eef0f5" stroke-width="2"/>
+<path d="M798 360 L798 436" fill="none" stroke="#eef0f5" stroke-width="2"/>
+<text class="m" x="507" y="364" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">Echo Request, id = port</text>
+<path d="M217 372 L791 372" fill="none" stroke="#a3a9b8" stroke-width="1.5"/>
+<polygon points="797,372 789,368 789,376" fill="#a3a9b8"/>
+<rect x="479" y="388" width="56" height="24" rx="8" fill="#161a22" stroke="#2a2f3a" stroke-width="1"/>
+<text class="m" x="507" y="405" font-size="14" font-weight="400" fill="#eef0f5" text-anchor="middle">-r</text>
+<path d="M797 400 L541 400" fill="none" stroke="#a3a9b8" stroke-width="1.5"/>
+<polygon points="535,400 543,404 543,396" fill="#a3a9b8"/>
+<path d="M479 400 L223 400" fill="none" stroke="#a3a9b8" stroke-width="1.5"/>
+<polygon points="217,400 225,404 225,396" fill="#a3a9b8"/>
+<text class="m" x="652.5" y="428" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">Echo Request as -s</text>
+<text class="m" x="361.5" y="428" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">Echo Reply</text>
+</svg>

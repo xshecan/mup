@@ -1,0 +1,263 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"net"
+	"net/netip"
+	"strings"
+
+	"github.com/xshecan/mup/api"
+	"github.com/xshecan/mup/protocol"
+	"github.com/xshecan/mup/transport"
+)
+
+const MaxPaths = 8
+
+type Mode uint8
+
+const (
+	ModeFallback Mode = iota
+	ModeBalancer
+	ModeBurst
+)
+
+func (m Mode) String() string {
+	switch m {
+	case ModeFallback:
+		return "fallback"
+	case ModeBalancer:
+		return "balancer"
+	case ModeBurst:
+		return "burst"
+	default:
+		return fmt.Sprintf("mode(%d)", uint8(m))
+	}
+}
+
+// UnmarshalText reads a mode name from a configuration file.
+func (m *Mode) UnmarshalText(text []byte) error {
+	mode, err := ParseMode(string(text))
+	if err != nil {
+		return err
+	}
+	*m = mode
+	return nil
+}
+
+// App is the configuration of one daemon. Exactly one of Client and Server is
+// set.
+type App struct {
+	Client *Client `yaml:"client"`
+	Server *Server `yaml:"server"`
+}
+
+// Validate applies the rules that are common to the flags and the
+// configuration file.
+func (a App) Validate() error {
+	if (a.Client == nil) == (a.Server == nil) {
+		return errors.New("the configuration must have exactly one of client and server")
+	}
+	if a.Client != nil {
+		return a.Client.Validate()
+	}
+	return a.Server.Validate()
+}
+
+type Client struct {
+	AdvertisedIP  netip.Addr `yaml:"advertised_ip"`
+	ControlSocket string     `yaml:"control_socket"`
+	Groups        []Group    `yaml:"groups"`
+}
+
+// Group is the set of servers for the peers of one listen port. All servers of
+// a group forward to the same WireGuard target, because a WireGuard handshake
+// fails against another identity.
+type Group struct {
+	ListenPort uint16     `yaml:"listen_port"`
+	Mode       Mode       `yaml:"mode"`
+	ReturnIP   netip.Addr `yaml:"return_ip"`
+	Paths      []Path     `yaml:"paths"`
+}
+
+// UnmarshalYAML keeps the default socket when the file does not set one. An
+// empty value in the file turns the socket off.
+func (c *Client) UnmarshalYAML(unmarshal func(any) error) error {
+	type client Client
+	c.ControlSocket = api.DefaultClientSocket
+	return unmarshal((*client)(c))
+}
+
+func (c Client) Validate() error {
+	if !isNonzeroIPv4(c.AdvertisedIP) {
+		return errors.New("client advertised IP must be a nonzero IPv4 address")
+	}
+	if len(c.Groups) == 0 {
+		return errors.New("client requires at least one group")
+	}
+	listenPorts := make(map[uint16]struct{}, len(c.Groups))
+	owners := make(map[netip.AddrPort]uint16, MaxPaths)
+	seen := make(map[Path]struct{}, MaxPaths)
+	for _, group := range c.Groups {
+		if err := group.validate(); err != nil {
+			return err
+		}
+		if _, exists := listenPorts[group.ListenPort]; exists {
+			return fmt.Errorf("duplicate group for listen port %d", group.ListenPort)
+		}
+		listenPorts[group.ListenPort] = struct{}{}
+		for _, path := range group.Paths {
+			if _, exists := seen[path]; exists {
+				return fmt.Errorf("duplicate client path %s", path)
+			}
+			seen[path] = struct{}{}
+			owner, exists := owners[path.Endpoint()]
+			if exists && owner != group.ListenPort {
+				return fmt.Errorf("server %s is in the groups of listen ports %d and %d, but a server can serve one group", path.Endpoint(), owner, group.ListenPort)
+			}
+			owners[path.Endpoint()] = group.ListenPort
+		}
+	}
+	if len(seen) > MaxPaths {
+		return fmt.Errorf("client accepts at most %d paths in all groups", MaxPaths)
+	}
+	return nil
+}
+
+func (g Group) validate() error {
+	if g.ListenPort == 0 {
+		return errors.New("group listen port must be between 1 and 65535")
+	}
+	if g.ReturnIP.IsValid() && !isNonzeroIPv4(g.ReturnIP) {
+		return fmt.Errorf("group %d: return IP must be a nonzero IPv4 address", g.ListenPort)
+	}
+	if g.Mode > ModeBurst {
+		return fmt.Errorf("group %d: invalid mode %d", g.ListenPort, uint8(g.Mode))
+	}
+	if len(g.Paths) == 0 {
+		return fmt.Errorf("group %d: requires at least one path", g.ListenPort)
+	}
+	for index, path := range g.Paths {
+		if err := path.validate(); err != nil {
+			return fmt.Errorf("group %d: path %d: %w", g.ListenPort, index, err)
+		}
+	}
+	return nil
+}
+
+type Path struct {
+	Server     netip.Addr
+	ServerPort uint16
+	Transport  protocol.TransportID
+	Interface  string
+}
+
+// String formats the path as SERVER[%IFACE]:PORT/TRANSPORT, the form that
+// ParsePath accepts.
+func (p Path) String() string {
+	host := p.Server.String()
+	if p.Interface != "" {
+		host += "%" + p.Interface
+	}
+	return fmt.Sprintf("%s:%d/%s", host, p.ServerPort, p.Transport)
+}
+
+// Endpoint returns the address and port of the server of the path.
+func (p Path) Endpoint() netip.AddrPort {
+	return netip.AddrPortFrom(p.Server, p.ServerPort)
+}
+
+// UnmarshalText reads a path from a configuration file, in the form that
+// ParsePath accepts.
+func (p *Path) UnmarshalText(text []byte) error {
+	path, err := ParsePath(string(text))
+	if err != nil {
+		return fmt.Errorf("path %q: %w", text, err)
+	}
+	*p = path
+	return nil
+}
+
+func (p Path) validate() error {
+	if !isNonzeroIPv4(p.Server) {
+		return errors.New("server path address must be a nonzero IPv4")
+	}
+	if p.ServerPort == 0 {
+		return errors.New("server path port must be nonzero")
+	}
+	if p.Transport > protocol.TransportICMP {
+		return fmt.Errorf("invalid transport %d", uint8(p.Transport))
+	}
+	return nil
+}
+
+type Server struct {
+	Port          uint16         `yaml:"port"`
+	Target        netip.AddrPort `yaml:"target"`
+	ControlSocket string         `yaml:"control_socket"`
+}
+
+// UnmarshalYAML keeps the default socket when the file does not set one. An
+// empty value in the file turns the socket off.
+func (s *Server) UnmarshalYAML(unmarshal func(any) error) error {
+	type server Server
+	s.ControlSocket = api.DefaultServerSocket
+	return unmarshal((*server)(s))
+}
+
+func (s Server) Validate() error {
+	if s.Port == 0 {
+		return errors.New("server port must be between 1 and 65535")
+	}
+	if !isNonzeroIPv4(s.Target.Addr()) || s.Target.Port() == 0 {
+		return errors.New("server target must be a nonzero IPv4:PORT")
+	}
+	return nil
+}
+
+// ParsePath parses SERVER[%IFACE]:PORT/udp or SERVER[%IFACE]:PORT/icmp.
+func ParsePath(raw string) (Path, error) {
+	slash := strings.LastIndexByte(raw, '/')
+	if slash <= 0 || slash == len(raw)-1 {
+		return Path{}, errors.New("path must use IPv4:PORT/udp or /icmp")
+	}
+	endpoint, transportName := raw[:slash], raw[slash+1:]
+	host, portText, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return Path{}, fmt.Errorf("invalid server endpoint: %w", err)
+	}
+	serverPort, transportID, err := transport.ParsePortSpec(portText + "/" + transportName)
+	if err != nil {
+		return Path{}, err
+	}
+	addressText, interfaceName, hasInterface := strings.Cut(host, "%")
+	if hasInterface && (interfaceName == "" || strings.Contains(interfaceName, "%")) {
+		return Path{}, errors.New("invalid interface suffix")
+	}
+	address, err := netip.ParseAddr(addressText)
+	if err != nil {
+		return Path{}, errors.New("server path address must be a nonzero IPv4")
+	}
+	path := Path{Server: address, ServerPort: serverPort, Transport: transportID, Interface: interfaceName}
+	if err := path.validate(); err != nil {
+		return Path{}, err
+	}
+	return path, nil
+}
+
+func ParseMode(raw string) (Mode, error) {
+	switch raw {
+	case "fallback":
+		return ModeFallback, nil
+	case "balancer":
+		return ModeBalancer, nil
+	case "burst":
+		return ModeBurst, nil
+	default:
+		return 0, fmt.Errorf("invalid mode %q: use fallback, balancer, or burst", raw)
+	}
+}
+
+func isNonzeroIPv4(address netip.Addr) bool {
+	return address.Is4() && !address.IsUnspecified()
+}

@@ -1,0 +1,6 @@
+# The configuration of a MUP server. Replace the example addresses.
+server:
+  # The UDP port and the ICMP Echo identifier that the server accepts.
+  port: 5000
+  # The WireGuard target that receives all traffic.
+  target: 198.51.100.7:51820

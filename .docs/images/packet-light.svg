@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="324" viewBox="0 0 800 324" role="img" aria-labelledby="title desc" xml:space="preserve">
+<title id="title">One WireGuard packet before and after a MUP rewrite</title>
+<desc id="desc">A hexdump of a 60-byte WireGuard keepalive from a peer, and the same packet on the wire after the MUP client rewrites it. Only the addresses, ports, checksums, and the three peer token bytes change.</desc>
+<style>.s{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif}.m{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace;white-space:pre}</style>
+<text class="s" x="0" y="16" font-size="16" font-weight="500" fill="#111827" text-anchor="start">From the peer</text>
+<text class="m" x="800" y="16" font-size="14" font-weight="400" fill="#6b7487" text-anchor="end">198.51.100.44:41000 → 192.0.2.10:51820</text>
+<text class="m" x="0" y="48" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">0000</text>
+<text class="m" x="56" y="48" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">45</text>
+<text class="m" x="82" y="48" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="108" y="48" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="134" y="48" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">3c</text>
+<text class="m" x="160" y="48" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">1c</text>
+<text class="m" x="186" y="48" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">46</text>
+<text class="m" x="212" y="48" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">40</text>
+<text class="m" x="238" y="48" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="272" y="48" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">40</text>
+<text class="m" x="298" y="48" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">11</text>
+<text class="m" x="324" y="48" font-size="14" font-weight="500" fill="#111827" text-anchor="start">32</text>
+<text class="m" x="350" y="48" font-size="14" font-weight="500" fill="#111827" text-anchor="start">01</text>
+<text class="m" x="376" y="48" font-size="14" font-weight="500" fill="#111827" text-anchor="start">c6</text>
+<text class="m" x="402" y="48" font-size="14" font-weight="500" fill="#111827" text-anchor="start">33</text>
+<text class="m" x="428" y="48" font-size="14" font-weight="500" fill="#111827" text-anchor="start">64</text>
+<text class="m" x="454" y="48" font-size="14" font-weight="500" fill="#111827" text-anchor="start">2c</text>
+<text class="s" x="496" y="48" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">IPv4 header, source address</text>
+<text class="m" x="0" y="72" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">0010</text>
+<rect x="397" y="57" width="79" height="21" rx="8" fill="none" stroke="#d9dde4" stroke-width="1"/>
+<text class="m" x="56" y="72" font-size="14" font-weight="500" fill="#111827" text-anchor="start">c0</text>
+<text class="m" x="82" y="72" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="108" y="72" font-size="14" font-weight="500" fill="#111827" text-anchor="start">02</text>
+<text class="m" x="134" y="72" font-size="14" font-weight="500" fill="#111827" text-anchor="start">0a</text>
+<text class="m" x="160" y="72" font-size="14" font-weight="500" fill="#111827" text-anchor="start">a0</text>
+<text class="m" x="186" y="72" font-size="14" font-weight="500" fill="#111827" text-anchor="start">28</text>
+<text class="m" x="212" y="72" font-size="14" font-weight="500" fill="#111827" text-anchor="start">ca</text>
+<text class="m" x="238" y="72" font-size="14" font-weight="500" fill="#111827" text-anchor="start">6c</text>
+<text class="m" x="272" y="72" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="298" y="72" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">28</text>
+<text class="m" x="324" y="72" font-size="14" font-weight="500" fill="#111827" text-anchor="start">69</text>
+<text class="m" x="350" y="72" font-size="14" font-weight="500" fill="#111827" text-anchor="start">4b</text>
+<text class="m" x="376" y="72" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">04</text>
+<text class="m" x="402" y="72" font-size="14" font-weight="400" fill="#111827" text-anchor="start">00</text>
+<text class="m" x="428" y="72" font-size="14" font-weight="400" fill="#111827" text-anchor="start">00</text>
+<text class="m" x="454" y="72" font-size="14" font-weight="400" fill="#111827" text-anchor="start">00</text>
+<text class="s" x="496" y="72" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">destination, UDP header, type, zeros</text>
+<text class="m" x="0" y="96" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">0020</text>
+<text class="m" x="56" y="96" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">c2</text>
+<text class="m" x="82" y="96" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">91</text>
+<text class="m" x="108" y="96" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">3f</text>
+<text class="m" x="134" y="96" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">7a</text>
+<text class="m" x="160" y="96" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">01</text>
+<text class="m" x="186" y="96" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">2b</text>
+<text class="m" x="212" y="96" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="238" y="96" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="272" y="96" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="298" y="96" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="324" y="96" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="350" y="96" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="376" y="96" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">25</text>
+<text class="m" x="402" y="96" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">fb</text>
+<text class="m" x="428" y="96" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">1c</text>
+<text class="m" x="454" y="96" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">da</text>
+<text class="s" x="496" y="96" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">receiver index, counter, tag</text>
+<text class="m" x="0" y="120" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">0030</text>
+<text class="m" x="56" y="120" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">f0</text>
+<text class="m" x="82" y="120" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">71</text>
+<text class="m" x="108" y="120" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">bf</text>
+<text class="m" x="134" y="120" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">f5</text>
+<text class="m" x="160" y="120" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">65</text>
+<text class="m" x="186" y="120" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">f3</text>
+<text class="m" x="212" y="120" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">a9</text>
+<text class="m" x="238" y="120" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">9c</text>
+<text class="m" x="272" y="120" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">0a</text>
+<text class="m" x="298" y="120" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">e1</text>
+<text class="m" x="324" y="120" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">2a</text>
+<text class="m" x="350" y="120" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">6e</text>
+<text class="s" x="496" y="120" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">authentication tag</text>
+<text class="s" x="0" y="160" font-size="16" font-weight="500" fill="#111827" text-anchor="start">On the wire</text>
+<text class="m" x="800" y="160" font-size="14" font-weight="400" fill="#6b7487" text-anchor="end">192.0.2.10:51820 → 203.0.113.5:5000</text>
+<text class="m" x="0" y="192" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">0000</text>
+<text class="m" x="56" y="192" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">45</text>
+<text class="m" x="82" y="192" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="108" y="192" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="134" y="192" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">3c</text>
+<text class="m" x="160" y="192" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">1c</text>
+<text class="m" x="186" y="192" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">46</text>
+<text class="m" x="212" y="192" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">40</text>
+<text class="m" x="238" y="192" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="272" y="192" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">40</text>
+<text class="m" x="298" y="192" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">11</text>
+<text class="m" x="324" y="192" font-size="14" font-weight="500" fill="#111827" text-anchor="start">20</text>
+<text class="m" x="350" y="192" font-size="14" font-weight="500" fill="#111827" text-anchor="start">5b</text>
+<text class="m" x="376" y="192" font-size="14" font-weight="500" fill="#111827" text-anchor="start">c0</text>
+<text class="m" x="402" y="192" font-size="14" font-weight="500" fill="#111827" text-anchor="start">00</text>
+<text class="m" x="428" y="192" font-size="14" font-weight="500" fill="#111827" text-anchor="start">02</text>
+<text class="m" x="454" y="192" font-size="14" font-weight="500" fill="#111827" text-anchor="start">0a</text>
+<text class="s" x="496" y="192" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">checksum, source address</text>
+<text class="m" x="0" y="216" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">0010</text>
+<rect x="397" y="201" width="79" height="21" rx="4" fill="#fdf3e3"/>
+<text class="m" x="56" y="216" font-size="14" font-weight="500" fill="#111827" text-anchor="start">cb</text>
+<text class="m" x="82" y="216" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="108" y="216" font-size="14" font-weight="500" fill="#111827" text-anchor="start">71</text>
+<text class="m" x="134" y="216" font-size="14" font-weight="500" fill="#111827" text-anchor="start">05</text>
+<text class="m" x="160" y="216" font-size="14" font-weight="500" fill="#111827" text-anchor="start">ca</text>
+<text class="m" x="186" y="216" font-size="14" font-weight="500" fill="#111827" text-anchor="start">6c</text>
+<text class="m" x="212" y="216" font-size="14" font-weight="500" fill="#111827" text-anchor="start">13</text>
+<text class="m" x="238" y="216" font-size="14" font-weight="500" fill="#111827" text-anchor="start">88</text>
+<text class="m" x="272" y="216" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="298" y="216" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">28</text>
+<text class="m" x="324" y="216" font-size="14" font-weight="500" fill="#111827" text-anchor="start">e4</text>
+<text class="m" x="350" y="216" font-size="14" font-weight="500" fill="#111827" text-anchor="start">34</text>
+<text class="m" x="376" y="216" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">04</text>
+<text class="m" x="402" y="216" font-size="14" font-weight="500" fill="#b45309" text-anchor="start">00</text>
+<text class="m" x="428" y="216" font-size="14" font-weight="500" fill="#b45309" text-anchor="start">00</text>
+<text class="m" x="454" y="216" font-size="14" font-weight="500" fill="#b45309" text-anchor="start">11</text>
+<text class="s" x="496" y="216" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">destination, ports, checksum, token</text>
+<text class="m" x="0" y="240" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">0020</text>
+<text class="m" x="56" y="240" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">c2</text>
+<text class="m" x="82" y="240" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">91</text>
+<text class="m" x="108" y="240" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">3f</text>
+<text class="m" x="134" y="240" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">7a</text>
+<text class="m" x="160" y="240" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">01</text>
+<text class="m" x="186" y="240" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">2b</text>
+<text class="m" x="212" y="240" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="238" y="240" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="272" y="240" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="298" y="240" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="324" y="240" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="350" y="240" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">00</text>
+<text class="m" x="376" y="240" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">25</text>
+<text class="m" x="402" y="240" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">fb</text>
+<text class="m" x="428" y="240" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">1c</text>
+<text class="m" x="454" y="240" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">da</text>
+<text class="s" x="496" y="240" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">no change</text>
+<text class="m" x="0" y="264" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">0030</text>
+<text class="m" x="56" y="264" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">f0</text>
+<text class="m" x="82" y="264" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">71</text>
+<text class="m" x="108" y="264" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">bf</text>
+<text class="m" x="134" y="264" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">f5</text>
+<text class="m" x="160" y="264" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">65</text>
+<text class="m" x="186" y="264" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">f3</text>
+<text class="m" x="212" y="264" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">a9</text>
+<text class="m" x="238" y="264" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">9c</text>
+<text class="m" x="272" y="264" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">0a</text>
+<text class="m" x="298" y="264" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">e1</text>
+<text class="m" x="324" y="264" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">2a</text>
+<text class="m" x="350" y="264" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">6e</text>
+<text class="s" x="496" y="264" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">no change</text>
+<rect x="51" y="301" width="79" height="21" rx="4" fill="#fdf3e3"/>
+<text class="m" x="56" y="316" font-size="14" font-weight="500" fill="#b45309" text-anchor="start">00</text>
+<text class="m" x="82" y="316" font-size="14" font-weight="500" fill="#b45309" text-anchor="start">00</text>
+<text class="m" x="108" y="316" font-size="14" font-weight="500" fill="#b45309" text-anchor="start">11</text>
+<text class="s" x="144" y="316" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">peer token</text>
+<text class="m" x="232" y="316" font-size="14" font-weight="500" fill="#111827" text-anchor="start">c0</text>
+<text class="s" x="256" y="316" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">changed</text>
+<text class="m" x="328" y="316" font-size="14" font-weight="400" fill="#6b7487" text-anchor="start">7a</text>
+<text class="s" x="352" y="316" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">no change</text>
+<text class="s" x="800" y="316" font-size="14" font-weight="400" fill="#4b5565" text-anchor="end">60 bytes before, 60 bytes after</text>
+</svg>

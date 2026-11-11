@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="288" viewBox="0 0 800 288" role="img" aria-labelledby="title desc" xml:space="preserve">
+<title id="title">Registration and path health</title>
+<desc id="desc">The client sends REGISTER on each path and the server answers REGISTER_ACK. Three missed ACKs make a path unhealthy, and one ACK makes it healthy. Paths from -u flags start healthy, and paths from mupctl start unhealthy.</desc>
+<style>.s{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif}.m{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace;white-space:pre}</style>
+<text class="s" x="64" y="16" font-size="16" font-weight="500" fill="#111827" text-anchor="middle">MUP client</text>
+<path d="M64 28 L64 280" fill="none" stroke="#d9dde4" stroke-width="1"/>
+<text class="s" x="464" y="16" font-size="16" font-weight="500" fill="#111827" text-anchor="middle">MUP server</text>
+<path d="M464 28 L464 280" fill="none" stroke="#d9dde4" stroke-width="1"/>
+<text class="m" x="264" y="56" font-size="14" font-weight="400" fill="#111827" text-anchor="middle">1  REGISTER</text>
+<path d="M64 64 L458 64" fill="none" stroke="#4b5565" stroke-width="1.5"/>
+<polygon points="464,64 456,60 456,68" fill="#4b5565"/>
+<text class="s" x="264" y="84" font-size="14" font-weight="400" fill="#4b5565" text-anchor="middle">UDP to the port, or an Echo Request</text>
+<text class="s" x="452" y="116" font-size="14" font-weight="400" fill="#4b5565" text-anchor="end">source must equal -s</text>
+<text class="s" x="452" y="136" font-size="14" font-weight="400" fill="#4b5565" text-anchor="end">a new nonce replaces the old one</text>
+<text class="s" x="452" y="156" font-size="14" font-weight="400" fill="#4b5565" text-anchor="end">write registration, 30 s lease</text>
+<text class="m" x="264" y="188" font-size="14" font-weight="400" fill="#111827" text-anchor="middle">2  REGISTER_ACK, same sequence</text>
+<path d="M464 196 L70 196" fill="none" stroke="#4b5565" stroke-width="1.5"/>
+<polygon points="64,196 72,200 72,192" fill="#4b5565"/>
+<text class="s" x="76" y="228" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">ACK within 900 ms: the path is healthy</text>
+<text class="s" x="76" y="248" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">next REGISTER in 10 s, or 1 s after a miss</text>
+<text class="s" x="568" y="16" font-size="16" font-weight="500" fill="#111827" text-anchor="start">Path health</text>
+<rect x="568" y="44" width="144" height="36" rx="8" fill="#f5f7fa" stroke="#d9dde4" stroke-width="1"/>
+<text class="s" x="640" y="67" font-size="14" font-weight="400" fill="#111827" text-anchor="middle">healthy</text>
+<rect x="568" y="164" width="144" height="36" rx="8" fill="#f5f7fa" stroke="#d9dde4" stroke-width="1"/>
+<text class="s" x="640" y="187" font-size="14" font-weight="400" fill="#dc2626" text-anchor="middle">unhealthy</text>
+<path d="M680 80 L680 158" fill="none" stroke="#4b5565" stroke-width="1.5"/>
+<polygon points="680,164 684,156 676,156" fill="#4b5565"/>
+<text class="s" x="692" y="118" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">3 missed</text>
+<text class="s" x="692" y="138" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">ACKs</text>
+<path d="M600 164 L600 86" fill="none" stroke="#4b5565" stroke-width="1.5"/>
+<polygon points="600,80 596,88 604,88" fill="#4b5565"/>
+<text class="s" x="608" y="128" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">1 ACK</text>
+<text class="s" x="568" y="236" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">-u paths start healthy.</text>
+<text class="s" x="568" y="256" font-size="14" font-weight="400" fill="#4b5565" text-anchor="start">mupctl paths start unhealthy.</text>
+</svg>

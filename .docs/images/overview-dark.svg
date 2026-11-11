@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="212" viewBox="0 0 800 212" role="img" aria-labelledby="title desc" xml:space="preserve">
+<title id="title">MUP topology</title>
+<desc id="desc">WireGuard peers send to a MUP client. The client sends each packet over one or more UDP or ICMP paths to a MUP server, which forwards it to one WireGuard target. The reserved WireGuard bytes hold a peer token only between the client and the server.</desc>
+<style>.s{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif}.m{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace;white-space:pre}</style>
+<text class="m" x="104" y="16" font-size="14" font-weight="400" fill="#7a8296" text-anchor="middle">00 00 00</text>
+<rect x="360" y="1" width="80" height="21" rx="4" fill="#33250f"/>
+<text class="m" x="400" y="16" font-size="14" font-weight="500" fill="#f0a742" text-anchor="middle">00 00 11</text>
+<text class="m" x="680" y="16" font-size="14" font-weight="400" fill="#7a8296" text-anchor="middle">00 00 00</text>
+<text class="s" x="0" y="65" font-size="14" font-weight="400" fill="#eef0f5" text-anchor="start">peer A</text>
+<path d="M70 60 L138 60" fill="none" stroke="#a3a9b8" stroke-width="1.5"/>
+<polygon points="144,60 136,56 136,64" fill="#a3a9b8"/>
+<polygon points="64,60 72,64 72,56" fill="#a3a9b8"/>
+<text class="s" x="0" y="105" font-size="14" font-weight="400" fill="#eef0f5" text-anchor="start">peer B</text>
+<path d="M70 100 L138 100" fill="none" stroke="#a3a9b8" stroke-width="1.5"/>
+<polygon points="144,100 136,96 136,104" fill="#a3a9b8"/>
+<polygon points="64,100 72,104 72,96" fill="#a3a9b8"/>
+<text class="s" x="0" y="145" font-size="14" font-weight="400" fill="#eef0f5" text-anchor="start">peer C</text>
+<path d="M70 140 L138 140" fill="none" stroke="#a3a9b8" stroke-width="1.5"/>
+<polygon points="144,140 136,136 136,144" fill="#a3a9b8"/>
+<polygon points="64,140 72,144 72,136" fill="#a3a9b8"/>
+<rect x="144" y="32" width="128" height="128" rx="8" fill="#161a22" stroke="#2a2f3a" stroke-width="1"/>
+<text class="s" x="208" y="92" font-size="16" font-weight="500" fill="#eef0f5" text-anchor="middle">MUP client</text>
+<text class="s" x="208" y="112" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">TCX program</text>
+<rect x="528" y="32" width="128" height="128" rx="8" fill="#161a22" stroke="#2a2f3a" stroke-width="1"/>
+<text class="s" x="592" y="92" font-size="16" font-weight="500" fill="#eef0f5" text-anchor="middle">MUP server</text>
+<text class="s" x="592" y="112" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">TCX program</text>
+<text class="m" x="400" y="52" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">path 0, udp</text>
+<path d="M278 60 L522 60" fill="none" stroke="#f0a742" stroke-width="2"/>
+<polygon points="528,60 520,56 520,64" fill="#f0a742"/>
+<polygon points="272,60 280,64 280,56" fill="#f0a742"/>
+<text class="m" x="400" y="92" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">path 1, icmp</text>
+<path d="M278 100 L522 100" fill="none" stroke="#f0a742" stroke-width="2"/>
+<polygon points="528,100 520,96 520,104" fill="#f0a742"/>
+<polygon points="272,100 280,104 280,96" fill="#f0a742"/>
+<text class="m" x="400" y="132" font-size="14" font-weight="400" fill="#e5484d" text-anchor="middle">path 2, udp, unhealthy</text>
+<path d="M278 140 L522 140" fill="none" stroke="#7a8296" stroke-width="1.5" stroke-dasharray="4 4"/>
+<polygon points="528,140 520,136 520,144" fill="#7a8296"/>
+<polygon points="272,140 280,144 280,136" fill="#7a8296"/>
+<path d="M662 96 L698 96" fill="none" stroke="#a3a9b8" stroke-width="1.5"/>
+<polygon points="704,96 696,92 696,100" fill="#a3a9b8"/>
+<polygon points="656,96 664,100 664,92" fill="#a3a9b8"/>
+<rect x="704" y="32" width="96" height="128" rx="8" fill="#161a22" stroke="#2a2f3a" stroke-width="1"/>
+<text class="s" x="752" y="88" font-size="16" font-weight="500" fill="#eef0f5" text-anchor="middle">WireGuard</text>
+<text class="s" x="752" y="108" font-size="16" font-weight="500" fill="#eef0f5" text-anchor="middle">target</text>
+<text class="s" x="0" y="196" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="start">The top row shows WireGuard bytes 1 to 3 on each leg. Amber is a peer token.</text>
+</svg>

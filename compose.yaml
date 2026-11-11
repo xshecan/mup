@@ -1,0 +1,30 @@
+# Run one role on each host, after you replace the example addresses in configs/:
+#   docker compose --profile server up -d --build
+#   docker compose --profile client up -d --build
+
+x-mup: &mup
+  build: .
+  image: mup:latest
+  restart: unless-stopped
+  # TCX attaches to the interfaces of the host.
+  network_mode: host
+  # The daemon loads BPF programs and writes pins under /sys/fs/bpf. The default
+  # AppArmor and seccomp profiles of Docker can block this.
+  privileged: true
+  volumes:
+    # The pins outlive the container, so a restart does not stop forwarding.
+    - /sys/fs/bpf:/sys/fs/bpf
+    # The control socket for mupctl.
+    - /run/mup:/run/mup
+    - ./configs:/etc/mup:ro
+
+services:
+  server:
+    <<: *mup
+    profiles: [server]
+    command: --config /etc/mup/server.yaml
+
+  client:
+    <<: *mup
+    profiles: [client]
+    command: --config /etc/mup/client.yaml

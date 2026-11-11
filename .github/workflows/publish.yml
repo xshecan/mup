@@ -1,0 +1,22 @@
+name: publish
+
+on: workflow_dispatch
+
+permissions: {}
+
+jobs:
+  publish:
+    if: vars.MIRROR_APP_ID != ''
+    runs-on: ubuntu-latest
+    steps:
+      - id: token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.MIRROR_APP_ID }}
+          private-key: ${{ secrets.MIRROR_APP_KEY }}
+          owner: xshecan
+          repositories: mup
+      - name: Make the public repository public
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: gh api --method PATCH repos/xshecan/mup -f visibility=public

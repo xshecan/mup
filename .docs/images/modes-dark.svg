@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="372" viewBox="0 0 800 372" role="img" aria-labelledby="title desc" xml:space="preserve">
+<title id="title">Path modes</title>
+<desc id="desc">Fallback uses the first healthy path. Balancer hashes each peer token to one healthy path. Burst sends a copy on every healthy path, and the server keeps the first copy.</desc>
+<style>.s{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif}.m{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace;white-space:pre}</style>
+<text class="s" x="0" y="36" font-size="16" font-weight="500" fill="#eef0f5" text-anchor="start">Fallback</text>
+<text class="m" x="0" y="56" font-size="14" font-weight="400" fill="#7a8296" text-anchor="start">--mode fallback</text>
+<text class="s" x="192" y="16" font-size="14" font-weight="400" fill="#7a8296" text-anchor="start">client</text>
+<text class="s" x="512" y="16" font-size="14" font-weight="400" fill="#7a8296" text-anchor="end">server</text>
+<path d="M192 24 L192 112" fill="none" stroke="#eef0f5" stroke-width="2"/>
+<path d="M512 24 L512 112" fill="none" stroke="#eef0f5" stroke-width="2"/>
+<text class="m" x="352" y="38" font-size="14" font-weight="400" fill="#e5484d" text-anchor="middle">path 0, unhealthy</text>
+<path d="M193 44 L511 44" fill="none" stroke="#7a8296" stroke-width="1" stroke-dasharray="4 4"/>
+<text class="m" x="352" y="66" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">path 1, in use</text>
+<path d="M193 72 L505 72" fill="none" stroke="#f0a742" stroke-width="2"/>
+<polygon points="511,72 503,68 503,76" fill="#f0a742"/>
+<text class="m" x="352" y="94" font-size="14" font-weight="400" fill="#7a8296" text-anchor="middle">path 2, standby</text>
+<path d="M193 100 L511 100" fill="none" stroke="#7a8296" stroke-width="1" stroke-dasharray="4 4"/>
+<text class="s" x="536" y="56" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="start">Uses the first healthy path,</text>
+<text class="s" x="536" y="76" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="start">in the order of the -u flags.</text>
+<path d="M0 124 L800 124" fill="none" stroke="#2a2f3a" stroke-width="1"/>
+<text class="s" x="0" y="160" font-size="16" font-weight="500" fill="#eef0f5" text-anchor="start">Balancer</text>
+<text class="m" x="0" y="180" font-size="14" font-weight="400" fill="#7a8296" text-anchor="start">--mode balancer</text>
+<text class="s" x="192" y="140" font-size="14" font-weight="400" fill="#7a8296" text-anchor="start">client</text>
+<text class="s" x="512" y="140" font-size="14" font-weight="400" fill="#7a8296" text-anchor="end">server</text>
+<path d="M192 148 L192 236" fill="none" stroke="#eef0f5" stroke-width="2"/>
+<path d="M512 148 L512 236" fill="none" stroke="#eef0f5" stroke-width="2"/>
+<text class="m" x="352" y="162" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">token 7</text>
+<path d="M193 168 L505 168" fill="none" stroke="#f0a742" stroke-width="2"/>
+<polygon points="511,168 503,164 503,172" fill="#f0a742"/>
+<text class="m" x="352" y="190" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">token 3</text>
+<path d="M193 196 L505 196" fill="none" stroke="#f0a742" stroke-width="2"/>
+<polygon points="511,196 503,192 503,200" fill="#f0a742"/>
+<text class="m" x="352" y="218" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">token 12</text>
+<path d="M193 224 L505 224" fill="none" stroke="#f0a742" stroke-width="2"/>
+<polygon points="511,224 503,220 503,228" fill="#f0a742"/>
+<text class="s" x="536" y="180" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="start">Hashes each peer token to one</text>
+<text class="s" x="536" y="200" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="start">healthy path.</text>
+<path d="M0 248 L800 248" fill="none" stroke="#2a2f3a" stroke-width="1"/>
+<text class="s" x="0" y="284" font-size="16" font-weight="500" fill="#eef0f5" text-anchor="start">Burst</text>
+<text class="m" x="0" y="304" font-size="14" font-weight="400" fill="#7a8296" text-anchor="start">--mode burst</text>
+<text class="s" x="192" y="264" font-size="14" font-weight="400" fill="#7a8296" text-anchor="start">client</text>
+<text class="s" x="512" y="264" font-size="14" font-weight="400" fill="#7a8296" text-anchor="end">server</text>
+<path d="M192 272 L192 360" fill="none" stroke="#eef0f5" stroke-width="2"/>
+<path d="M512 272 L512 360" fill="none" stroke="#eef0f5" stroke-width="2"/>
+<text class="m" x="352" y="286" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">copy</text>
+<path d="M193 292 L505 292" fill="none" stroke="#f0a742" stroke-width="2"/>
+<polygon points="511,292 503,288 503,296" fill="#f0a742"/>
+<text class="m" x="352" y="314" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">copy</text>
+<path d="M193 320 L505 320" fill="none" stroke="#f0a742" stroke-width="2"/>
+<polygon points="511,320 503,316 503,324" fill="#f0a742"/>
+<text class="m" x="352" y="342" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="middle">copy</text>
+<path d="M193 348 L505 348" fill="none" stroke="#f0a742" stroke-width="2"/>
+<polygon points="511,348 503,344 503,352" fill="#f0a742"/>
+<text class="s" x="536" y="304" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="start">Copies to every healthy path.</text>
+<text class="s" x="536" y="324" font-size="14" font-weight="400" fill="#a3a9b8" text-anchor="start">The server keeps the first copy.</text>
+</svg>
