@@ -283,11 +283,12 @@ static __always_inline struct path_config_v1 *select_client_path(
 		return 0;
 
 	if (group->mode == MUP_MODE_BALANCER) {
-#pragma clang loop unroll(disable)
-		for (__u32 index = 0; index < 8; index++) {
+#pragma clang loop unroll(full)
+		for (int index = 0; index < 8; index++) {
 			if (!(usable_mask & (1U << index)))
 				continue;
-			path = bpf_map_lookup_elem(&path_config, &index);
+			__u32 key = index;
+			path = bpf_map_lookup_elem(&path_config, &key);
 			if (path && path->destination_ip && path->ifindex)
 				healthy_count++;
 		}
@@ -297,11 +298,12 @@ static __always_inline struct path_config_v1 *select_client_path(
 		hash ^= hash >> 16;
 		__u32 ordinal = hash % healthy_count;
 		healthy_count = 0;
-#pragma clang loop unroll(disable)
-		for (__u32 index = 0; index < 8; index++) {
+#pragma clang loop unroll(full)
+		for (int index = 0; index < 8; index++) {
 			if (!(usable_mask & (1U << index)))
 				continue;
-			path = bpf_map_lookup_elem(&path_config, &index);
+			__u32 key = index;
+			path = bpf_map_lookup_elem(&path_config, &key);
 			if (!path || !path->destination_ip || !path->ifindex)
 				continue;
 			if (healthy_count == ordinal)
@@ -311,11 +313,12 @@ static __always_inline struct path_config_v1 *select_client_path(
 		return 0;
 	}
 
-#pragma clang loop unroll(disable)
-	for (__u32 index = 0; index < 8; index++) {
+#pragma clang loop unroll(full)
+	for (int index = 0; index < 8; index++) {
 		if (!(usable_mask & (1U << index)))
 			continue;
-		path = bpf_map_lookup_elem(&path_config, &index);
+		__u32 key = index;
+		path = bpf_map_lookup_elem(&path_config, &key);
 		if (!path || !path->destination_ip || !path->ifindex)
 			continue;
 		if (!selected || path->priority < selected_priority) {
@@ -336,11 +339,12 @@ static __always_inline int is_direct_client_source(
 	__u16 observed_port = packet->transport == MUP_TRANSPORT_UDP ?
 				  packet->source_port : packet->server_port;
 
-#pragma clang loop unroll(disable)
-	for (__u32 index = 0; index < 8; index++) {
+#pragma clang loop unroll(full)
+	for (int index = 0; index < 8; index++) {
 		if (!(path_mask & (1U << index)))
 			continue;
-		path = bpf_map_lookup_elem(&path_config, &index);
+		__u32 key = index;
+		path = bpf_map_lookup_elem(&path_config, &key);
 		if (!path)
 			continue;
 		if (path->destination_ip == packet->ipv4->source &&
@@ -356,9 +360,10 @@ static __always_inline int is_client_icmp_port(
 {
 	struct path_config_v1 *path;
 
-#pragma clang loop unroll(disable)
-	for (__u32 index = 0; index < 8; index++) {
-		path = bpf_map_lookup_elem(&path_config, &index);
+#pragma clang loop unroll(full)
+	for (int index = 0; index < 8; index++) {
+		__u32 key = index;
+		path = bpf_map_lookup_elem(&path_config, &key);
 		if (path && path->destination_ip &&
 		    path->transport == MUP_TRANSPORT_ICMP &&
 		    path->server_port == packet->server_port)
@@ -726,16 +731,22 @@ int mup_client_ingress(struct __sk_buff *skb)
 	result = get_or_create_client_route(&endpoint, skb->ifindex, &peer_token);
 	if (result != MUP_DROP_NONE)
 		return count_and_drop(skb, result);
-	if (group->mode != MUP_MODE_BURST) {
-		path = select_client_path(group, peer_token);
-		if (!path)
-			return count_and_drop(skb, MUP_DROP_NO_PATH);
-	}
-	if (mup_set_peer_token(&packet, peer_token))
-		return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
-	if (group->mode == MUP_MODE_BURST)
+	/*
+	 * Each read of the group mode is a separate value to the verifier, so
+	 * one branch must decide the mode. A second read lets the verifier
+	 * explore the single path case without a selected path.
+	 */
+	if (group->mode == MUP_MODE_BURST) {
+		if (mup_set_peer_token(&packet, peer_token))
+			return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
 		return burst_client_packet(skb, &packet, endpoint.listen_port,
 					   group->path_mask, peer_token);
+	}
+	path = select_client_path(group, peer_token);
+	if (!path)
+		return count_and_drop(skb, MUP_DROP_NO_PATH);
+	if (mup_set_peer_token(&packet, peer_token))
+		return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
 	result = rewrite_for_path(&packet, endpoint.listen_port, path, peer_token);
 	if (result == -2)
 		return count_and_drop(skb, MUP_DROP_TRANSPORT);

@@ -21,9 +21,18 @@ struct mup_packet {
 	__u8 transport;
 };
 
+/*
+ * Clang merges the two loads into one 16-bit load and a byte swap. The
+ * verifier of Linux 6.8 loses all bounds of a byte swap result, and then
+ * rejects the packet pointer math with the value. The mask after the barrier
+ * gives the verifier the 16-bit bound again.
+ */
 static __always_inline __u16 mup_read_be16(const __u8 *bytes)
 {
-	return ((__u16)bytes[0] << 8) | bytes[1];
+	__u32 value = ((__u32)bytes[0] << 8) | bytes[1];
+
+	asm volatile("" : "+r"(value));
+	return value & 0xffff;
 }
 
 /*
