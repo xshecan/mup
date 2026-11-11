@@ -47,16 +47,16 @@ func TestLoadClient(t *testing.T) {
 
 	app, err := Load(writeFile(t, `
 client:
-  advertised_ip: 192.0.2.10
+  advertise: 192.0.2.10
   control_socket: ""
   groups:
-    - listen_port: 51820
+    - port: 51820
       mode: burst
       return_ip: 1.1.1.1
       paths:
         - 203.0.113.5:5000/udp
         - 203.0.113.6%eth1:5000/icmp
-    - listen_port: 51821
+    - port: 51821
       paths:
         - 198.51.100.20:6000/udp
 `))
@@ -91,9 +91,9 @@ func TestLoadClientDefaultControlSocket(t *testing.T) {
 
 	app, err := Load(writeFile(t, `
 client:
-  advertised_ip: 192.0.2.10
+  advertise: 192.0.2.10
   groups:
-    - listen_port: 51820
+    - port: 51820
       paths: [203.0.113.5:5000/udp]
 `))
 	if err != nil {
@@ -122,7 +122,7 @@ server:
 func TestLoadRejectsInvalidFiles(t *testing.T) {
 	t.Parallel()
 
-	const client = "client:\n  advertised_ip: 192.0.2.10\n  groups:\n    - listen_port: 51820\n"
+	const client = "client:\n  advertise: 192.0.2.10\n  groups:\n    - port: 51820\n"
 	const server = "server:\n  port: 5000\n  target: 198.51.100.7:51820\n"
 	tests := []struct {
 		name    string
@@ -137,7 +137,7 @@ func TestLoadRejectsInvalidFiles(t *testing.T) {
 		{"bad path", client + "      paths: [203.0.113.5:5000/tcp]\n", "203.0.113.5:5000/tcp"},
 		{"null path", client + "      paths: [~]\n", "group 51820: path 0"},
 		{"no paths", client, "at least one path"},
-		{"no groups", "client:\n  advertised_ip: 192.0.2.10\n", "at least one group"},
+		{"no groups", "client:\n  advertise: 192.0.2.10\n", "at least one group"},
 		{"unknown group key", client + "      paths: [203.0.113.5:5000/udp]\n      moode: burst\n", "moode"},
 		{"port overflow", "server:\n  port: 70000\n  target: 198.51.100.7:51820\n", "70000"},
 		{"zero port", "server:\n  port: 0\n  target: 198.51.100.7:51820\n", "server port"},

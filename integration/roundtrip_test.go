@@ -131,12 +131,12 @@ func TestPrivilegedTwoTargets(t *testing.T) {
 	directory := t.TempDir()
 	configuration := filepath.Join(directory, "client.yaml")
 	content := fmt.Sprintf(`client:
-  advertised_ip: 10.210.1.1
+  advertise: 10.210.1.1
   control_socket: %s
   groups:
-    - listen_port: 51820
+    - port: 51820
       paths: [10.210.1.2:5000/udp]
-    - listen_port: 51821
+    - port: 51821
       paths: [10.210.5.2:6000/icmp]
 `, filepath.Join(directory, "mup.sock"))
 	if err := os.WriteFile(configuration, []byte(content), 0o600); err != nil {

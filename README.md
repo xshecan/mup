@@ -114,14 +114,14 @@ sudo ./mup --config configs/client.yaml
 
 ```yaml
 client:
-  advertised_ip: 192.0.2.10
+  advertise: 192.0.2.10
   groups:
-    - listen_port: 51820
+    - port: 51820
       mode: fallback
       paths:
         - 203.0.113.5:5000/udp
         - 203.0.113.6:5000/icmp
-    - listen_port: 51821
+    - port: 51821
       mode: burst
       paths:
         - 198.51.100.20:6000/udp
@@ -135,9 +135,9 @@ server:
 
 | Key | Flag | Meaning |
 | --- | --- | --- |
-| `client.advertised_ip` | `-s` | The advertised IP. |
+| `client.advertise` | `-s` | The advertised IP. |
 | `client.control_socket` | `--control-socket` | Optional. The socket for `mupctl`. An empty value turns the socket off. |
-| `client.groups[].listen_port` | `-p` | The port where the group receives packets from its peers. |
+| `client.groups[].port` | `-p` | The port where the group receives packets from its peers. |
 | `client.groups[].mode` | `--mode` | Optional. The path mode of the group. The default is `fallback`. |
 | `client.groups[].return_ip` | `-r` | Optional. The return IP of the group. |
 | `client.groups[].paths` | `-u` | The paths of the group, in the form of the `-u` flag. |

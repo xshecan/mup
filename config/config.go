@@ -65,7 +65,7 @@ func (a App) Validate() error {
 }
 
 type Client struct {
-	AdvertisedIP  netip.Addr `yaml:"advertised_ip"`
+	AdvertisedIP  netip.Addr `yaml:"advertise"`
 	ControlSocket string     `yaml:"control_socket"`
 	Groups        []Group    `yaml:"groups"`
 }
@@ -74,7 +74,7 @@ type Client struct {
 // a group forward to the same WireGuard target, because a WireGuard handshake
 // fails against another identity.
 type Group struct {
-	ListenPort uint16     `yaml:"listen_port"`
+	ListenPort uint16     `yaml:"port"`
 	Mode       Mode       `yaml:"mode"`
 	ReturnIP   netip.Addr `yaml:"return_ip"`
 	Paths      []Path     `yaml:"paths"`

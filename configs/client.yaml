@@ -1,13 +1,13 @@
 # The configuration of a MUP client. Replace the example addresses.
 client:
   # The address of this host that the servers send replies to.
-  advertised_ip: 192.0.2.10
+  advertise: 192.0.2.10
 
   # Each group is one WireGuard target. Peers select a group with the listen
   # port in their Endpoint. A client has at most 8 paths in all groups.
   groups:
     # Peers that use port 51820 reach the WireGuard target behind these servers.
-    - listen_port: 51820
+    - port: 51820
       mode: fallback
       paths:
         - 203.0.113.5:5000/udp
@@ -15,7 +15,7 @@ client:
 
     # Peers that use port 51821 reach another WireGuard target. The return_ip
     # key is optional, and each group has its own value.
-    - listen_port: 51821
+    - port: 51821
       mode: burst
       return_ip: 1.1.1.1
       paths:
