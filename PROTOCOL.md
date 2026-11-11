@@ -326,7 +326,7 @@ The programs forward only IPv4 packets with a 20-byte header, no fragments, and 
 | 1 | Handshake initiation | 148 |
 | 2 | Handshake response | 92 |
 | 3 | Cookie reply | 64 |
-| 4 | Transport data | 32 or more, a multiple of 16 |
+| 4 | Transport data | 32 or more. Senders should pad to a multiple of 16, but some clients, for example Surge, do not. |
 
 A program returns `TCX_NEXT` for traffic that it does not own. This traffic includes non-IPv4 packets, malformed IPv4 packets, other protocols, and packets to other ports. A program drops and counts a packet that is addressed to MUP but breaks a rule. An ICMP packet with an identifier other than the MUP port is not addressed to MUP.
 

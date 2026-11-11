@@ -20,7 +20,8 @@ func TestValidateWireGuardLengths(t *testing.T) {
 		{name: "keepalive", typeID: MessageTransportData, length: TransportDataMinLength},
 		{name: "transport payload", typeID: MessageTransportData, length: TransportDataMinLength + 32},
 		{name: "short initiation", typeID: MessageHandshakeInitiation, length: HandshakeInitiationLength - 1, wantErr: ErrWireGuardLength},
-		{name: "unaligned transport", typeID: MessageTransportData, length: TransportDataMinLength + 1, wantErr: ErrWireGuardLength},
+		{name: "unpadded transport", typeID: MessageTransportData, length: 95},
+		{name: "short transport", typeID: MessageTransportData, length: TransportDataMinLength - 1, wantErr: ErrWireGuardLength},
 		{name: "unknown type", typeID: 9, length: HandshakeInitiationLength, wantErr: ErrWireGuardType},
 	}
 

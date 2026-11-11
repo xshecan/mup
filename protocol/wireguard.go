@@ -39,7 +39,7 @@ func ValidateWireGuard(packet []byte, expectPeerToken bool) error {
 			return ErrWireGuardLength
 		}
 	case MessageTransportData:
-		if len(packet) < TransportDataMinLength || len(packet)%16 != 0 {
+		if len(packet) < TransportDataMinLength {
 			return ErrWireGuardLength
 		}
 	default:

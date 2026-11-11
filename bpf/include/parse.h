@@ -120,7 +120,11 @@ static __always_inline int validate_wg(const struct mup_packet *packet, int expe
 		return MUP_DROP_WG_LENGTH;
 	if (type == 3 && packet->payload_length != 64)
 		return MUP_DROP_WG_LENGTH;
-	if (type == 4 && (packet->payload_length < 32 || (packet->payload_length & 15)))
+	/*
+	 * Senders should pad data to a multiple of 16 bytes, but receivers do
+	 * not require it, and some clients, for example Surge, do not pad.
+	 */
+	if (type == 4 && packet->payload_length < 32)
 		return MUP_DROP_WG_LENGTH;
 	if (type < 1 || type > 4)
 		return MUP_DROP_WG_TYPE;
