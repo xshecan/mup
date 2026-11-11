@@ -117,6 +117,15 @@ struct server_config_v1 {
 	__be16 server_port;
 };
 
+/*
+ * The server accepts every port from first to last. server_config_v1 keeps
+ * the first port, so a server without this entry accepts only that port.
+ */
+struct server_ports_v1 {
+	__u16 first;
+	__u16 last;
+};
+
 struct registration_value_v1 {
 	__be32 return_ip;
 	__be16 listen_port;
@@ -217,6 +226,7 @@ _Static_assert(sizeof(struct registered_path_key_v1) == 12, "registered_path_key
 _Static_assert(sizeof(struct client_config_v1) == 16, "client_config_v1 ABI");
 _Static_assert(sizeof(struct path_group_v1) == 8, "path_group_v1 ABI");
 _Static_assert(sizeof(struct server_config_v1) == 16, "server_config_v1 ABI");
+_Static_assert(sizeof(struct server_ports_v1) == 4, "server_ports_v1 ABI");
 _Static_assert(sizeof(struct registration_value_v1) == 16, "registration_value_v1 ABI");
 _Static_assert(sizeof(struct registered_path_value_v1) == 32, "registered_path_value_v1 ABI");
 _Static_assert(sizeof(struct peer_endpoint_key_v1) == 12, "peer_endpoint_key_v1 ABI");

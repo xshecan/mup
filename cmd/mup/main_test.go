@@ -141,7 +141,7 @@ func TestParseArgsServerExample(t *testing.T) {
 	if app.Client != nil || app.Server == nil {
 		t.Fatalf("unexpected app mode: %#v", app)
 	}
-	if app.Server.Port != 5000 || app.Server.Target != netip.MustParseAddrPort("193.24.210.185:51820") {
+	if app.Server.Port != config.SinglePort(5000) || app.Server.Target != netip.MustParseAddrPort("193.24.210.185:51820") {
 		t.Fatalf("unexpected server config: %#v", app.Server)
 	}
 }
@@ -177,7 +177,7 @@ func TestParseArgsConfigurationFile(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parseArgs(%q): %v", args, err)
 		}
-		if app.Server == nil || app.Server.Port != 5000 {
+		if app.Server == nil || app.Server.Port != config.SinglePort(5000) {
 			t.Fatalf("parseArgs(%q) = %#v", args, app)
 		}
 	}

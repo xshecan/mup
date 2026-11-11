@@ -242,14 +242,37 @@ func serveServerUDPControl(
 	registry *control.Registry,
 	sink registrationSink,
 ) error {
-	connection, err := net.ListenUDP("udp4", &net.UDPAddr{Port: int(server.Port)})
-	if err != nil {
-		return fmt.Errorf("listen UDP/%d: %w", server.Port, err)
+	connections := make([]*net.UDPConn, 0, server.Port.Len())
+	defer func() {
+		for _, connection := range connections {
+			_ = connection.Close()
+		}
+	}()
+	for port := int(server.Port.First); port <= int(server.Port.Last); port++ {
+		connection, err := net.ListenUDP("udp4", &net.UDPAddr{Port: port})
+		if err != nil {
+			return fmt.Errorf("listen UDP/%d: %w", port, err)
+		}
+		connections = append(connections, connection)
+		if err := enablePacketInfo(connection); err != nil {
+			return fmt.Errorf("enable UDP packet info on port %d: %w", port, err)
+		}
 	}
-	defer connection.Close()
-	if err := enablePacketInfo(connection); err != nil {
-		return fmt.Errorf("enable UDP packet info: %w", err)
+	results := make(chan error, len(connections))
+	for _, connection := range connections {
+		go func() {
+			results <- serveServerUDPConnection(ctx, connection, registry, sink)
+		}()
 	}
+	return <-results
+}
+
+func serveServerUDPConnection(
+	ctx context.Context,
+	connection *net.UDPConn,
+	registry *control.Registry,
+	sink registrationSink,
+) error {
 	buffer := make([]byte, udpControlBufferLength)
 	oob := make([]byte, unix.CmsgSpace(unix.SizeofInet4Pktinfo))
 	for {
@@ -314,7 +337,7 @@ func serveServerICMPControl(
 			return err
 		}
 		echo, err := parseICMPEcho(stripIPv4Header(buffer[:count]))
-		if err != nil || echo.echoType != icmpEchoRequest || echo.identifier != server.Port {
+		if err != nil || echo.echoType != icmpEchoRequest || !server.Port.Contains(echo.identifier) {
 			continue
 		}
 		local, err := packetInfoDestination(oob[:oobCount])

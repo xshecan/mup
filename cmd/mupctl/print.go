@@ -47,7 +47,11 @@ func printStatus(w io.Writer, status api.Status, clients []api.RegisteredClient,
 		printPaths(w, client.Paths, wide, now)
 	case status.Server != nil:
 		server := status.Server
-		field("Port", strconv.Itoa(int(server.Port)))
+		port := strconv.Itoa(int(server.Port))
+		if server.PortLast > server.Port {
+			port += "-" + strconv.Itoa(int(server.PortLast))
+		}
+		field("Port", port)
 		field("Target", server.Target)
 		field("Uptime", humanDuration(now.Sub(status.StartedAt)))
 		field("Clients", fmt.Sprintf("%d, with %d paths", server.Clients, server.Paths))

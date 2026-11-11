@@ -138,13 +138,13 @@ func TestStatusShowsTheServerClients(t *testing.T) {
 	status := api.Status{
 		Role:      api.RoleServer,
 		StartedAt: testNow.Add(-26 * time.Hour),
-		Server:    &api.ServerStatus{Port: 5000, Target: "198.51.100.7:51820", Clients: 1, Paths: 1, Peers: 14, PortsFree: 40986},
+		Server:    &api.ServerStatus{Port: 5000, PortLast: 6000, Target: "198.51.100.7:51820", Clients: 1, Paths: 1, Peers: 14, PortsFree: 40986},
 	}
 	code, stdout, stderr := runCommand(t, fakeDaemon(t, status), "status")
 	if code != 0 {
 		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"Role:           server", "Uptime:         1d2h", "Target ports:   40986 free, 0 quarantined", "192.0.2.10   8f3a0000   1       14      -           24s"} {
+	for _, want := range []string{"Role:           server", "Port:           5000-6000", "Uptime:         1d2h", "Target ports:   40986 free, 0 quarantined", "192.0.2.10   8f3a0000   1       14      -           24s"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("status output misses %q:\n%s", want, stdout)
 		}

@@ -92,17 +92,20 @@ func TestEncodeClientSettingsRejectsInvalidGroups(t *testing.T) {
 func TestEncodeServerSettings(t *testing.T) {
 	t.Parallel()
 
-	encoded, err := encodeServerSettings(ServerSettings{
-		Target:     netip.MustParseAddrPort("193.24.210.185:51820"),
-		SourceIP:   netip.MustParseAddr("192.0.2.5"),
-		Ifindex:    3,
-		ServerPort: 5000,
+	encoded, ports, err := encodeServerSettings(ServerSettings{
+		Target:      netip.MustParseAddrPort("193.24.210.185:51820"),
+		SourceIP:    netip.MustParseAddr("192.0.2.5"),
+		Ifindex:     3,
+		ServerPorts: config.PortRange{First: 5000, Last: 6000},
 	})
 	if err != nil {
 		t.Fatalf("encodeServerSettings: %v", err)
 	}
 	if encoded.Ifindex != 3 || encoded.TargetPort != 51820 || encoded.ServerPort != 5000 {
 		t.Fatalf("server config = %#v", encoded)
+	}
+	if ports.First != 5000 || ports.Last != 6000 {
+		t.Fatalf("server ports = %#v", ports)
 	}
 	if got := nativeIPv4Bytes(encoded.TargetIp); got != [4]byte{193, 24, 210, 185} {
 		t.Fatalf("target IP bytes = %v", got)
@@ -115,7 +118,7 @@ func TestSettingsRejectInvalidValues(t *testing.T) {
 	if _, _, _, _, err := encodeClientSettings(ClientSettings{}); err == nil {
 		t.Fatal("empty client settings unexpectedly accepted")
 	}
-	if _, err := encodeServerSettings(ServerSettings{}); err == nil {
+	if _, _, err := encodeServerSettings(ServerSettings{}); err == nil {
 		t.Fatal("empty server settings unexpectedly accepted")
 	}
 }

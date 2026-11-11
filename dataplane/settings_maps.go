@@ -15,6 +15,7 @@ type configurationMap interface {
 type configurationMaps struct {
 	client  configurationMap
 	server  configurationMap
+	ports   configurationMap
 	groups  configurationMap
 	paths   configurationMap
 	returns configurationMap
@@ -61,9 +62,12 @@ func applyClientSettings(maps configurationMaps, settings ClientSettings) error 
 }
 
 func applyServerSettings(maps configurationMaps, settings ServerSettings) error {
-	server, err := encodeServerSettings(settings)
+	server, ports, err := encodeServerSettings(settings)
 	if err != nil {
 		return err
+	}
+	if err := maps.ports.Update(uint32(0), ports, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("update server ports: %w", err)
 	}
 	if err := maps.server.Update(uint32(0), server, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("update server configuration: %w", err)

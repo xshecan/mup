@@ -37,7 +37,8 @@ func (s *serverInspector) Status() (api.Status, error) {
 		Role:      api.RoleServer,
 		StartedAt: s.startedAt,
 		Server: &api.ServerStatus{
-			Port:             s.server.Port,
+			Port:             s.server.Port.First,
+			PortLast:         s.server.Port.Last,
 			Target:           s.server.Target.String(),
 			Clients:          snapshot.Registrations,
 			Paths:            snapshot.RegisteredPaths,

@@ -144,7 +144,7 @@ In burst mode, the program sends a clone on each healthy path of the group excep
 
 ### Server upstream
 
-A UDP packet arrives at the server port, or an ICMP Echo Request arrives with the server port as identifier. The server program then does these steps:
+A UDP packet arrives at a server port, or an ICMP Echo Request arrives with a server port as identifier. The server ports are one port or a range, for example 5000-6000. The server program then does these steps:
 
 1. It makes sure that the packet is a valid WireGuard message with a token from 1 to 4095.
 2. It looks up the registered path by source IP, local IP, port, and transport. The path gives the client key.
@@ -210,7 +210,7 @@ The client registers each path on its own. It sends a REGISTER frame from `-s` t
 For each REGISTER, the server makes sure that all of these conditions are true:
 
 - The source address of the packet equals the advertised IP in the frame.
-- The port in the frame equals the server port, and the frame arrived on that port.
+- The port in the frame is a server port, and the frame arrived on that port.
 - The transport in the frame equals the transport that carried the frame.
 - The path ID is from 0 to 7.
 
@@ -273,7 +273,8 @@ Pinned BPF maps hold all dataplane state. Go writes the configuration and the re
 | `client_peer_by_endpoint` | hash | 4096 | Peer endpoint to token and last-seen time. | Program |
 | `client_endpoint_by_token` | hash | 4096 | Token to peer endpoint, interface, and last-seen time. | Program |
 | `free_peer_tokens` | queue | 4095 | Unused tokens. | Both |
-| `server_config` | array | 1 | Target, source IP, interface, and port. | Go |
+| `server_config` | array | 1 | Target, source IP, interface, and the first server port. | Go |
+| `server_ports` | array | 1 | The first and the last server port. Without this entry, the server accepts only the port in `server_config`. | Go |
 | `registration_by_key` | hash | 4096 | Client key to lease end and listen port, with the return IP and flags of the latest REGISTER. The programs do not read the return IP. | Go |
 | `registered_paths` | hash | 32768 | Source IP, local IP, port, and transport to client key, return IP, and flags. | Go |
 | `server_route_by_key` | hash | 41000 | Client key and token to target port and return path. | Program |
@@ -454,6 +455,7 @@ The duplicate cache is a filter for burst copies, not a replay defense. WireGuar
 - A client has up to 8 paths in all groups.
 - A client serves up to 4095 peers in all groups. A server holds up to 41000 routes and 4096 registrations.
 - Each active client of a server needs its own advertised IP.
+- A server port range has up to 4096 ports. The server opens one UDP control socket for each port.
 - MUP attaches only to the interfaces that are up at start.
 - The server treats every UDP packet from the target address and port to its source IP as a reply. Do not run other clients of the same target on the server host with that source IP.
 - MUP needs a complete transport checksum on each input packet. The one exception is a reply of a target on the server host, which the server handles as a partial checksum. Other local traffic through a veth pair with checksum offload can carry an unfinished checksum, and MUP does not support it.

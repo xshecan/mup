@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 
 	"github.com/xshecan/mup/api"
@@ -13,6 +14,75 @@ import (
 )
 
 const MaxPaths = 8
+
+// MaxServerPorts limits a server port range, because the server opens one UDP
+// socket for each port.
+const MaxServerPorts = 4096
+
+// PortRange is a range of server ports from First to Last. A single port has
+// First equal to Last.
+type PortRange struct {
+	First uint16
+	Last  uint16
+}
+
+// SinglePort returns the range of one port.
+func SinglePort(port uint16) PortRange {
+	return PortRange{First: port, Last: port}
+}
+
+// ParsePortRange parses PORT or FIRST-LAST.
+func ParsePortRange(raw string) (PortRange, error) {
+	firstText, lastText, isRange := strings.Cut(strings.TrimSpace(raw), "-")
+	first, err := strconv.ParseUint(firstText, 10, 16)
+	if err != nil || first == 0 {
+		return PortRange{}, fmt.Errorf("invalid server port %q", raw)
+	}
+	last := first
+	if isRange {
+		last, err = strconv.ParseUint(lastText, 10, 16)
+		if err != nil || last < first {
+			return PortRange{}, fmt.Errorf("invalid server port range %q", raw)
+		}
+	}
+	return PortRange{First: uint16(first), Last: uint16(last)}, nil
+}
+
+// String formats the range as PORT or FIRST-LAST.
+func (r PortRange) String() string {
+	if r.First == r.Last {
+		return strconv.Itoa(int(r.First))
+	}
+	return fmt.Sprintf("%d-%d", r.First, r.Last)
+}
+
+// Contains reports whether port is in the range.
+func (r PortRange) Contains(port uint16) bool {
+	return port >= r.First && port <= r.Last
+}
+
+// Len returns the number of ports in the range.
+func (r PortRange) Len() int {
+	if r.Last < r.First {
+		return 0
+	}
+	return int(r.Last) - int(r.First) + 1
+}
+
+// UnmarshalText reads PORT or FIRST-LAST from a configuration file.
+func (r *PortRange) UnmarshalText(text []byte) error {
+	parsed, err := ParsePortRange(string(text))
+	if err != nil {
+		return err
+	}
+	*r = parsed
+	return nil
+}
+
+// MarshalText writes the range in the form that ParsePortRange accepts.
+func (r PortRange) MarshalText() ([]byte, error) {
+	return []byte(r.String()), nil
+}
 
 type Mode uint8
 
@@ -207,7 +277,7 @@ func (p Path) validate() error {
 }
 
 type Server struct {
-	Port          uint16         `yaml:"port"`
+	Port          PortRange      `yaml:"port"`
 	Target        netip.AddrPort `yaml:"target"`
 	ControlSocket string         `yaml:"control_socket"`
 }
@@ -221,8 +291,11 @@ func (s *Server) UnmarshalYAML(unmarshal func(any) error) error {
 }
 
 func (s Server) Validate() error {
-	if s.Port == 0 {
-		return errors.New("server port must be between 1 and 65535")
+	if s.Port.First == 0 || s.Port.Last < s.Port.First {
+		return errors.New("server port must be PORT or FIRST-LAST between 1 and 65535")
+	}
+	if s.Port.Len() > MaxServerPorts {
+		return fmt.Errorf("server port range %s has more than %d ports", s.Port, MaxServerPorts)
 	}
 	if !isNonzeroIPv4(s.Target.Addr()) || s.Target.Port() == 0 {
 		return errors.New("server target must be a nonzero IPv4:PORT")

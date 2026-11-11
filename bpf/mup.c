@@ -32,6 +32,14 @@ struct {
 } server_config SEC(".maps");
 
 struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	MUP_PINNED;
+	__type(key, __u32);
+	__type(value, struct server_ports_v1);
+} server_ports SEC(".maps");
+
+struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 4096);
 	MUP_PINNED;
@@ -775,6 +783,7 @@ int mup_server_ingress(struct __sk_buff *skb)
 {
 	struct mup_packet packet = {};
 	struct server_config_v1 *configuration;
+	struct server_ports_v1 *ports;
 	struct registered_path_key_v1 path_key = {};
 	struct registered_path_value_v1 *path;
 	struct registration_value_v1 *registration;
@@ -885,8 +894,14 @@ int mup_server_ingress(struct __sk_buff *skb)
 		return redirect_packet(reverse->route_value.ifindex);
 	}
 
-	if (packet.server_port != configuration->server_port)
+	ports = bpf_map_lookup_elem(&server_ports, &configuration_key);
+	if (ports && ports->last >= ports->first) {
+		if (packet.server_port < ports->first ||
+		    packet.server_port > ports->last)
+			return MUP_TCX_NEXT;
+	} else if (packet.server_port != configuration->server_port) {
 		return MUP_TCX_NEXT;
+	}
 	if (is_mup_control(&packet))
 		return MUP_TCX_NEXT;
 	if (packet.transport == MUP_TRANSPORT_ICMP) {

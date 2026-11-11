@@ -34,11 +34,27 @@ server:
 	if app.Client != nil || app.Server == nil {
 		t.Fatalf("role = %#v", app)
 	}
-	if app.Server.Port != 5000 || app.Server.Target != netip.MustParseAddrPort("198.51.100.7:51820") {
+	if app.Server.Port != SinglePort(5000) || app.Server.Target != netip.MustParseAddrPort("198.51.100.7:51820") {
 		t.Fatalf("server = %#v", app.Server)
 	}
 	if app.Server.ControlSocket != api.DefaultServerSocket {
 		t.Fatalf("control socket = %q, want the default", app.Server.ControlSocket)
+	}
+}
+
+func TestLoadServerPortRange(t *testing.T) {
+	t.Parallel()
+
+	app, err := Load(writeFile(t, `
+server:
+  port: 5000-6000
+  target: 198.51.100.7:51820
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if app.Server.Port != (PortRange{First: 5000, Last: 6000}) {
+		t.Fatalf("server port = %v", app.Server.Port)
 	}
 }
 
@@ -113,7 +129,7 @@ server:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if app.Server.Port != 5000 || app.Server.Target != netip.MustParseAddrPort("198.51.100.7:51820") {
+	if app.Server.Port != SinglePort(5000) || app.Server.Target != netip.MustParseAddrPort("198.51.100.7:51820") {
 		t.Fatalf("server = %#v", app.Server)
 	}
 }

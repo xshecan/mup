@@ -24,7 +24,7 @@ func TestDaemonOptionsResolveEveryDependency(t *testing.T) {
 			AdvertisedIP: netip.MustParseAddr("192.0.2.10"),
 			Groups:       []config.Group{{ListenPort: 51820, Paths: []config.Path{path}}},
 		}},
-		"server": {Server: &config.Server{Port: 5000, Target: netip.MustParseAddrPort("198.51.100.7:51820")}},
+		"server": {Server: &config.Server{Port: config.SinglePort(5000), Target: netip.MustParseAddrPort("198.51.100.7:51820")}},
 	}
 	for name, appConfig := range roles {
 		t.Run(name, func(t *testing.T) {

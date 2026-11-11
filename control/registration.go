@@ -54,7 +54,8 @@ type pathRegistration struct {
 }
 
 type Registry struct {
-	serverPort uint16
+	firstPort uint16
+	lastPort  uint16
 
 	mu    sync.RWMutex
 	lease time.Duration
@@ -64,9 +65,11 @@ type Registry struct {
 	clients map[ClientKey]ClientRegistration
 }
 
-func NewRegistry(serverPort uint16, lease time.Duration) *Registry {
+// NewRegistry accepts REGISTER frames for the server ports from firstPort to
+// lastPort.
+func NewRegistry(firstPort, lastPort uint16, lease time.Duration) *Registry {
 	return &Registry{
-		serverPort: serverPort, lease: lease,
+		firstPort: firstPort, lastPort: lastPort, lease: lease,
 		owners:  make(map[netip.Addr]ClientKey),
 		paths:   make(map[PathKey]pathRegistration),
 		clients: make(map[ClientKey]ClientRegistration),
@@ -152,7 +155,8 @@ func (r *Registry) validate(request RegistrationRequest) error {
 	if request.Path.Source != request.Frame.AdvertisedIP {
 		return ErrRegistrationSource
 	}
-	if request.Frame.ServerPort != r.serverPort || request.Path.ServerPort != r.serverPort {
+	if request.Frame.ServerPort < r.firstPort || request.Frame.ServerPort > r.lastPort ||
+		request.Path.ServerPort != request.Frame.ServerPort {
 		return ErrRegistrationPort
 	}
 	if request.Path.Transport != request.Frame.Transport {

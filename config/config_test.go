@@ -2,6 +2,7 @@ package config
 
 import (
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/xshecan/mup/protocol"
@@ -118,5 +119,33 @@ func TestClientValidateRejectsInvalidGroups(t *testing.T) {
 				t.Fatal("Validate unexpectedly succeeded")
 			}
 		})
+	}
+}
+
+func TestParsePortRange(t *testing.T) {
+	t.Parallel()
+
+	valid := map[string]PortRange{
+		"9000":      SinglePort(9000),
+		"5000-6000": {First: 5000, Last: 6000},
+		"7000-7000": SinglePort(7000),
+	}
+	for raw, want := range valid {
+		got, err := ParsePortRange(raw)
+		if err != nil || got != want || got.String() != strings.TrimSuffix(raw, "-7000") {
+			t.Fatalf("ParsePortRange(%q) = %v, %v, want %v", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"", "0", "6000-5000", "5000-", "-6000", "70000", "a-b"} {
+		if _, err := ParsePortRange(raw); err == nil {
+			t.Fatalf("ParsePortRange(%q) unexpectedly succeeded", raw)
+		}
+	}
+	if got := (PortRange{First: 5000, Last: 6000}); !got.Contains(5000) || !got.Contains(6000) || got.Contains(6001) || got.Len() != 1001 {
+		t.Fatalf("range methods of %v", got)
+	}
+	server := Server{Port: PortRange{First: 1, Last: MaxServerPorts + 1}, Target: netip.MustParseAddrPort("198.51.100.7:51820")}
+	if err := server.Validate(); err == nil {
+		t.Fatal("a range larger than MaxServerPorts was accepted")
 	}
 }

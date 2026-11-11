@@ -141,7 +141,7 @@ server:
 | `client.servers[].port` | `-p` | The port where the group receives packets from its peers. |
 | `client.servers[].mode` | `--mode` | Optional. The path mode of the group. The default is `fallback`. |
 | `client.servers[].routes` | `-u` | The paths of the group, in the form of the `-u` flag. A path can end with `via RETURN_IP`. |
-| `server.port` | `-p` | The UDP port and the ICMP Echo identifier that the server accepts. |
+| `server.port` | `-p` | The UDP ports and the ICMP Echo identifiers that the server accepts, as `PORT` or `FIRST-LAST`, for example `5000-6000`. |
 | `server.target` | `-r` | The WireGuard target that receives all traffic. |
 | `server.control_socket` | `--control-socket` | Optional. The socket for `mupctl`. An empty value turns the socket off. |
 
@@ -212,12 +212,12 @@ mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT/udp|icmp [via RETURN_IP]" [
 ### Server
 
 ```text
-mup server -p PORT -r TARGET_IP:TARGET_PORT [--control-socket PATH]
+mup server -p PORT[-LAST] -r TARGET_IP:TARGET_PORT [--control-socket PATH]
 ```
 
 | Flag | Value | Meaning |
 | --- | --- | --- |
-| `-p` | port | The UDP port and the ICMP Echo identifier that the server accepts. |
+| `-p` | port or range | The UDP ports and the ICMP Echo identifiers that the server accepts, as `PORT` or `FIRST-LAST`. |
 | `-r` | IPv4:port | The WireGuard target that receives all traffic. |
 | `--control-socket` | path | The socket for `mupctl`. The default is `/run/mup/server.sock`. An empty value turns the socket off. |
 
@@ -353,6 +353,7 @@ MUP has no authentication of its own. A host can spoof the source address of a r
 - IPv4 only, with no IPv4 options and no fragments.
 - Up to 8 paths and up to 4095 peers per client, shared by all of its groups.
 - Up to 41000 routes per server, and up to 4096 registered clients.
+- Up to 4096 server ports in one range. The server opens one UDP socket for each port, so no other program can use a port of the range. A packet to a port of the range that is not valid MUP traffic is dropped.
 - A UDP packet without a checksum is dropped. WireGuard always sends UDP checksums.
 - If the target is on the server host, for example `127.0.0.1`, the network device completes the checksum of each reply. On an ICMP path, the device writes it into the Echo sequence field, so these replies have no fixed sequence.
 - MUP attaches only to the interfaces that are up at start. After you add an interface, restart MUP.

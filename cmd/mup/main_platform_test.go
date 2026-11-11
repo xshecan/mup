@@ -16,7 +16,7 @@ func TestRunApplicationUsesPlatformRuntime(t *testing.T) {
 	t.Parallel()
 
 	err := runApplication(context.Background(), config.App{Server: &config.Server{
-		Port:   5000,
+		Port:   config.SinglePort(5000),
 		Target: netip.MustParseAddrPort("192.0.2.1:51820"),
 	}})
 	if !errors.Is(err, dataplane.ErrUnsupportedPlatform) {

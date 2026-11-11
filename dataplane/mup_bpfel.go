@@ -134,6 +134,12 @@ type mupServerConfigV1 struct {
 	ServerPort uint16
 }
 
+type mupServerPortsV1 struct {
+	_     structs.HostLayout
+	First uint16
+	Last  uint16
+}
+
 type mupServerReverseValueV1 struct {
 	_          structs.HostLayout
 	RouteKey   mupServerRouteKeyV1
@@ -181,6 +187,7 @@ const (
 	mupMapRegisteredPaths          = "registered_paths"
 	mupMapRegistrationByKey        = "registration_by_key"
 	mupMapServerConfig             = "server_config"
+	mupMapServerPorts              = "server_ports"
 	mupMapServerRouteByKey         = "server_route_by_key"
 	mupMapServerRouteByPort        = "server_route_by_port"
 	mupMapStats                    = "stats"
@@ -262,6 +269,7 @@ type mupMapSpecs struct {
 	RegisteredPaths       *ebpf.MapSpec `ebpf:"registered_paths"`
 	RegistrationByKey     *ebpf.MapSpec `ebpf:"registration_by_key"`
 	ServerConfig          *ebpf.MapSpec `ebpf:"server_config"`
+	ServerPorts           *ebpf.MapSpec `ebpf:"server_ports"`
 	ServerRouteByKey      *ebpf.MapSpec `ebpf:"server_route_by_key"`
 	ServerRouteByPort     *ebpf.MapSpec `ebpf:"server_route_by_port"`
 	Stats                 *ebpf.MapSpec `ebpf:"stats"`
@@ -309,6 +317,7 @@ type mupMaps struct {
 	RegisteredPaths       *ebpf.Map `ebpf:"registered_paths"`
 	RegistrationByKey     *ebpf.Map `ebpf:"registration_by_key"`
 	ServerConfig          *ebpf.Map `ebpf:"server_config"`
+	ServerPorts           *ebpf.Map `ebpf:"server_ports"`
 	ServerRouteByKey      *ebpf.Map `ebpf:"server_route_by_key"`
 	ServerRouteByPort     *ebpf.Map `ebpf:"server_route_by_port"`
 	Stats                 *ebpf.Map `ebpf:"stats"`
@@ -332,6 +341,7 @@ func (m *mupMaps) Close() error {
 		m.RegisteredPaths,
 		m.RegistrationByKey,
 		m.ServerConfig,
+		m.ServerPorts,
 		m.ServerRouteByKey,
 		m.ServerRouteByPort,
 		m.Stats,

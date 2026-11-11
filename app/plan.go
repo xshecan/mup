@@ -90,10 +90,10 @@ func buildPlan(appConfig config.App, nonce uint64, resolver routeResolver) (runt
 	}
 	attachIfindexes = append(attachIfindexes, ifindex)
 	settings := dataplane.ServerSettings{
-		Target:     server.Target,
-		SourceIP:   sourceIP,
-		Ifindex:    ifindex,
-		ServerPort: server.Port,
+		Target:      server.Target,
+		SourceIP:    sourceIP,
+		Ifindex:     ifindex,
+		ServerPorts: server.Port,
 	}
 	return runtimePlan{
 		pinRoot:         defaultPinRoot + "/server",

@@ -13,7 +13,7 @@ func TestRegistrationGroupsPathsByClientKey(t *testing.T) {
 	t.Parallel()
 
 	now := time.Unix(100, 0)
-	registry := NewRegistry(5000, 30*time.Second)
+	registry := NewRegistry(5000, 5000, 30*time.Second)
 	clientIP := netip.MustParseAddr("192.0.2.10")
 	first := registrationRequest(clientIP, netip.MustParseAddr("198.51.100.1"), protocol.TransportUDP, 99, 0)
 	second := registrationRequest(clientIP, netip.MustParseAddr("198.51.100.2"), protocol.TransportICMP, 99, 1)
@@ -41,7 +41,7 @@ func TestRegistrationNewNonceReplacesSameAdvertisedIP(t *testing.T) {
 	t.Parallel()
 
 	now := time.Unix(200, 0)
-	registry := NewRegistry(5000, 30*time.Second)
+	registry := NewRegistry(5000, 5000, 30*time.Second)
 	clientIP := netip.MustParseAddr("192.0.2.10")
 	oldRequest := registrationRequest(clientIP, netip.MustParseAddr("198.51.100.1"), protocol.TransportUDP, 1, 0)
 	oldResult, err := registry.Register(now, oldRequest)
@@ -68,7 +68,7 @@ func TestRegistrationExpiresPathsAndClient(t *testing.T) {
 	t.Parallel()
 
 	now := time.Unix(300, 0)
-	registry := NewRegistry(5000, 30*time.Second)
+	registry := NewRegistry(5000, 5000, 30*time.Second)
 	request := registrationRequest(
 		netip.MustParseAddr("192.0.2.10"),
 		netip.MustParseAddr("198.51.100.1"),
@@ -96,7 +96,7 @@ func TestRegistrationValidatesObservedPath(t *testing.T) {
 	t.Parallel()
 
 	now := time.Unix(400, 0)
-	registry := NewRegistry(5000, 30*time.Second)
+	registry := NewRegistry(5000, 5000, 30*time.Second)
 	request := registrationRequest(
 		netip.MustParseAddr("192.0.2.10"),
 		netip.MustParseAddr("198.51.100.1"),
@@ -137,5 +137,32 @@ func registrationRequest(clientIP, localIP netip.Addr, transport protocol.Transp
 			ServerPort: 5000,
 			Transport:  transport,
 		},
+	}
+}
+
+func TestRegistrationAcceptsEachPortOfTheRange(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(400, 0)
+	registry := NewRegistry(5000, 6000, 30*time.Second)
+	clientIP := netip.MustParseAddr("192.0.2.10")
+	for _, port := range []uint16{5000, 5500, 6000} {
+		request := registrationRequest(clientIP, netip.MustParseAddr("198.51.100.1"), protocol.TransportUDP, 7, 0)
+		request.Frame.ServerPort, request.Path.ServerPort = port, port
+		if _, err := registry.Register(now, request); err != nil {
+			t.Fatalf("register port %d: %v", port, err)
+		}
+	}
+	for _, port := range []uint16{4999, 6001} {
+		request := registrationRequest(clientIP, netip.MustParseAddr("198.51.100.1"), protocol.TransportUDP, 7, 0)
+		request.Frame.ServerPort, request.Path.ServerPort = port, port
+		if _, err := registry.Register(now, request); !errors.Is(err, ErrRegistrationPort) {
+			t.Fatalf("register port %d error = %v, want %v", port, err, ErrRegistrationPort)
+		}
+	}
+	request := registrationRequest(clientIP, netip.MustParseAddr("198.51.100.1"), protocol.TransportUDP, 7, 0)
+	request.Frame.ServerPort = 5001
+	if _, err := registry.Register(now, request); !errors.Is(err, ErrRegistrationPort) {
+		t.Fatalf("register with another frame port error = %v, want %v", err, ErrRegistrationPort)
 	}
 }

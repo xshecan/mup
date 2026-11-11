@@ -91,7 +91,7 @@ func TestBuildServerPlan(t *testing.T) {
 		up: []int{2, 4},
 	}
 	plan, err := buildPlan(config.App{Server: &config.Server{
-		Port:   5000,
+		Port:   config.SinglePort(5000),
 		Target: netip.MustParseAddrPort("193.24.210.185:51820"),
 	}}, 0, resolver)
 	if err != nil {

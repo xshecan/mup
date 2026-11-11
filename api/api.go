@@ -40,8 +40,11 @@ type Group struct {
 	Peers        int    `json:"peers"`
 }
 
+// ServerStatus describes a server. It accepts the ports from Port to
+// PortLast.
 type ServerStatus struct {
 	Port             uint16 `json:"port"`
+	PortLast         uint16 `json:"port_last,omitempty"`
 	Target           string `json:"target"`
 	Clients          uint64 `json:"clients"`
 	Paths            uint64 `json:"paths"`

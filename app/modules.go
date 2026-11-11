@@ -76,7 +76,7 @@ func serverModule(server config.Server) fx.Option {
 			newServerInspector,
 			func(inspector *serverInspector) http.Handler { return newAPIHandler(nil, inspector) },
 			func() *control.Registry {
-				return control.NewRegistry(server.Port, registrationLeaseSeconds*time.Second)
+				return control.NewRegistry(server.Port.First, server.Port.Last, registrationLeaseSeconds*time.Second)
 			},
 			asLoop(newServerControlLoop),
 		),

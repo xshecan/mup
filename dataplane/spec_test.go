@@ -29,6 +29,7 @@ func TestMupCollectionSpec(t *testing.T) {
 	}{
 		"client_config":            {ebpf.Array, 1},
 		"server_config":            {ebpf.Array, 1},
+		"server_ports":             {ebpf.Array, 1},
 		"registration_by_key":      {ebpf.Hash, 4096},
 		"registered_paths":         {ebpf.Hash, 32768},
 		"client_peer_by_endpoint":  {ebpf.Hash, 4096},

@@ -148,6 +148,7 @@ func (r *Runtime) ConfigureServer(settings ServerSettings) error {
 	}
 	return applyServerSettings(configurationMaps{
 		server: r.objects.ServerConfig,
+		ports:  r.objects.ServerPorts,
 	}, settings)
 }
 

@@ -19,7 +19,7 @@ import (
 
 const usage = `usage:
   mup --config FILE
-  mup server -p PORT -r TARGET_IP:PORT [--control-socket PATH]
+  mup server -p PORT[-LAST] -r TARGET_IP:PORT [--control-socket PATH]
   mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT/udp|icmp [via RETURN_IP]" [-u ...] -s CLIENT_IP
              [-r RETURN_IP] [--mode fallback|balancer|burst] [--control-socket PATH]
 `
@@ -182,9 +182,8 @@ func parseClientArgs(args []string) (*config.Client, error) {
 func parseServerArgs(args []string) (*config.Server, error) {
 	fs := flag.NewFlagSet("mup server", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	var port int
-	var targetRaw, controlSocket string
-	fs.IntVar(&port, "p", 0, "UDP port and ICMP identifier")
+	var portRaw, targetRaw, controlSocket string
+	fs.StringVar(&portRaw, "p", "", "UDP port and ICMP identifier, as PORT or FIRST-LAST")
 	fs.StringVar(&targetRaw, "r", "", "WireGuard UDP target as IPv4:PORT")
 	fs.StringVar(&controlSocket, "control-socket", api.DefaultServerSocket, "Unix socket for mupctl, or empty to disable")
 	if err := fs.Parse(args); err != nil {
@@ -193,9 +192,9 @@ func parseServerArgs(args []string) (*config.Server, error) {
 	if fs.NArg() != 0 {
 		return nil, fmt.Errorf("unexpected server argument %q", fs.Arg(0))
 	}
-	serverPort, err := portFromFlag(port, "server -p")
+	serverPort, err := config.ParsePortRange(portRaw)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("server -p: %w", err)
 	}
 	target, err := netip.ParseAddrPort(targetRaw)
 	if err != nil {

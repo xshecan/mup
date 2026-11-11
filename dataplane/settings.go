@@ -38,10 +38,10 @@ type PathSettings struct {
 }
 
 type ServerSettings struct {
-	Target     netip.AddrPort
-	SourceIP   netip.Addr
-	Ifindex    int
-	ServerPort uint16
+	Target      netip.AddrPort
+	SourceIP    netip.Addr
+	Ifindex     int
+	ServerPorts config.PortRange
 }
 
 func encodeClientSettings(settings ClientSettings) (
@@ -166,33 +166,34 @@ func encodePathSettings(index int, path PathSettings) (mupPathConfigV1, error) {
 	}, nil
 }
 
-func encodeServerSettings(settings ServerSettings) (mupServerConfigV1, error) {
+func encodeServerSettings(settings ServerSettings) (mupServerConfigV1, mupServerPortsV1, error) {
 	var server mupServerConfigV1
+	var ports mupServerPortsV1
 
 	if !settings.Target.IsValid() || settings.Target.Port() == 0 {
-		return server, errors.New("server target must be a nonzero IPv4:PORT")
+		return server, ports, errors.New("server target must be a nonzero IPv4:PORT")
 	}
 	targetIP, err := requiredIPv4Word(settings.Target.Addr(), "server target IP")
 	if err != nil {
-		return server, err
+		return server, ports, err
 	}
 	sourceIP, err := requiredIPv4Word(settings.SourceIP, "server target-facing source IP")
 	if err != nil {
-		return server, err
+		return server, ports, err
 	}
 	if settings.Ifindex <= 0 {
-		return server, errors.New("server target-facing interface index must be positive")
+		return server, ports, errors.New("server target-facing interface index must be positive")
 	}
-	if settings.ServerPort == 0 {
-		return server, errors.New("server port must be nonzero")
+	if settings.ServerPorts.First == 0 || settings.ServerPorts.Last < settings.ServerPorts.First {
+		return server, ports, errors.New("server ports must be a nonzero range")
 	}
 	return mupServerConfigV1{
 		TargetIp:   targetIP,
 		SourceIp:   sourceIP,
 		Ifindex:    uint32(settings.Ifindex),
 		TargetPort: settings.Target.Port(),
-		ServerPort: settings.ServerPort,
-	}, nil
+		ServerPort: settings.ServerPorts.First,
+	}, mupServerPortsV1{First: settings.ServerPorts.First, Last: settings.ServerPorts.Last}, nil
 }
 
 func requiredIPv4Word(address netip.Addr, name string) (uint32, error) {
