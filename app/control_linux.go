@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -23,6 +24,11 @@ import (
 const (
 	registrationRefresh = 10 * time.Second
 	registrationRetry   = time.Second
+
+	// A UDP path opens a new control socket after this many REGISTER frames
+	// without an ACK. The new socket gets a new source port, because a filter
+	// on the network can block one UDP flow and let a new one pass.
+	udpReopenAfterMisses = 3
 
 	// One byte more than a control frame lets a read detect truncation.
 	udpControlBufferLength = protocol.ControlFrameLength + 1
@@ -42,12 +48,28 @@ func openClientPath(registration pathRegistration) (pathConn, error) {
 }
 
 type udpPathConn struct {
-	connection   *net.UDPConn
 	destination  *net.UDPAddr
 	registration pathRegistration
+
+	mu         sync.Mutex
+	connection *net.UDPConn
+	closed     bool
 }
 
 func openUDPPathConn(registration pathRegistration) (*udpPathConn, error) {
+	connection, err := listenUDPPath(registration)
+	if err != nil {
+		return nil, err
+	}
+	return &udpPathConn{
+		connection:   connection,
+		destination:  net.UDPAddrFromAddrPort(registration.path.Endpoint()),
+		registration: registration,
+	}, nil
+}
+
+// listenUDPPath opens a control socket with a new source port.
+func listenUDPPath(registration pathRegistration) (*net.UDPConn, error) {
 	local := &net.UDPAddr{IP: net.IP(registration.advertisedIP.AsSlice())}
 	connection, err := net.ListenUDP("udp4", local)
 	if err != nil {
@@ -57,20 +79,47 @@ func openUDPPathConn(registration pathRegistration) (*udpPathConn, error) {
 		_ = connection.Close()
 		return nil, fmt.Errorf("bind UDP control path %d: %w", registration.pathID, err)
 	}
-	return &udpPathConn{
-		connection:   connection,
-		destination:  net.UDPAddrFromAddrPort(registration.path.Endpoint()),
-		registration: registration,
-	}, nil
+	return connection, nil
 }
 
 func (s *udpPathConn) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
 	return s.connection.Close()
 }
 
+func (s *udpPathConn) current() *net.UDPConn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.connection
+}
+
+// reopen replaces the control socket with a new one. If the new socket cannot
+// open, the path keeps the old one.
+func (s *udpPathConn) reopen() error {
+	connection, err := listenUDPPath(s.registration)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		_ = connection.Close()
+		return net.ErrClosed
+	}
+	old := s.connection
+	s.connection = connection
+	return old.Close()
+}
+
 func (s *udpPathConn) Run(ctx context.Context, report probeReporter) error {
-	defer s.connection.Close()
+	defer s.Close()
 	var sequence uint32
+	misses := 0
 	for {
 		sequence++
 		sentAt := time.Now()
@@ -78,9 +127,17 @@ func (s *udpPathConn) Run(ctx context.Context, report probeReporter) error {
 		if err != nil {
 			return err
 		}
-		success := s.register(frame, sentAt, sequence)
+		success := s.register(s.current(), frame, sentAt, sequence)
 		if err := report(ctx, sequence, sentAt, success); err != nil {
 			return err
+		}
+		if success {
+			misses = 0
+		} else if misses++; misses >= udpReopenAfterMisses {
+			misses = 0
+			if err := s.reopen(); errors.Is(err, net.ErrClosed) {
+				return ctx.Err()
+			}
 		}
 		if err := sleepContext(ctx, registrationDelay(success)); err != nil {
 			return err
@@ -89,14 +146,14 @@ func (s *udpPathConn) Run(ctx context.Context, report probeReporter) error {
 }
 
 // register sends one REGISTER and waits for the matching ACK.
-func (s *udpPathConn) register(frame []byte, sentAt time.Time, sequence uint32) bool {
-	_ = s.connection.SetDeadline(sentAt.Add(controlReplyTimeout))
-	if _, err := s.connection.WriteToUDP(frame, s.destination); err != nil {
+func (s *udpPathConn) register(connection *net.UDPConn, frame []byte, sentAt time.Time, sequence uint32) bool {
+	_ = connection.SetDeadline(sentAt.Add(controlReplyTimeout))
+	if _, err := connection.WriteToUDP(frame, s.destination); err != nil {
 		return false
 	}
 	for {
 		var reply [udpControlBufferLength]byte
-		count, source, err := s.connection.ReadFromUDP(reply[:])
+		count, source, err := connection.ReadFromUDP(reply[:])
 		if err != nil {
 			return false
 		}

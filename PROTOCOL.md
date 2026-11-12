@@ -216,7 +216,7 @@ For each REGISTER, the server makes sure that all of these conditions are true:
 
 The server then writes the registration to `registration_by_key` and the path to `registered_paths`. Both entries get a lease of 30 seconds. The server answers with a REGISTER_ACK frame from the address that received the REGISTER. The ACK repeats the frame with the type REGISTER_ACK, the status 0, and a lease of 30 seconds. If a condition is false, the server sends no reply.
 
-The client waits 900 milliseconds for an ACK with the same nonce, path ID, and sequence. After an ACK, it sends the next REGISTER in 10 seconds. After a missing ACK, it sends the next REGISTER in 1 second.
+The client waits 900 milliseconds for an ACK with the same nonce, path ID, and sequence. After an ACK, it sends the next REGISTER in 10 seconds. After a missing ACK, it sends the next REGISTER in 1 second. After 3 missing ACKs in a row, a UDP path closes its control socket and opens a new one. The new socket gets a new source port, because a filter on the network can block one UDP flow and let a new flow pass. An ICMP path cannot do this, because its Echo identifier must equal the server port.
 
 ### Client restarts
 
@@ -310,6 +310,7 @@ The sweep copies each map before it deletes entries, because a deletion restarts
 | --- | ---: | --- |
 | Registration refresh | 10 s | Time between REGISTER frames on a healthy path. |
 | Registration retry | 1 s | Time before the next REGISTER after a missed ACK. |
+| UDP socket reopen | 3 misses | Missed ACKs in a row before a UDP path opens a new control socket. |
 | ACK timeout | 900 ms | Time that the client waits for a REGISTER_ACK. |
 | Missed ACKs | 3 | Missed ACKs in a row that make a path unhealthy. |
 | Registration lease | 30 s | Life of a registration without a new REGISTER. |
