@@ -42,6 +42,9 @@ func requirePrivilegedLinux(t *testing.T) {
 
 func buildDaemon(t *testing.T) string {
 	t.Helper()
+	if prebuilt := os.Getenv("MUP_BINARY"); prebuilt != "" {
+		return prebuilt
+	}
 	binaryPath := filepath.Join(t.TempDir(), "mup")
 	build := exec.Command("go", "build", "-o", binaryPath, "../cmd/mup")
 	build.Dir = filepath.Join("..", "integration")
@@ -171,6 +174,14 @@ func TestHelperProcess(t *testing.T) {
 		runTargetHelper(t)
 	case "peer":
 		runPeerHelper(t)
+	case "echo":
+		runEchoTargetHelper(t)
+	case "exchange":
+		runExchangeHelper(t)
+	case "flood":
+		runFloodHelper(t)
+	case "ping":
+		runPingHelper(t)
 	default:
 		t.Fatalf("unknown integration helper %q", os.Getenv("MUP_INTEGRATION_HELPER"))
 	}
@@ -184,15 +195,30 @@ func runRoundTrip(t *testing.T, binaryPath, transport string, reflected bool) {
 	serverNS := "mup-server-" + suffix
 	targetNS := "mup-target-" + suffix
 	reflectorNS := "mup-reflector-" + suffix
+	switchNS := "mup-switch-" + suffix
+	icmpReflected := reflected && transport == "icmp"
 	namespaces := []string{clientNS, serverNS, targetNS}
-	if reflected && transport == "icmp" {
-		namespaces = append(namespaces, reflectorNS)
+	if icmpReflected {
+		namespaces = append(namespaces, reflectorNS, switchNS)
 	}
 	for _, namespace := range namespaces {
 		addNamespace(t, namespace)
 	}
 
-	linkPair(t, "mc"+suffix, clientNS, "ms"+suffix, serverNS)
+	if icmpReflected {
+		runIP(t, "-n", switchNS, "link", "add", "br0", "type", "bridge")
+		runIP(t, "-n", switchNS, "link", "set", "br0", "up")
+		for _, member := range []struct{ link, namespace string }{
+			{"mc" + suffix, clientNS}, {"ms" + suffix, serverNS}, {"mr" + suffix, reflectorNS},
+		} {
+			port := "b" + member.link
+			linkPair(t, member.link, member.namespace, port, switchNS)
+			runIP(t, "-n", switchNS, "link", "set", port, "master", "br0", "up")
+		}
+		addressLink(t, reflectorNS, "mr"+suffix, "10.210.1.3/24")
+	} else {
+		linkPair(t, "mc"+suffix, clientNS, "ms"+suffix, serverNS)
+	}
 	addressLink(t, clientNS, "mc"+suffix, "10.210.1.1/24")
 	addressLink(t, serverNS, "ms"+suffix, "10.210.1.2/24")
 
@@ -210,12 +236,8 @@ func runRoundTrip(t *testing.T, binaryPath, transport string, reflected bool) {
 	if reflected {
 		returnIP = "10.210.4.2"
 	}
-	if reflected && transport == "icmp" {
-		linkPair(t, "sr"+suffix, serverNS, "rs"+suffix, reflectorNS)
-		addressLink(t, serverNS, "sr"+suffix, "10.210.4.1/24")
-		addressLink(t, reflectorNS, "rs"+suffix, "10.210.4.2/24")
-		runIP(t, "-n", reflectorNS, "route", "add", "default", "via", "10.210.4.1")
-		runIP(t, "netns", "exec", serverNS, "sysctl", "-q", "-w", "net.ipv4.ip_forward=1")
+	if icmpReflected {
+		returnIP = "10.210.1.3"
 	}
 
 	readyFile := filepath.Join(t.TempDir(), "target-ready")

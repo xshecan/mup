@@ -113,3 +113,41 @@ func ethernetUDPFixture(t *testing.T, tunneled, control bool) []byte {
 	copy(udp[8:], payload)
 	return frame
 }
+
+func TestVerifierComplexity(t *testing.T) {
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Skipf("remove memlock limit: %v", err)
+	}
+	spec, err := loadMup()
+	if err != nil {
+		t.Fatalf("load spec: %v", err)
+	}
+	for name := range spec.Programs {
+		t.Run(name, func(t *testing.T) {
+			single := spec.Copy()
+			for _, mapSpec := range single.Maps {
+				mapSpec.Pinning = ebpf.PinNone
+			}
+			for other := range single.Programs {
+				if other != name {
+					delete(single.Programs, other)
+				}
+			}
+			collection, err := ebpf.NewCollectionWithOptions(single, ebpf.CollectionOptions{
+				Programs: ebpf.ProgramOptions{LogLevel: ebpf.LogLevelStats},
+			})
+			if err != nil {
+				if errors.Is(err, ebpf.ErrNotSupported) || errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
+					t.Skipf("kernel or privileges do not support required BPF features: %v", err)
+				}
+				var verifierError *ebpf.VerifierError
+				if errors.As(err, &verifierError) && len(verifierError.Log) > 0 {
+					t.Fatalf("verifier rejected %s: %s", name, verifierError.Log[len(verifierError.Log)-1])
+				}
+				t.Fatalf("load %s: %v", name, err)
+			}
+			defer collection.Close()
+			t.Logf("%s: %s", name, collection.Programs[name].VerifierLog)
+		})
+	}
+}
