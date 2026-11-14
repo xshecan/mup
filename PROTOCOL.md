@@ -53,7 +53,7 @@ This document describes version 1 of the MUP protocol as the code implements it.
 
 One MUP server serves many MUP clients. Each client serves many WireGuard peers and uses up to eight paths in all. Each server forwards all traffic to one WireGuard target. Each active client of a server must use an advertised IP that no other client of that server uses.
 
-MUP has two eBPF programs. `mup_client_ingress` runs on the client host, and `mup_server_ingress` runs on the server host. Each program attaches to the TCX ingress hook of every interface that is up at start. For a packet that MUP does not own, the program returns `TCX_NEXT`, and the kernel handles the packet as usual.
+MUP has two eBPF programs. `mup_client_ingress` runs on the client host, and `mup_server_ingress` runs on the server host. Each program attaches to the TCX ingress hook of every Ethernet interface that is up at start. The loopback interface counts as an Ethernet interface. For a packet that MUP does not own, the program returns `TCX_NEXT`, and the kernel handles the packet as usual.
 
 ### Path groups
 
@@ -91,7 +91,7 @@ A valid checksum stays valid after a rewrite, and a corrupt checksum stays corru
 
 If a UDP packet arrives without a checksum, MUP drops it and counts reason 20. A zero checksum field gives no payload sum to update. WireGuard implementations always send UDP checksums.
 
-A target on the server host, for example `127.0.0.1`, answers from a local socket. Its replies have a partial checksum (`CHECKSUM_PARTIAL`): the UDP checksum field holds only the pseudo-header sum, and the network device adds the UDP header and the payload when it sends the packet. The server detects this case when the target IP equals the source IP of the target route. On a UDP path, the server writes the new pseudo-header sum and leaves the rest to the device. On an ICMP path, the device still writes the checksum at the UDP checksum offset, which is the Echo sequence field. A one's complement checksum is valid when all words add up to 0xffff, wherever the checksum word is. So the server clears the checksum and the sequence fields, and the device makes the ICMP checksum valid. The client does not read the sequence, because the peer token is in the WireGuard bytes.
+A target on the server host, for example `127.0.0.1`, answers from a local socket. Its replies have a partial checksum (`CHECKSUM_PARTIAL`): the UDP checksum field holds only the pseudo-header sum, and the network device adds the UDP header and the payload at send time. If the target IP equals the source IP of the target route, the server handles the target as local. The target can use any address of the server host, and the server reaches it through the loopback interface. On a UDP path, the server writes the new pseudo-header sum and leaves the rest to the device. On an ICMP path, the device still writes the checksum at the UDP checksum offset, which is the Echo sequence field. If all words add up to 0xffff, a one's complement checksum is valid, wherever the checksum word is. So the server clears the checksum and the sequence fields, and the device makes the ICMP checksum valid. The client does not read the sequence, because the peer token is in the WireGuard bytes.
 
 `protocol/rewrite.go` is a copy of the algorithm in `bpf/include/rewrite.h`. Its tests make sure that each incremental result matches a full checksum of the packet.
 
@@ -117,9 +117,9 @@ In a downstream packet, "server" is the server address that received the latest 
 
 In the UDP reflected mode, the return IP host never receives the packet. The server only writes the return IP as the source. The networks between the server and the client must accept a spoofed source. A network that filters source addresses (BCP 38) drops these packets.
 
-In the ICMP reflected mode, the server sends an Echo Request from `-s` to the reflector. The reflector answers with an Echo Reply to `-s`, which is the client. Any host that answers ping can be the reflector. The network between the server and the reflector must accept the spoofed source.
+In the ICMP reflected mode, the server sends an Echo Request from `-s` to the reflector. The reflector answers with an Echo Reply to `-s`, which is the client. Any host that answers ping can be the reflector. The network between the server and the reflector must accept the spoofed source. The server sends the Echo Request out of the interface that received the traffic of the path. So the reflector must be reachable through that interface.
 
-The client accepts a downstream packet only from a source that a path of the group of the peer expects, with the port and the transport of that path. If the path has a return IP, the source must equal it. If the path has no return IP, the source must be the server address of the path. The client drops any other downstream packet and counts reason 22.
+The client accepts a downstream packet only from a source that a path of the group of the peer expects. The packet must also have the port and the transport of that path. If the path has a return IP, the source must equal it. If the path has no return IP, the source must be the server address of the path. The client drops any other downstream packet and counts reason 22.
 
 ## Packet flow
 
@@ -135,7 +135,7 @@ One round trip has four legs. The value under each arrow shows WireGuard bytes 1
 A peer sends a UDP packet to the listen port of a group. The client program then does these steps:
 
 1. It makes sure that the packet is a valid WireGuard message with zero reserved bytes.
-2. It looks up the token of the peer endpoint. For a new peer, it takes a token from `free_peer_tokens`.
+2. It looks up the token of the peer endpoint. A new peer gets a token from `free_peer_tokens`. If the source IP of the new peer already has 1024 routes, the program drops the packet and counts reason 21.
 3. It picks one healthy path of the group. In burst mode, it picks every healthy path of the group.
 4. It writes the token and rewrites the headers for the path.
 5. It sends the packet out of the path interface with `bpf_redirect_neigh`, which resolves the next hop.
@@ -150,7 +150,7 @@ A UDP packet arrives at a server port, or an ICMP Echo Request arrives with a se
 2. It looks up the registered path by source IP, local IP, port, and transport. The path gives the client key.
 3. It makes sure that the registration of the client exists and did not expire.
 4. If the duplicate cache holds the same route and first 24 WireGuard bytes, it drops the packet.
-5. It finds the route of the client key and token. For a new route, it takes a port from `free_target_ports`.
+5. It finds the route of the client key and token. For a new route, it takes a port from `free_target_ports`. For a target on the server host, it never takes the port of the target.
 6. It records the path of this packet as the return path of the route.
 7. It clears the token and rewrites the packet to UDP, from the target port to the WireGuard target.
 8. It sends the packet out of the interface that leads to the target.
@@ -207,6 +207,8 @@ The server does not select paths. It replies on the path of the latest upstream 
 
 The client registers each path on its own. It sends a REGISTER frame from `-s` to the server address of the path. A UDP path sends the frame in a UDP datagram to the server port. An ICMP path sends the frame as the payload of an Echo Request, with the port as identifier. The frame holds the listen port of the group and the return IP of the path. The TCX programs pass these frames to the kernel, and the Go control plane answers them.
 
+A UDP path sends its REGISTER frames from the listen port of its group. The frames then have the same addresses and ports as the data of the path. So the control frames and the data share one UDP flow. A filter that blocks the data flow also blocks the REGISTER frames, and the path becomes unhealthy. The UDP paths of one group share one control socket, which the client binds to `-s` and the listen port. If a path names an interface, its frames leave on that interface, and the client accepts an ACK only from that interface. An ICMP path has its own raw socket, and its control frames and data already share the Echo identifier.
+
 For each REGISTER, the server makes sure that all of these conditions are true:
 
 - The source address of the packet equals the advertised IP in the frame.
@@ -216,7 +218,7 @@ For each REGISTER, the server makes sure that all of these conditions are true:
 
 The server then writes the registration to `registration_by_key` and the path to `registered_paths`. Both entries get a lease of 30 seconds. The server answers with a REGISTER_ACK frame from the address that received the REGISTER. The ACK repeats the frame with the type REGISTER_ACK, the status 0, and a lease of 30 seconds. If a condition is false, the server sends no reply.
 
-The client waits 900 milliseconds for an ACK with the same nonce, path ID, and sequence. After an ACK, it sends the next REGISTER in 10 seconds. After a missing ACK, it sends the next REGISTER in 1 second. After 3 missing ACKs in a row, a UDP path closes its control socket and opens a new one. The new socket gets a new source port, because a filter on the network can block one UDP flow and let a new flow pass. An ICMP path cannot do this, because its Echo identifier must equal the server port.
+The client waits 900 milliseconds for an ACK with the same nonce, path ID, and sequence. After an ACK, it sends the next REGISTER in 10 seconds. After a missing ACK, it sends the next REGISTER in 1 second. The source port of a UDP path never changes, because it must stay the listen port.
 
 ### Client restarts
 
@@ -273,6 +275,7 @@ Pinned BPF maps hold all dataplane state. Go writes the configuration and the re
 | `client_peer_by_endpoint` | hash | 4096 | Peer endpoint to token and last-seen time. | Program |
 | `client_endpoint_by_token` | hash | 4096 | Token to peer endpoint, interface, and last-seen time. | Program |
 | `free_peer_tokens` | queue | 4095 | Unused tokens. | Both |
+| `client_routes_by_source` | hash | 4096 | Peer source IP to the number of its routes. | Both |
 | `server_config` | array | 1 | Target, source IP, interface, and the first server port. | Go |
 | `server_ports` | array | 1 | The first and the last server port. Without this entry, the server accepts only the port in `server_config`. | Go |
 | `registration_by_key` | hash | 4096 | Client key to lease end and listen port, with the return IP and flags of the latest REGISTER. The programs do not read the return IP. | Go |
@@ -299,10 +302,11 @@ Go runs a sweep once per second. The sweep does these steps in order:
 1. It repairs broken pairs of forward and reverse entries, and quarantines their tokens and ports.
 2. It deletes expired registrations, and the paths of expired or replaced registrations.
 3. It deletes client routes that had no traffic for 180 seconds.
-4. It deletes server routes that had no traffic for 180 seconds, and the routes of deleted registrations.
-5. It returns the tokens and ports with an ended quarantine to their queues.
+4. It writes the exact number of routes of each peer source IP to `client_routes_by_source`.
+5. It deletes server routes that had no traffic for 180 seconds, and the routes of deleted registrations.
+6. It returns the tokens and ports with an ended quarantine to their queues.
 
-In step 5, a value that a route owns again stays out of the queue. The expiry of that route puts the value into quarantine again. The quarantine of 120 seconds keeps a late packet of an old route away from a new peer.
+The client program only adds to the counts in `client_routes_by_source`, so step 4 takes the expired routes off. In step 6, a value that a route owns again stays out of the queue. The expiry of that route puts the value into quarantine again. The quarantine of 120 seconds keeps a late packet of an old route away from a new peer.
 
 The sweep copies each map before it deletes entries, because a deletion restarts a map iteration. Before it deletes a route, it reads the route again. If the program refreshed the route in the meantime, the sweep keeps it.
 
@@ -310,7 +314,6 @@ The sweep copies each map before it deletes entries, because a deletion restarts
 | --- | ---: | --- |
 | Registration refresh | 10 s | Time between REGISTER frames on a healthy path. |
 | Registration retry | 1 s | Time before the next REGISTER after a missed ACK. |
-| UDP socket reopen | 3 misses | Missed ACKs in a row before a UDP path opens a new control socket. |
 | ACK timeout | 900 ms | Time that the client waits for a REGISTER_ACK. |
 | Missed ACKs | 3 | Missed ACKs in a row that make a path unhealthy. |
 | Registration lease | 30 s | Life of a registration without a new REGISTER. |
@@ -321,6 +324,8 @@ The sweep copies each map before it deletes entries, because a deletion restarts
 
 ## Input rules
 
+A network device can keep only the first bytes of a large packet in the buffer that a program can read. The programs need only the first 90 bytes of a packet: the headers, the start of the WireGuard message, and a control frame. If fewer bytes are readable, the program pulls them into the buffer. It never reads the rest of the payload.
+
 The programs forward only IPv4 packets with a 20-byte header, no fragments, and a UDP or ICMP header. The UDP length must match the IPv4 total length. The WireGuard message must have a valid length for its type.
 
 | Type | Message | Length in bytes |
@@ -328,9 +333,9 @@ The programs forward only IPv4 packets with a 20-byte header, no fragments, and 
 | 1 | Handshake initiation | 148 |
 | 2 | Handshake response | 92 |
 | 3 | Cookie reply | 64 |
-| 4 | Transport data | 32 or more. Senders should pad to a multiple of 16, but some clients, for example Surge, do not. |
+| 4 | Transport data | 32 or more. Senders usually pad to a multiple of 16, but some clients, for example Surge, do not. |
 
-A program returns `TCX_NEXT` for traffic that it does not own. This traffic includes non-IPv4 packets, malformed IPv4 packets, other protocols, and packets to other ports. A program drops and counts a packet that is addressed to MUP but breaks a rule. An ICMP packet with an identifier other than the MUP port is not addressed to MUP.
+A program returns `TCX_NEXT` for traffic that it does not own. This traffic includes non-IPv4 packets, malformed IPv4 packets, other protocols, and packets to other ports. A program drops and counts a packet that is addressed to MUP but breaks a rule. An ICMP packet with an identifier other than the MUP port is not addressed to MUP. An ICMP packet with the MUP port as identifier but without a valid WireGuard message is the ping of another program. The program returns `TCX_NEXT` for it and does not count it.
 
 ## Drop reasons
 
@@ -356,23 +361,28 @@ A program returns `TCX_NEXT` for traffic that it does not own. This traffic incl
 | 18 | `NEIGHBOR` | A burst clone failed to redirect. MUP skips the clone, not the packet. |
 | 19 | `TAIL_CALL` | Reserved. Version 1 does not count it. |
 | 20 | `CHECKSUM` | A rewrite failed, for example on a UDP packet without a checksum. |
-| 21 | `RETURN_POLICY` | Reserved. Version 1 does not count it. |
+| 21 | `SOURCE_LIMIT` | The source IP of a new peer already has 1024 routes on the client. |
 | 22 | `DOWNSTREAM_SOURCE` | A downstream packet came from a source that the group of the peer does not expect. |
 
 ## Attachment and restarts
 
-The loader pins the maps by name under `/sys/fs/bpf/mup/client` or `/sys/fs/bpf/mup/server`. It pins each TCX link under `/sys/fs/bpf/mup/<role>/<role>/<ifindex>/ingress`. The client attaches to every interface that is up and to the interface of each path. The server attaches to every interface that is up and to the interface that leads to the target.
+The loader pins the maps by name under `/sys/fs/bpf/mup/client` or `/sys/fs/bpf/mup/server`. It pins each TCX link under `/sys/fs/bpf/mup/<role>/<role>/<ifindex>/ingress`. The client attaches to every Ethernet interface that is up and to the interface of each path. The server attaches to every Ethernet interface that is up and to the interface that leads to the target.
+
+The programs read an Ethernet header from every packet. So MUP does not attach to an interface without one, for example a PPP, tun, WireGuard, or raw-IP modem interface. If a path or the target route uses such an interface, the start fails with an error.
 
 At start, the loader does these steps in order:
 
 1. It loads the programs with the pinned maps, or it creates and pins new maps.
 2. It repairs broken pairs of forward and reverse entries.
-3. For a new queue, it fills the queue with every token or port.
-4. For an existing queue, it puts each lost token or port into quarantine.
-5. It deletes the groups that are not in the configuration, and it writes the configuration of the role.
-6. It replaces the program in each pinned link, or it attaches and pins a new link.
+3. It writes the number of routes of each peer source IP.
+4. For a new queue, it fills the queue with every token or port.
+5. For an existing queue, it puts each lost token or port into quarantine.
+6. It deletes the groups that are not in the configuration, and it writes the configuration of the role.
+7. It replaces the program in each pinned link, or it attaches and pins a new link.
 
-A lost token or port is not free, not in a route, and not in quarantine. A crash between a pop and a route insert can lose one. Step 6 keeps forwarding active during a restart.
+A lost token or port is not free, not in a route, and not in quarantine. A crash between a pop and a route insert can lose one. Step 7 keeps forwarding active during a restart.
+
+For a target on the server host, step 6 also deletes a route that owns the port of the target. Such a route can exist from a version that did not skip this port.
 
 The TCX links stay attached after the process stops. The programs then forward with the last state, and routes no longer expire. The server programs still stop a client at the end of its lease, because they compare the lease end with the clock. To remove MUP from a host, stop the process and delete the pin directory of the role.
 
@@ -419,7 +429,7 @@ A client has eight path slots. The slot number is the path ID in REGISTER frames
 
 The client adds a path in this order:
 
-1. It opens the control socket of the path.
+1. It joins the path to the UDP control socket of its group, or it opens the raw socket of an ICMP path.
 2. It attaches the client program to a new interface of the path.
 3. It writes the path to `path_config`.
 4. It adds the slot to the path mask of the group in `path_groups`.
@@ -455,8 +465,13 @@ The duplicate cache is a filter for burst copies, not a replay defense. WireGuar
 - The largest WireGuard message is the path MTU minus 28 bytes, which is 1472 bytes at MTU 1500. WireGuard needs no MTU change.
 - A client has up to 8 paths in all groups.
 - A client serves up to 4095 peers in all groups. A server holds up to 41000 routes and 4096 registrations.
+- One peer source IP has up to 1024 routes on a client. The count can be too low for one second after a new route.
 - Each active client of a server needs its own advertised IP.
 - A server port range has up to 4096 ports. The server opens one UDP control socket for each port.
+- A client binds one UDP control socket to `-s` and the listen port of each group with a UDP path. If another program holds that port, the client does not start.
+- On an ICMP path with a return IP, the server reaches the reflector only through the interface that faces the client.
+- The control frames travel in the data flow. So a filter that blocks a flow because of its control frames also blocks the data of that path.
 - MUP attaches only to the interfaces that are up at start.
+- MUP supports only interfaces with an Ethernet header, and the loopback interface. Peers that arrive on another interface get no service.
 - The server treats every UDP packet from the target address and port to its source IP as a reply. Do not run other clients of the same target on the server host with that source IP.
 - MUP needs a complete transport checksum on each input packet. The one exception is a reply of a target on the server host, which the server handles as a partial checksum. Other local traffic through a veth pair with checksum offload can carry an unfinished checksum, and MUP does not support it.

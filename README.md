@@ -258,7 +258,7 @@ GROUP   MODE       PATHS         PEERS
 ID   GROUP   SERVER               TRANSPORT   VIA       INTERFACE   STATUS      IN USE   LAST ACK   RTT
 0    51820   203.0.113.5:5000     udp         -         eth0        healthy     yes      4s         12.3ms
 1    51820   203.0.113.6:5000     icmp        -         eth1        healthy     no       7s         18.7ms
-2    51821   198.51.100.20:6000   udp         1.1.1.1   wwan0       unhealthy   no       2m10s      64.1ms
+2    51821   198.51.100.20:6000   udp         1.1.1.1   eth2        unhealthy   no       2m10s      64.1ms
 ```
 
 The IN USE column shows the paths that carry traffic in the mode of their group. In fallback mode, only the first healthy path of the group carries traffic.
@@ -340,7 +340,18 @@ sudo -E go test ./dataplane -count=1 -v
 sudo -E env MUP_PRIVILEGED_TESTS=1 go test ./integration -count=1 -v
 ```
 
-The integration test creates disposable network namespaces and private bpffs mounts. It then sends UDP and ICMP round trips in the direct and reflected modes. It also sends packets through two groups to two WireGuard targets. To measure real PPS, bandwidth, drops, and CPU, use the namespace topology with the production NICs.
+The dataplane tests load both programs into the kernel. `TestVerifierComplexity` logs how many instructions the verifier processed for each program, and the kernel limit is one million.
+
+The integration tests create disposable network namespaces and private bpffs mounts. They do not touch the interfaces or the pins of the host. They cover these cases:
+
+- UDP and ICMP round trips in the direct and reflected modes.
+- Two groups that lead to two WireGuard targets.
+- The burst, fallback, and balancer modes, and a failover after a server stops.
+- A target on the server host, on the loopback address and on another address.
+- The limit of routes for one source IP.
+- A normal ping with the server port as its identifier.
+
+These tests pass on Linux 6.8 (Ubuntu 24.04) and on Linux 6.12 (Debian 13). To run them with a daemon that you built before, set `MUP_BINARY` to its path. To measure real PPS, bandwidth, drops, and CPU, use the namespace topology with the production NICs.
 
 macOS can compile the Linux code, but it cannot load the programs or run the privileged tests.
 
@@ -352,8 +363,12 @@ MUP has no authentication of its own. A host can spoof the source address of a r
 
 - IPv4 only, with no IPv4 options and no fragments.
 - Up to 8 paths and up to 4095 peers per client, shared by all of its groups.
+- Up to 1024 peers from one source IP on a client.
 - Up to 41000 routes per server, and up to 4096 registered clients.
 - Up to 4096 server ports in one range. The server opens one UDP socket for each port, so no other program can use a port of the range. A packet to a port of the range that is not valid MUP traffic is dropped.
 - A UDP packet without a checksum is dropped. WireGuard always sends UDP checksums.
-- If the target is on the server host, for example `127.0.0.1`, the network device completes the checksum of each reply. On an ICMP path, the device writes it into the Echo sequence field, so these replies have no fixed sequence.
+- The target can be on the server host, on `127.0.0.1` or on another address of the host. The network device then completes the checksum of each reply. On an ICMP path, the device writes it into the Echo sequence field, so these replies have no fixed sequence.
+- On an ICMP route with `via`, the server reaches the `via` host only through the interface that faces the client.
+- A client binds a UDP control socket to its advertised IP and each listen port. If another program holds that port, the client does not start.
 - MUP attaches only to the interfaces that are up at start. After you add an interface, restart MUP.
+- MUP supports only interfaces with an Ethernet header, and the loopback interface. A path over a PPP, tun, WireGuard, or raw-IP modem interface fails at start.
