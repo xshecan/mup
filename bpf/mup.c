@@ -80,6 +80,14 @@ struct {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	MUP_PINNED;
+	__type(key, __be32);
+	__type(value, __u32);
+} client_routes_by_source SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 41000);
 	MUP_PINNED;
 	__type(key, struct server_route_key_v1);
@@ -234,6 +242,8 @@ static __always_inline int get_or_create_client_route(
 	struct peer_endpoint_value_v1 reverse = {};
 	__u64 now = bpf_ktime_get_ns();
 	__u32 allocated = 0;
+	__u32 first_route = 1;
+	__u32 *source_routes;
 	long update_error;
 
 	existing = bpf_map_lookup_elem(&client_peer_by_endpoint, endpoint);
@@ -242,6 +252,11 @@ static __always_inline int get_or_create_client_route(
 		*peer_token = existing->peer_token;
 		return MUP_DROP_NONE;
 	}
+
+	source_routes = bpf_map_lookup_elem(&client_routes_by_source,
+					    &endpoint->source_ip);
+	if (source_routes && *source_routes >= MUP_MAX_ROUTES_PER_SOURCE)
+		return MUP_DROP_SOURCE_LIMIT;
 
 	if (bpf_map_pop_elem(&free_peer_tokens, &allocated))
 		return MUP_DROP_PEER_TOKEN_POOL;
@@ -275,8 +290,27 @@ static __always_inline int get_or_create_client_route(
 		return MUP_DROP_MAP_INVARIANT;
 	}
 
+	if (source_routes) {
+		__sync_fetch_and_add(source_routes, 1);
+	} else if (bpf_map_update_elem(&client_routes_by_source,
+				       &endpoint->source_ip, &first_route,
+				       BPF_NOEXIST)) {
+		source_routes = bpf_map_lookup_elem(&client_routes_by_source,
+						    &endpoint->source_ip);
+		if (source_routes)
+			__sync_fetch_and_add(source_routes, 1);
+	}
+
 	*peer_token = allocated;
 	return MUP_DROP_NONE;
+}
+
+static __always_inline __u32 mup_mask_has(__u32 mask, __u32 index)
+{
+	__u32 bit = (mask >> index) & 1;
+
+	asm volatile("" : "+r"(bit));
+	return bit;
 }
 
 static __always_inline struct path_config_v1 *select_client_path(
@@ -301,7 +335,7 @@ static __always_inline struct path_config_v1 *select_client_path(
 	if (group->mode == MUP_MODE_BALANCER) {
 #pragma clang loop unroll(full)
 		for (int index = 0; index < 8; index++) {
-			if (!(usable_mask & (1U << index)))
+			if (!mup_mask_has(usable_mask, index))
 				continue;
 			__u32 key = index;
 			path = bpf_map_lookup_elem(&path_config, &key);
@@ -316,7 +350,7 @@ static __always_inline struct path_config_v1 *select_client_path(
 		healthy_count = 0;
 #pragma clang loop unroll(full)
 		for (int index = 0; index < 8; index++) {
-			if (!(usable_mask & (1U << index)))
+			if (!mup_mask_has(usable_mask, index))
 				continue;
 			__u32 key = index;
 			path = bpf_map_lookup_elem(&path_config, &key);
@@ -331,7 +365,7 @@ static __always_inline struct path_config_v1 *select_client_path(
 
 #pragma clang loop unroll(full)
 	for (int index = 0; index < 8; index++) {
-		if (!(usable_mask & (1U << index)))
+		if (!mup_mask_has(usable_mask, index))
 			continue;
 		__u32 key = index;
 		path = bpf_map_lookup_elem(&path_config, &key);
@@ -363,7 +397,7 @@ static __always_inline int is_client_downstream_source(
 
 #pragma clang loop unroll(full)
 	for (int index = 0; index < 8; index++) {
-		if (!(path_mask & (1U << index)))
+		if (!mup_mask_has(path_mask, index))
 			continue;
 		__u32 key = index;
 		path = bpf_map_lookup_elem(&path_config, &key);
@@ -459,6 +493,44 @@ static __always_inline int prepare_clone_l2(
 	return MUP_DROP_NONE;
 }
 
+#define MUP_BURST_SENT 0
+#define MUP_BURST_SKIPPED 1
+#define MUP_BURST_FAILED 2
+
+__attribute__((noinline)) int mup_burst_clone(struct __sk_buff *skb, __u32 index,
+					      __u32 listen_port, __u32 peer_token)
+{
+	struct mup_packet packet = {};
+	struct path_config_v1 *mapped_path;
+	struct path_config_v1 path = {};
+	int result;
+
+	if (index >= 8)
+		return MUP_BURST_SKIPPED;
+	if (parse_ipv4_l4(skb, &packet) != MUP_DROP_NONE)
+		return MUP_BURST_FAILED;
+	mapped_path = bpf_map_lookup_elem(&path_config, &index);
+	if (!mapped_path || !mapped_path->destination_ip ||
+	    !mapped_path->ifindex || mapped_path->transport > MUP_TRANSPORT_ICMP)
+		return MUP_BURST_SKIPPED;
+	path = *mapped_path;
+	result = rewrite_for_path(&packet, (__u16)listen_port, &path, peer_token);
+	if (result) {
+		count_reason(result == -2 ? MUP_DROP_TRANSPORT : MUP_DROP_CHECKSUM);
+		return MUP_BURST_FAILED;
+	}
+	result = prepare_clone_l2(skb, &packet, path.ifindex);
+	if (result != MUP_DROP_NONE) {
+		count_reason(result);
+		return MUP_BURST_SKIPPED;
+	}
+	if (bpf_clone_redirect(skb, path.ifindex, 0)) {
+		count_reason(MUP_DROP_NEIGHBOR);
+		return MUP_BURST_SKIPPED;
+	}
+	return MUP_BURST_SENT;
+}
+
 static __always_inline int burst_client_packet(
 	struct __sk_buff *skb,
 	struct mup_packet *packet,
@@ -470,9 +542,11 @@ static __always_inline int burst_client_packet(
 	struct path_config_v1 *mapped_path;
 	struct path_config_v1 path = {};
 	__u32 state_key = 0;
+	__u32 final_key;
 	__u32 healthy_mask;
 	int final_index = -1;
 	int cloned = 0;
+	int result;
 
 	state = bpf_map_lookup_elem(&path_state, &state_key);
 	if (!state)
@@ -485,7 +559,7 @@ static __always_inline int burst_client_packet(
 	for (int index = 0; index < 8; index++) {
 		__u32 key = index;
 
-		if (!(healthy_mask & (1U << index)))
+		if (!mup_mask_has(healthy_mask, index))
 			continue;
 		mapped_path = bpf_map_lookup_elem(&path_config, &key);
 		if (mapped_path && mapped_path->destination_ip &&
@@ -498,47 +572,31 @@ static __always_inline int burst_client_packet(
 
 #pragma clang loop unroll(full)
 	for (int index = 0; index < 8; index++) {
-		__u32 key = index;
-		int result;
-
-		if (!(healthy_mask & (1U << index)))
+		if (!mup_mask_has(healthy_mask, index) || index == final_index)
 			continue;
-		mapped_path = bpf_map_lookup_elem(&path_config, &key);
-		if (!mapped_path || !mapped_path->destination_ip ||
-		    !mapped_path->ifindex ||
-		    mapped_path->transport > MUP_TRANSPORT_ICMP)
-			continue;
-		path = *mapped_path;
-		result = rewrite_for_path(packet, listen_port, &path,
-					     peer_token);
-		if (result == -2)
-			return count_and_drop(skb, MUP_DROP_TRANSPORT);
-		if (result)
-			return count_and_drop(skb, MUP_DROP_CHECKSUM);
-
-		if (index == final_index)
-			return redirect_packet(path.ifindex);
-
-		result = prepare_clone_l2(skb, packet, path.ifindex);
-		if (result != MUP_DROP_NONE) {
-			count_reason(result);
-			continue;
-		}
-		if (bpf_clone_redirect(skb, path.ifindex, 0))
-			count_reason(MUP_DROP_NEIGHBOR);
-		else
-			cloned++;
-
-		/*
-		 * clone_redirect may reallocate skb storage. No packet or map
-		 * pointer obtained before the helper may be reused afterward.
-		 */
-		*packet = (struct mup_packet){};
-		result = parse_ipv4_l4(skb, packet);
-		if (result != MUP_DROP_NONE)
-			return cloned ? TC_ACT_SHOT : count_and_drop(skb, result);
+		result = mup_burst_clone(skb, index, listen_port, peer_token);
+		if (result == MUP_BURST_FAILED)
+			return TC_ACT_SHOT;
+		if (result == MUP_BURST_SENT)
+			cloned = 1;
 	}
-	return cloned ? TC_ACT_SHOT : count_and_drop(skb, MUP_DROP_NO_PATH);
+
+	*packet = (struct mup_packet){};
+	result = parse_ipv4_l4(skb, packet);
+	if (result != MUP_DROP_NONE)
+		return cloned ? TC_ACT_SHOT : count_and_drop(skb, result);
+	final_key = final_index;
+	mapped_path = bpf_map_lookup_elem(&path_config, &final_key);
+	if (!mapped_path || !mapped_path->destination_ip ||
+	    !mapped_path->ifindex || mapped_path->transport > MUP_TRANSPORT_ICMP)
+		return cloned ? TC_ACT_SHOT : count_and_drop(skb, MUP_DROP_NO_PATH);
+	path = *mapped_path;
+	result = rewrite_for_path(packet, listen_port, &path, peer_token);
+	if (result == -2)
+		return count_and_drop(skb, MUP_DROP_TRANSPORT);
+	if (result)
+		return count_and_drop(skb, MUP_DROP_CHECKSUM);
+	return redirect_packet(path.ifindex);
 }
 
 static __always_inline int same_server_route_key(
@@ -599,6 +657,7 @@ static __always_inline void refresh_server_route(
 static __always_inline int get_or_create_server_route(
 	const struct server_route_key_v1 *route_key,
 	const struct server_route_value_v1 *observed,
+	__u16 reserved_port,
 	__u16 *target_port)
 {
 	struct server_route_value_v1 *existing;
@@ -606,6 +665,7 @@ static __always_inline int get_or_create_server_route(
 	struct server_reverse_value_v1 reverse = {};
 	__u64 now = bpf_ktime_get_ns();
 	__u16 allocated = 0;
+	__u16 next = 0;
 	long update_error;
 
 	existing = bpf_map_lookup_elem(&server_route_by_key, route_key);
@@ -617,6 +677,14 @@ static __always_inline int get_or_create_server_route(
 
 	if (bpf_map_pop_elem(&free_target_ports, &allocated))
 		return MUP_DROP_TARGET_PORT_POOL;
+	if (reserved_port && allocated == reserved_port) {
+		if (bpf_map_pop_elem(&free_target_ports, &next)) {
+			bpf_map_push_elem(&free_target_ports, &allocated, BPF_ANY);
+			return MUP_DROP_TARGET_PORT_POOL;
+		}
+		bpf_map_push_elem(&free_target_ports, &allocated, BPF_ANY);
+		allocated = next;
+	}
 	if (allocated == 0) {
 		bpf_map_push_elem(&free_target_ports, &allocated, BPF_ANY);
 		return MUP_DROP_MAP_INVARIANT;
@@ -710,8 +778,11 @@ int mup_client_ingress(struct __sk_buff *skb)
 				return MUP_TCX_NEXT;
 		}
 		result = validate_wg(&packet, 1, &peer_token);
-		if (result != MUP_DROP_NONE)
+		if (result != MUP_DROP_NONE) {
+			if (packet.transport == MUP_TRANSPORT_ICMP)
+				return MUP_TCX_NEXT;
 			return count_and_drop(skb, result);
+		}
 		reverse = bpf_map_lookup_elem(&client_endpoint_by_token, &peer_token);
 		if (!reverse)
 			return count_and_drop(skb, MUP_DROP_ROUTE_MISS);
@@ -794,6 +865,7 @@ int mup_server_ingress(struct __sk_buff *skb)
 	__u32 configuration_key = 0;
 	__u32 peer_token = 0;
 	__u16 target_port = 0;
+	__u16 reserved_port = 0;
 	__u64 now;
 	int result;
 	int local;
@@ -910,8 +982,11 @@ int mup_server_ingress(struct __sk_buff *skb)
 			return MUP_TCX_NEXT;
 	}
 	result = validate_wg(&packet, 1, &peer_token);
-	if (result != MUP_DROP_NONE)
+	if (result != MUP_DROP_NONE) {
+		if (packet.transport == MUP_TRANSPORT_ICMP)
+			return MUP_TCX_NEXT;
 		return count_and_drop(skb, result);
+	}
 
 	path_key.source_ip = packet.ipv4->source;
 	path_key.local_ip = packet.ipv4->destination;
@@ -941,7 +1016,10 @@ int mup_server_ingress(struct __sk_buff *skb)
 	observed.server_local_ip = packet.ipv4->destination;
 	observed.return_ip = path->return_ip;
 	observed.ifindex = skb->ifindex;
-	result = get_or_create_server_route(&route_key, &observed, &target_port);
+	if (configuration->target_ip == configuration->source_ip)
+		reserved_port = configuration->target_port;
+	result = get_or_create_server_route(&route_key, &observed, reserved_port,
+					    &target_port);
 	if (result != MUP_DROP_NONE)
 		return count_and_drop(skb, result);
 	if (mup_clear_peer_token(&packet) ||

@@ -78,7 +78,7 @@ const (
 	DropNeighbor
 	DropTailCall
 	DropChecksum
-	DropReturnPolicy
+	DropSourceLimit
 	DropDownstreamSource
 )
 
@@ -105,7 +105,7 @@ var dropReasonNames = [...]string{
 	DropNeighbor:          "NEIGHBOR",
 	DropTailCall:          "TAIL_CALL",
 	DropChecksum:          "CHECKSUM",
-	DropReturnPolicy:      "RETURN_POLICY",
+	DropSourceLimit:       "SOURCE_LIMIT",
 	DropDownstreamSource:  "DOWNSTREAM_SOURCE",
 }
 

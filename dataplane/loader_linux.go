@@ -58,6 +58,9 @@ func Load(cfg Config) (runtime *Runtime, err error) {
 	if err := runtime.repairRouteInvariants(now); err != nil {
 		return nil, err
 	}
+	if err := runtime.syncClientRoutesBySource(); err != nil {
+		return nil, err
+	}
 	if peerPoolIsNew {
 		if err := initializeQueue(runtime.objects.FreePeerTokens, peerTokenPool()); err != nil {
 			return nil, fmt.Errorf("initialize peer-token queue: %w", err)
@@ -146,10 +149,45 @@ func (r *Runtime) ConfigureServer(settings ServerSettings) error {
 	if r.closed {
 		return fmt.Errorf("configure server: MUP dataplane is closed")
 	}
-	return applyServerSettings(configurationMaps{
+	if err := applyServerSettings(configurationMaps{
 		server: r.objects.ServerConfig,
 		ports:  r.objects.ServerPorts,
-	}, settings)
+	}, settings); err != nil {
+		return err
+	}
+	if settings.Target.Addr() == settings.SourceIP {
+		return r.releaseLocalTargetPort(settings.Target.Port())
+	}
+	return nil
+}
+
+func (r *Runtime) releaseLocalTargetPort(port uint16) error {
+	var reverse mupServerReverseValueV1
+	if err := r.objects.ServerRouteByPort.Lookup(port, &reverse); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return nil
+		}
+		return fmt.Errorf("look up route of local target port %d: %w", port, err)
+	}
+	var forward mupServerRouteValueV1
+	err := r.objects.ServerRouteByKey.Lookup(reverse.RouteKey, &forward)
+	if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("look up forward route of local target port %d: %w", port, err)
+	}
+	if err == nil && forward.TargetPort == port {
+		if err := deleteEntry(r.objects.ServerRouteByKey, reverse.RouteKey); err != nil {
+			return fmt.Errorf("delete route of local target port %d: %w", port, err)
+		}
+	}
+	if err := deleteEntry(r.objects.ServerRouteByPort, port); err != nil {
+		return fmt.Errorf("delete reverse route of local target port %d: %w", port, err)
+	}
+	now, err := monotonicDuration()
+	if err != nil {
+		return fmt.Errorf("read monotonic clock: %w", err)
+	}
+	r.portQuarantine.Add(port, now, resourceQuarantineDelay)
+	return nil
 }
 
 func (r *Runtime) RegisterPath(settings RegistrationSettings) error {

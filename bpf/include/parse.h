@@ -47,10 +47,20 @@ static __always_inline int mup_payload_fits(const struct mup_packet *packet,
 	       packet->payload + length <= (__u8 *)packet->packet_end;
 }
 
+#define MUP_LINEAR_BYTES (sizeof(struct ethhdr) + sizeof(struct mup_iphdr) + 8 + MUP_CONTROL_FRAME_LEN)
+
 static __always_inline int parse_ipv4_l4(struct __sk_buff *skb, struct mup_packet *packet)
 {
 	void *data = (void *)(long)skb->data;
 	void *data_end = (void *)(long)skb->data_end;
+	__u32 linear = skb->len < MUP_LINEAR_BYTES ? skb->len : MUP_LINEAR_BYTES;
+
+	if (data + linear > data_end) {
+		if (bpf_skb_pull_data(skb, linear))
+			return MUP_DROP_MALFORMED_IPV4;
+		data = (void *)(long)skb->data;
+		data_end = (void *)(long)skb->data_end;
+	}
 	struct ethhdr *ethernet = data;
 
 	if ((void *)(ethernet + 1) > data_end)
@@ -71,9 +81,9 @@ static __always_inline int parse_ipv4_l4(struct __sk_buff *skb, struct mup_packe
 	__u16 total_length = mup_read_be16((const __u8 *)&ipv4->total_length);
 	if (total_length < sizeof(*ipv4))
 		return MUP_DROP_MALFORMED_IPV4;
-	void *packet_end = (void *)ipv4 + total_length;
-	if (packet_end > data_end)
+	if (sizeof(*ethernet) + total_length > skb->len)
 		return MUP_DROP_MALFORMED_IPV4;
+	void *packet_end = (void *)ipv4 + total_length;
 
 	packet->ethernet = ethernet;
 	packet->ipv4 = ipv4;

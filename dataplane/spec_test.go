@@ -34,6 +34,7 @@ func TestMupCollectionSpec(t *testing.T) {
 		"registered_paths":         {ebpf.Hash, 32768},
 		"client_peer_by_endpoint":  {ebpf.Hash, 4096},
 		"client_endpoint_by_token": {ebpf.Hash, 4096},
+		"client_routes_by_source":  {ebpf.Hash, 4096},
 		"free_peer_tokens":         {ebpf.Queue, 4095},
 		"server_route_by_key":      {ebpf.Hash, 41000},
 		"server_route_by_port":     {ebpf.Hash, 41000},

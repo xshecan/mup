@@ -32,6 +32,9 @@ func (r *Runtime) Sweep(nowNS uint64) error {
 	if err := r.expireClientRoutes(nowNS, now); err != nil {
 		return err
 	}
+	if err := r.syncClientRoutesBySource(); err != nil {
+		return err
+	}
 	if err := r.expireServerRoutes(nowNS, now, registrations); err != nil {
 		return err
 	}
@@ -139,6 +142,41 @@ func (r *Runtime) expireClientRoutes(nowNS uint64, now time.Duration) error {
 			return fmt.Errorf("delete client reverse route: %w", err)
 		}
 		r.peerQuarantine.Add(route.PeerToken, now, resourceQuarantineDelay)
+	}
+	return nil
+}
+
+func (r *Runtime) syncClientRoutesBySource() error {
+	routes, err := mapEntries[mupPeerEndpointKeyV1, mupPeerTokenValueV1](r.objects.ClientPeerByEndpoint)
+	if errors.Is(err, ebpf.ErrIterationAborted) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("iterate client routes for source counts: %w", err)
+	}
+	counts := countRoutesBySource(routes)
+	stored, err := mapEntries[uint32, uint32](r.objects.ClientRoutesBySource)
+	if errors.Is(err, ebpf.ErrIterationAborted) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("iterate client route counts: %w", err)
+	}
+	for source, count := range counts {
+		if stored[source] == count {
+			continue
+		}
+		if err := r.objects.ClientRoutesBySource.Update(source, count, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("update client route count: %w", err)
+		}
+	}
+	for source := range stored {
+		if _, exists := counts[source]; exists {
+			continue
+		}
+		if err := deleteEntry(r.objects.ClientRoutesBySource, source); err != nil {
+			return fmt.Errorf("delete client route count: %w", err)
+		}
 	}
 	return nil
 }

@@ -27,7 +27,7 @@ func TestDropReasonABI(t *testing.T) {
 		DropNeighbor,
 		DropTailCall,
 		DropChecksum,
-		DropReturnPolicy,
+		DropSourceLimit,
 		DropDownstreamSource,
 	}
 	for number, reason := range want {

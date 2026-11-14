@@ -174,6 +174,7 @@ const (
 	mupMapClientConfig             = "client_config"
 	mupMapClientEndpointByToken    = "client_endpoint_by_token"
 	mupMapClientPeerByEndpoint     = "client_peer_by_endpoint"
+	mupMapClientRoutesBySource     = "client_routes_by_source"
 	mupMapDuplicateCache           = "duplicate_cache"
 	mupMapEncapPrograms            = "encap_programs"
 	mupMapEventLimits              = "event_limits"
@@ -256,6 +257,7 @@ type mupMapSpecs struct {
 	ClientConfig          *ebpf.MapSpec `ebpf:"client_config"`
 	ClientEndpointByToken *ebpf.MapSpec `ebpf:"client_endpoint_by_token"`
 	ClientPeerByEndpoint  *ebpf.MapSpec `ebpf:"client_peer_by_endpoint"`
+	ClientRoutesBySource  *ebpf.MapSpec `ebpf:"client_routes_by_source"`
 	DuplicateCache        *ebpf.MapSpec `ebpf:"duplicate_cache"`
 	EncapPrograms         *ebpf.MapSpec `ebpf:"encap_programs"`
 	EventLimits           *ebpf.MapSpec `ebpf:"event_limits"`
@@ -304,6 +306,7 @@ type mupMaps struct {
 	ClientConfig          *ebpf.Map `ebpf:"client_config"`
 	ClientEndpointByToken *ebpf.Map `ebpf:"client_endpoint_by_token"`
 	ClientPeerByEndpoint  *ebpf.Map `ebpf:"client_peer_by_endpoint"`
+	ClientRoutesBySource  *ebpf.Map `ebpf:"client_routes_by_source"`
 	DuplicateCache        *ebpf.Map `ebpf:"duplicate_cache"`
 	EncapPrograms         *ebpf.Map `ebpf:"encap_programs"`
 	EventLimits           *ebpf.Map `ebpf:"event_limits"`
@@ -328,6 +331,7 @@ func (m *mupMaps) Close() error {
 		m.ClientConfig,
 		m.ClientEndpointByToken,
 		m.ClientPeerByEndpoint,
+		m.ClientRoutesBySource,
 		m.DuplicateCache,
 		m.EncapPrograms,
 		m.EventLimits,
