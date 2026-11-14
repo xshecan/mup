@@ -70,3 +70,26 @@ func validateRegistrationACK(packet []byte, nonce uint64, pathID uint16, sequenc
 	}
 	return nil
 }
+
+func registrationFrame(registration pathRegistration, sequence uint32) ([]byte, error) {
+	frame := protocol.ControlFrame{
+		Type:          protocol.ControlRegister,
+		Transport:     registration.path.Transport,
+		PathID:        registration.pathID,
+		Sequence:      sequence,
+		ListenPort:    registration.listenPort,
+		ServerPort:    registration.path.ServerPort,
+		LeaseSeconds:  registrationLeaseSeconds,
+		InstanceNonce: registration.nonce,
+		AdvertisedIP:  registration.advertisedIP,
+		ReturnIP:      registration.returnIP,
+	}
+	if registration.returnIP.IsValid() {
+		frame.Flags = protocol.ControlFlagReturnIP
+	}
+	packet := make([]byte, protocol.ControlFrameLength)
+	if err := protocol.EncodeControlFrame(packet, frame); err != nil {
+		return nil, err
+	}
+	return packet, nil
+}

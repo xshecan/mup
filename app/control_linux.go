@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -22,16 +21,6 @@ import (
 )
 
 const (
-	registrationRefresh = 10 * time.Second
-	registrationRetry   = time.Second
-
-	// A UDP path opens a new control socket after this many REGISTER frames
-	// without an ACK. The new socket gets a new source port, because a filter
-	// on the network can block one UDP flow and let a new one pass.
-	udpReopenAfterMisses = 3
-
-	// One byte more than a control frame lets a read detect truncation.
-	udpControlBufferLength = protocol.ControlFrameLength + 1
 	// Raw ICMP reads include an IPv4 header of up to 60 bytes.
 	icmpControlBufferLength = 60 + 8 + protocol.ControlFrameLength + 1
 )
@@ -40,130 +29,62 @@ type syscallConnection interface {
 	SyscallConn() (syscall.RawConn, error)
 }
 
-func openClientPath(registration pathRegistration) (pathConn, error) {
-	if registration.path.Transport == protocol.TransportUDP {
-		return openUDPPathConn(registration)
+func newClientPathOpener() pathOpener {
+	sockets := newUDPControlSockets(listenUDPControl)
+	return func(registration pathRegistration) (pathConn, error) {
+		if registration.path.Transport == protocol.TransportUDP {
+			return openUDPPathConn(sockets, registration)
+		}
+		return openICMPPathConn(registration)
 	}
-	return openICMPPathConn(registration)
 }
 
-type udpPathConn struct {
-	destination  *net.UDPAddr
-	registration pathRegistration
-
-	mu         sync.Mutex
+type udpControlSocketConn struct {
 	connection *net.UDPConn
-	closed     bool
+	advertised netip.Addr
+	oob        []byte
 }
 
-func openUDPPathConn(registration pathRegistration) (*udpPathConn, error) {
-	connection, err := listenUDPPath(registration)
+func listenUDPControl(local netip.AddrPort) (udpControlConn, error) {
+	connection, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(local))
 	if err != nil {
 		return nil, err
 	}
-	return &udpPathConn{
-		connection:   connection,
-		destination:  net.UDPAddrFromAddrPort(registration.path.Endpoint()),
-		registration: registration,
+	if err := enablePacketInfo(connection); err != nil {
+		_ = connection.Close()
+		return nil, fmt.Errorf("enable UDP packet info: %w", err)
+	}
+	return &udpControlSocketConn{
+		connection: connection,
+		advertised: local.Addr(),
+		oob:        make([]byte, unix.CmsgSpace(unix.SizeofInet4Pktinfo)),
 	}, nil
 }
 
-// listenUDPPath opens a control socket with a new source port.
-func listenUDPPath(registration pathRegistration) (*net.UDPConn, error) {
-	local := &net.UDPAddr{IP: net.IP(registration.advertisedIP.AsSlice())}
-	connection, err := net.ListenUDP("udp4", local)
+func (s *udpControlSocketConn) readControl(buffer []byte) (int, netip.AddrPort, int, error) {
+	count, oobCount, _, source, err := s.connection.ReadMsgUDPAddrPort(buffer, s.oob)
 	if err != nil {
-		return nil, fmt.Errorf("open UDP control path %d: %w", registration.pathID, err)
+		return 0, netip.AddrPort{}, 0, err
 	}
-	if err := bindToDevice(connection, registration.path.Interface); err != nil {
-		_ = connection.Close()
-		return nil, fmt.Errorf("bind UDP control path %d: %w", registration.pathID, err)
+	ifindex := 0
+	if info, err := packetInfo(s.oob[:oobCount]); err == nil {
+		ifindex = int(info.Ifindex)
 	}
-	return connection, nil
+	return count, source, ifindex, nil
 }
 
-func (s *udpPathConn) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil
-	}
-	s.closed = true
-	return s.connection.Close()
-}
-
-func (s *udpPathConn) current() *net.UDPConn {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.connection
-}
-
-// reopen replaces the control socket with a new one. If the new socket cannot
-// open, the path keeps the old one.
-func (s *udpPathConn) reopen() error {
-	connection, err := listenUDPPath(s.registration)
-	if err != nil {
+func (s *udpControlSocketConn) writeControl(frame []byte, destination netip.AddrPort, ifindex int) error {
+	if ifindex <= 0 {
+		_, err := s.connection.WriteToUDPAddrPort(frame, destination)
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		_ = connection.Close()
-		return net.ErrClosed
-	}
-	old := s.connection
-	s.connection = connection
-	return old.Close()
+	oob := unix.PktInfo4(&unix.Inet4Pktinfo{Ifindex: int32(ifindex), Spec_dst: s.advertised.As4()})
+	_, _, err := s.connection.WriteMsgUDPAddrPort(frame, oob, destination)
+	return err
 }
 
-func (s *udpPathConn) Run(ctx context.Context, report probeReporter) error {
-	defer s.Close()
-	var sequence uint32
-	misses := 0
-	for {
-		sequence++
-		sentAt := time.Now()
-		frame, err := registrationFrame(s.registration, sequence)
-		if err != nil {
-			return err
-		}
-		success := s.register(s.current(), frame, sentAt, sequence)
-		if err := report(ctx, sequence, sentAt, success); err != nil {
-			return err
-		}
-		if success {
-			misses = 0
-		} else if misses++; misses >= udpReopenAfterMisses {
-			misses = 0
-			if err := s.reopen(); errors.Is(err, net.ErrClosed) {
-				return ctx.Err()
-			}
-		}
-		if err := sleepContext(ctx, registrationDelay(success)); err != nil {
-			return err
-		}
-	}
-}
-
-// register sends one REGISTER and waits for the matching ACK.
-func (s *udpPathConn) register(connection *net.UDPConn, frame []byte, sentAt time.Time, sequence uint32) bool {
-	_ = connection.SetDeadline(sentAt.Add(controlReplyTimeout))
-	if _, err := connection.WriteToUDP(frame, s.destination); err != nil {
-		return false
-	}
-	for {
-		var reply [udpControlBufferLength]byte
-		count, source, err := connection.ReadFromUDP(reply[:])
-		if err != nil {
-			return false
-		}
-		if count != protocol.ControlFrameLength || source.AddrPort() != s.destination.AddrPort() {
-			continue
-		}
-		if validateRegistrationACK(reply[:count], s.registration.nonce, s.registration.pathID, sequence) == nil {
-			return true
-		}
-	}
+func (s *udpControlSocketConn) Close() error {
+	return s.connection.Close()
 }
 
 type icmpPathConn struct {
@@ -240,13 +161,6 @@ func (s *icmpPathConn) register(frame []byte, sentAt time.Time, sequence uint32)
 			return true
 		}
 	}
-}
-
-func registrationDelay(success bool) time.Duration {
-	if success {
-		return registrationRefresh
-	}
-	return registrationRetry
 }
 
 func serveServerControls(
@@ -330,6 +244,7 @@ func serveServerUDPConnection(
 	registry *control.Registry,
 	sink registrationSink,
 ) error {
+	serverPort := uint16(connection.LocalAddr().(*net.UDPAddr).Port)
 	buffer := make([]byte, udpControlBufferLength)
 	oob := make([]byte, unix.CmsgSpace(unix.SizeofInet4Pktinfo))
 	for {
@@ -354,6 +269,7 @@ func serveServerUDPConnection(
 		ack, err := acceptRegistration(
 			buffer[:count],
 			protocol.TransportUDP,
+			serverPort,
 			ipAddress(source.IP),
 			local,
 			registry,
@@ -404,6 +320,7 @@ func serveServerICMPControl(
 		ack, err := acceptRegistration(
 			echo.payload,
 			protocol.TransportICMP,
+			echo.identifier,
 			ipAddress(source.IP),
 			local,
 			registry,
@@ -419,6 +336,7 @@ func serveServerICMPControl(
 func acceptRegistration(
 	packet []byte,
 	transport protocol.TransportID,
+	serverPort uint16,
 	source, local netip.Addr,
 	registry *control.Registry,
 	sink registrationSink,
@@ -433,7 +351,7 @@ func acceptRegistration(
 			Local:      local,
 			Source:     source,
 			Transport:  transport,
-			ServerPort: frame.ServerPort,
+			ServerPort: serverPort,
 		},
 	}
 	result, err := registry.Register(time.Now(), request)
@@ -462,7 +380,7 @@ func acceptRegistration(
 		Path: dataplane.RegisteredPathSettings{
 			SourceIP:   source,
 			LocalIP:    local,
-			ServerPort: frame.ServerPort,
+			ServerPort: serverPort,
 			Transport:  transport,
 			PathID:     frame.PathID,
 		},
@@ -479,29 +397,6 @@ func acceptRegistration(
 		return nil, err
 	}
 	return ack, nil
-}
-
-func registrationFrame(registration pathRegistration, sequence uint32) ([]byte, error) {
-	frame := protocol.ControlFrame{
-		Type:          protocol.ControlRegister,
-		Transport:     registration.path.Transport,
-		PathID:        registration.pathID,
-		Sequence:      sequence,
-		ListenPort:    registration.listenPort,
-		ServerPort:    registration.path.ServerPort,
-		LeaseSeconds:  registrationLeaseSeconds,
-		InstanceNonce: registration.nonce,
-		AdvertisedIP:  registration.advertisedIP,
-		ReturnIP:      registration.returnIP,
-	}
-	if registration.returnIP.IsValid() {
-		frame.Flags = protocol.ControlFlagReturnIP
-	}
-	packet := make([]byte, protocol.ControlFrameLength)
-	if err := protocol.EncodeControlFrame(packet, frame); err != nil {
-		return nil, err
-	}
-	return packet, nil
 }
 
 func enablePacketInfo(connection syscallConnection) error {
@@ -543,25 +438,33 @@ func replySource(local netip.Addr) []byte {
 }
 
 func packetInfoDestination(oob []byte) (netip.Addr, error) {
-	messages, err := unix.ParseSocketControlMessage(oob)
+	info, err := packetInfo(oob)
 	if err != nil {
 		return netip.Addr{}, err
+	}
+	address := netip.AddrFrom4(info.Addr)
+	if address.IsUnspecified() {
+		address = netip.AddrFrom4(info.Spec_dst)
+	}
+	if !address.IsUnspecified() {
+		return address, nil
+	}
+	return netip.Addr{}, errors.New("IPv4 packet info is missing")
+}
+
+func packetInfo(oob []byte) (unix.Inet4Pktinfo, error) {
+	messages, err := unix.ParseSocketControlMessage(oob)
+	if err != nil {
+		return unix.Inet4Pktinfo{}, err
 	}
 	for _, message := range messages {
 		if message.Header.Level != unix.IPPROTO_IP || message.Header.Type != unix.IP_PKTINFO ||
 			len(message.Data) < unix.SizeofInet4Pktinfo {
 			continue
 		}
-		info := *(*unix.Inet4Pktinfo)(unsafe.Pointer(&message.Data[0]))
-		address := netip.AddrFrom4(info.Addr)
-		if address.IsUnspecified() {
-			address = netip.AddrFrom4(info.Spec_dst)
-		}
-		if address.Is4() && !address.IsUnspecified() {
-			return address, nil
-		}
+		return *(*unix.Inet4Pktinfo)(unsafe.Pointer(&message.Data[0])), nil
 	}
-	return netip.Addr{}, errors.New("IPv4 packet info is missing")
+	return unix.Inet4Pktinfo{}, errors.New("IPv4 packet info is missing")
 }
 
 func monotonicNowNS() (uint64, error) {
@@ -589,17 +492,6 @@ func ipAddress(ip net.IP) netip.Addr {
 		return netip.Addr{}
 	}
 	return address.Unmap()
-}
-
-func sleepContext(ctx context.Context, duration time.Duration) error {
-	timer := time.NewTimer(duration)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }
 
 func isTimeoutOrCanceled(ctx context.Context, err error) bool {

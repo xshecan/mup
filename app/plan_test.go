@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"net/netip"
 	"slices"
 	"testing"
@@ -14,6 +15,7 @@ type fakeResolver struct {
 	routes   map[string]route
 	up       []int
 	catchAll int
+	loopback int
 }
 
 type route struct {
@@ -31,6 +33,13 @@ func (r fakeResolver) Resolve(destination netip.Addr, interfaceName string) (net
 
 func (r fakeResolver) UpInterfaceIndexes() ([]int, error) {
 	return append([]int(nil), r.up...), nil
+}
+
+func (r fakeResolver) LoopbackIndex() (int, error) {
+	if r.loopback == 0 {
+		return 0, errors.New("no loopback interface is up")
+	}
+	return r.loopback, nil
 }
 
 func TestBuildClientPlan(t *testing.T) {
@@ -100,6 +109,41 @@ func TestBuildServerPlan(t *testing.T) {
 	if plan.server == nil || plan.server.SourceIP != netip.MustParseAddr("192.0.2.5") ||
 		plan.server.Ifindex != 4 {
 		t.Fatalf("server plan = %#v", plan.server)
+	}
+}
+
+func TestBuildServerPlanDeliversLocalTargetThroughLoopback(t *testing.T) {
+	t.Parallel()
+
+	resolver := fakeResolver{
+		routes: map[string]route{
+			"192.0.2.5%":      {source: netip.MustParseAddr("192.0.2.5"), ifindex: 4},
+			"193.24.210.185%": {source: netip.MustParseAddr("192.0.2.5"), ifindex: 4},
+		},
+		up:       []int{2, 4},
+		loopback: 1,
+	}
+	for _, test := range []struct {
+		target      string
+		wantIfindex int
+		wantAttach  []int
+	}{
+		{target: "192.0.2.5:51820", wantIfindex: 1, wantAttach: []int{1, 2, 4}},
+		{target: "193.24.210.185:51820", wantIfindex: 4, wantAttach: []int{2, 4}},
+	} {
+		plan, err := buildPlan(config.App{Server: &config.Server{
+			Port:   config.SinglePort(5000),
+			Target: netip.MustParseAddrPort(test.target),
+		}}, 0, resolver)
+		if err != nil {
+			t.Fatalf("buildPlan(%s): %v", test.target, err)
+		}
+		if plan.server.Ifindex != test.wantIfindex || plan.server.SourceIP != netip.MustParseAddr("192.0.2.5") {
+			t.Fatalf("server plan for %s = %#v, want ifindex %d", test.target, plan.server, test.wantIfindex)
+		}
+		if !slices.Equal(plan.attachIfindexes, test.wantAttach) {
+			t.Fatalf("attach indexes for %s = %v, want %v", test.target, plan.attachIfindexes, test.wantAttach)
+		}
 	}
 }
 

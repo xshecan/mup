@@ -13,8 +13,10 @@ import (
 // These functions keep the Fx graph the same on every platform. Run stops
 // before it builds the graph on other platforms, so nothing calls them.
 
-func openClientPath(pathRegistration) (pathConn, error) {
-	return nil, dataplane.ErrUnsupportedPlatform
+func newClientPathOpener() pathOpener {
+	return func(pathRegistration) (pathConn, error) {
+		return nil, dataplane.ErrUnsupportedPlatform
+	}
 }
 
 func serveServerControls(context.Context, config.Server, *control.Registry, registrationSink) error {

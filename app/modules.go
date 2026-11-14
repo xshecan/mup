@@ -55,7 +55,7 @@ func clientModule(client config.Client) fx.Option {
 	return fx.Module("client",
 		fx.Supply(client),
 		fx.Provide(
-			func() pathOpener { return openClientPath },
+			newClientPathOpener,
 			func() controlSocket { return controlSocket(client.ControlSocket) },
 			func(plan runtimePlan) dataplane.ClientSettings { return *plan.client },
 			func(runtime *dataplane.Runtime) clientDataplane { return runtime },

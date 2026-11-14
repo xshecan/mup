@@ -5,6 +5,17 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+)
+
+var sysfsNetRoot = "/sys/class/net"
+
+const (
+	arphrdEther    = 1
+	arphrdLoopback = 772
 )
 
 type systemResolver struct{}
@@ -22,6 +33,9 @@ func (systemResolver) Resolve(destination netip.Addr, interfaceName string) (net
 		if err != nil {
 			return netip.Addr{}, 0, err
 		}
+		if err := checkEthernetHeader(networkInterface.Name); err != nil {
+			return netip.Addr{}, 0, err
+		}
 		return source, networkInterface.Index, nil
 	}
 
@@ -35,6 +49,9 @@ func (systemResolver) Resolve(destination netip.Addr, interfaceName string) (net
 	if err != nil {
 		return netip.Addr{}, 0, err
 	}
+	if err := checkEthernetHeader(networkInterface.Name); err != nil {
+		return netip.Addr{}, 0, err
+	}
 	return source, networkInterface.Index, nil
 }
 
@@ -45,11 +62,43 @@ func (systemResolver) UpInterfaceIndexes() ([]int, error) {
 	}
 	indexes := make([]int, 0, len(interfaces))
 	for _, networkInterface := range interfaces {
-		if networkInterface.Flags&net.FlagUp != 0 {
+		if networkInterface.Flags&net.FlagUp != 0 && hasEthernetHeader(networkInterface.Name) {
 			indexes = append(indexes, networkInterface.Index)
 		}
 	}
 	return indexes, nil
+}
+
+func (systemResolver) LoopbackIndex() (int, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return 0, err
+	}
+	for _, networkInterface := range interfaces {
+		if networkInterface.Flags&net.FlagLoopback != 0 && networkInterface.Flags&net.FlagUp != 0 {
+			return networkInterface.Index, nil
+		}
+	}
+	return 0, errors.New("no loopback interface is up")
+}
+
+func checkEthernetHeader(interfaceName string) error {
+	if !hasEthernetHeader(interfaceName) {
+		return fmt.Errorf("interface %s has no Ethernet header, and MUP does not support it", interfaceName)
+	}
+	return nil
+}
+
+func hasEthernetHeader(interfaceName string) bool {
+	content, err := os.ReadFile(filepath.Join(sysfsNetRoot, interfaceName, "type"))
+	if err != nil {
+		return true
+	}
+	linkType, err := strconv.Atoi(strings.TrimSpace(string(content)))
+	if err != nil {
+		return true
+	}
+	return linkType == arphrdEther || linkType == arphrdLoopback
 }
 
 func firstInterfaceIPv4(networkInterface *net.Interface) (netip.Addr, error) {

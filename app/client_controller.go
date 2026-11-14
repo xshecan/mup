@@ -21,6 +21,8 @@ import (
 const (
 	controlReplyTimeout = 900 * time.Millisecond
 	missLimit           = 3
+	registrationRefresh = 10 * time.Second
+	registrationRetry   = time.Second
 )
 
 // probeReporter passes the result of one REGISTER to the controller.
@@ -542,6 +544,24 @@ func (c *clientController) inUseSlotsLocked() [config.MaxPaths]bool {
 		}
 	}
 	return inUse
+}
+
+func registrationDelay(success bool) time.Duration {
+	if success {
+		return registrationRefresh
+	}
+	return registrationRetry
+}
+
+func sleepContext(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func interfaceName(ifindex int) string {

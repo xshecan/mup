@@ -166,3 +166,24 @@ func TestRegistrationAcceptsEachPortOfTheRange(t *testing.T) {
 		t.Fatalf("register with another frame port error = %v, want %v", err, ErrRegistrationPort)
 	}
 }
+
+func TestRegistrationRejectsAFrameForAnotherPortOfTheRange(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(500, 0)
+	registry := NewRegistry(5000, 5001, 30*time.Second)
+	request := registrationRequest(
+		netip.MustParseAddr("192.0.2.10"),
+		netip.MustParseAddr("198.51.100.1"),
+		protocol.TransportUDP,
+		8,
+		0,
+	)
+	request.Frame.ServerPort, request.Path.ServerPort = 5001, 5000
+	if _, err := registry.Register(now, request); !errors.Is(err, ErrRegistrationPort) {
+		t.Fatalf("Register error = %v, want %v", err, ErrRegistrationPort)
+	}
+	if _, ok := registry.ResolvePath(now, request.Path); ok {
+		t.Fatal("rejected path was published")
+	}
+}

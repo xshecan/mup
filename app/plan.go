@@ -16,6 +16,7 @@ const defaultPinRoot = "/sys/fs/bpf/mup"
 type routeResolver interface {
 	Resolve(destination netip.Addr, interfaceName string) (source netip.Addr, ifindex int, err error)
 	UpInterfaceIndexes() ([]int, error)
+	LoopbackIndex() (int, error)
 }
 
 type runtimePlan struct {
@@ -87,6 +88,15 @@ func buildPlan(appConfig config.App, nonce uint64, resolver routeResolver) (runt
 	}
 	if ifindex <= 0 {
 		return runtimePlan{}, fmt.Errorf("resolve server target route: invalid interface index %d", ifindex)
+	}
+	if sourceIP == server.Target.Addr() {
+		ifindex, err = resolver.LoopbackIndex()
+		if err != nil {
+			return runtimePlan{}, fmt.Errorf("resolve local server target: %w", err)
+		}
+		if ifindex <= 0 {
+			return runtimePlan{}, fmt.Errorf("resolve local server target: invalid loopback index %d", ifindex)
+		}
 	}
 	attachIfindexes = append(attachIfindexes, ifindex)
 	settings := dataplane.ServerSettings{
