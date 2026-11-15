@@ -40,6 +40,14 @@ struct {
 } server_ports SEC(".maps");
 
 struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	MUP_PINNED;
+	__type(key, __u32);
+	__type(value, struct target_ingress_v1);
+} target_ingress SEC(".maps");
+
+struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 4096);
 	MUP_PINNED;
@@ -981,6 +989,111 @@ __attribute__((noinline)) __be32 pick_reflector(__be32 base, __u8 transport,
 	return chosen;
 }
 
+/*
+ * server_target_reply sends one reply of the target back to the client on the
+ * return path of its route. A partial packet still has CHECKSUM_PARTIAL, so the
+ * rewrite leaves the checksum to the device. At egress, a reply that leaves on
+ * the same interface gets its Ethernet header from a FIB lookup and goes on,
+ * so it does not pass the egress programs of the interface a second time.
+ */
+static __always_inline int server_target_reply(
+	struct __sk_buff *skb,
+	struct mup_packet *packet,
+	struct server_reverse_value_v1 *reverse,
+	int partial,
+	int at_egress)
+{
+	struct registration_value_v1 *registration;
+	struct server_route_value_v1 *forward;
+	__u32 peer_token = 0;
+	__be32 pool_addr = 0;
+	__u64 now;
+	int result;
+
+	result = validate_wg(packet, 0, &peer_token);
+	if (result != MUP_DROP_NONE)
+		return count_and_drop(skb, result);
+	now = bpf_ktime_get_ns();
+	registration = bpf_map_lookup_elem(&registration_by_key,
+					   &reverse->route_key.client);
+	if (!registration || registration->expires_at_ns < now)
+		return count_and_drop(skb, MUP_DROP_NOT_REGISTERED);
+	reverse->route_value.last_seen_ns = now;
+	forward = bpf_map_lookup_elem(&server_route_by_key, &reverse->route_key);
+	if (!forward || forward->target_port != packet->destination_port)
+		return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
+	forward->last_seen_ns = now;
+	if (!partial &&
+	    mup_set_peer_token(packet, reverse->route_key.peer_token))
+		return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
+	if (reverse->route_value.flags & MUP_FLAG_RETURN_POOL) {
+		pool_addr = pick_reflector(reverse->route_value.return_ip,
+					   reverse->route_value.transport,
+					   reverse->route_value.flags,
+					   reverse->route_key.peer_token);
+		if (!pool_addr)
+			return count_and_drop(skb, MUP_DROP_NO_PATH);
+	}
+	if (reverse->route_value.transport == MUP_TRANSPORT_UDP) {
+		__be32 source_ip =
+			(reverse->route_value.flags & MUP_FLAG_RETURN_POOL) ?
+			pool_addr :
+			(reverse->route_value.flags & MUP_FLAG_RETURN_IP) ?
+			reverse->route_value.return_ip :
+			reverse->route_value.server_local_ip;
+		if (partial)
+			result = mup_rewrite_udp_partial(
+				packet, source_ip,
+				reverse->route_key.client.advertised_ip,
+				reverse->route_value.server_port,
+				registration->listen_port,
+				reverse->route_key.peer_token);
+		else
+			result = mup_rewrite_udp(
+				packet, source_ip,
+				reverse->route_key.client.advertised_ip,
+				reverse->route_value.server_port,
+				registration->listen_port);
+		if (result)
+			return count_and_drop(skb, MUP_DROP_CHECKSUM);
+	} else if (reverse->route_value.transport == MUP_TRANSPORT_ICMP) {
+		__be32 source_ip;
+		__be32 destination_ip;
+		__u8 type;
+
+		if (reverse->route_value.flags &
+		    (MUP_FLAG_RETURN_IP | MUP_FLAG_RETURN_POOL)) {
+			source_ip = reverse->route_key.client.advertised_ip;
+			destination_ip =
+				(reverse->route_value.flags & MUP_FLAG_RETURN_POOL) ?
+				pool_addr : reverse->route_value.return_ip;
+			type = MUP_ICMP_ECHO_REQUEST;
+		} else {
+			source_ip = reverse->route_value.server_local_ip;
+			destination_ip = reverse->route_key.client.advertised_ip;
+			type = MUP_ICMP_ECHO_REPLY;
+		}
+		if (partial)
+			result = mup_rewrite_icmp_partial(
+				packet, source_ip, destination_ip, type,
+				reverse->route_value.server_port,
+				reverse->route_key.peer_token);
+		else
+			result = mup_rewrite_icmp(
+				packet, source_ip, destination_ip, type,
+				reverse->route_value.server_port,
+				(__u16)reverse->route_key.peer_token);
+		if (result)
+			return count_and_drop(skb, MUP_DROP_CHECKSUM);
+	} else {
+		return count_and_drop(skb, MUP_DROP_TRANSPORT);
+	}
+	if (at_egress && reverse->route_value.ifindex == skb->ifindex &&
+	    prepare_clone_l2(skb, packet, skb->ifindex) == MUP_DROP_NONE)
+		return TC_ACT_OK;
+	return redirect_packet(reverse->route_value.ifindex);
+}
+
 SEC("tc")
 int mup_server_ingress(struct __sk_buff *skb)
 {
@@ -991,16 +1104,15 @@ int mup_server_ingress(struct __sk_buff *skb)
 	struct registered_path_value_v1 *path;
 	struct registration_value_v1 *registration;
 	struct server_reverse_value_v1 *reverse;
-	struct server_route_value_v1 *forward;
 	struct server_route_key_v1 route_key = {};
 	struct server_route_value_v1 observed = {};
+	struct target_ingress_v1 *inject;
 	__u32 configuration_key = 0;
 	__u32 peer_token = 0;
 	__u16 target_port = 0;
 	__u16 reserved_port = 0;
 	__u64 now;
 	int result;
-	int local;
 
 	result = parse_ipv4_l4(skb, &packet);
 	if (result != MUP_DROP_NONE)
@@ -1009,7 +1121,14 @@ int mup_server_ingress(struct __sk_buff *skb)
 	if (!configuration)
 		return MUP_TCX_NEXT;
 
-	if (packet.transport == MUP_TRANSPORT_UDP &&
+	inject = bpf_map_lookup_elem(&target_ingress, &configuration_key);
+	if (inject && !inject->ifindex)
+		inject = 0;
+	/*
+	 * With ingress delivery, the replies of the target leave through the
+	 * egress hook, where mup_server_egress catches them.
+	 */
+	if (!inject && packet.transport == MUP_TRANSPORT_UDP &&
 	    packet.ipv4->source == configuration->target_ip &&
 	    packet.ipv4->destination == configuration->source_ip &&
 	    packet.source_port == configuration->target_port) {
@@ -1022,95 +1141,14 @@ int mup_server_ingress(struct __sk_buff *skb)
 					      &packet.destination_port);
 		if (!reverse)
 			return MUP_TCX_NEXT;
-		result = validate_wg(&packet, 0, &peer_token);
-		if (result != MUP_DROP_NONE)
-			return count_and_drop(skb, result);
-		now = bpf_ktime_get_ns();
-		registration = bpf_map_lookup_elem(&registration_by_key,
-						   &reverse->route_key.client);
-		if (!registration || registration->expires_at_ns < now)
-			return count_and_drop(skb, MUP_DROP_NOT_REGISTERED);
-		reverse->route_value.last_seen_ns = now;
-		forward = bpf_map_lookup_elem(&server_route_by_key,
-					      &reverse->route_key);
-		if (!forward || forward->target_port != packet.destination_port)
-			return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
-		forward->last_seen_ns = now;
 		/*
 		 * A target on this host answers from a local socket, so its
 		 * packets have CHECKSUM_PARTIAL, and the device completes the
 		 * checksum. The partial rewrites leave the checksum to it.
 		 */
-		local = configuration->target_ip == configuration->source_ip;
-		if (!local &&
-		    mup_set_peer_token(&packet, reverse->route_key.peer_token))
-			return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
-		__be32 pool_addr = 0;
-		if (reverse->route_value.flags & MUP_FLAG_RETURN_POOL) {
-			pool_addr = pick_reflector(
-				reverse->route_value.return_ip,
-				reverse->route_value.transport,
-				reverse->route_value.flags,
-				reverse->route_key.peer_token);
-			if (!pool_addr)
-				return count_and_drop(skb, MUP_DROP_NO_PATH);
-		}
-		if (reverse->route_value.transport == MUP_TRANSPORT_UDP) {
-			__be32 source_ip =
-				(reverse->route_value.flags & MUP_FLAG_RETURN_POOL) ?
-				pool_addr :
-				(reverse->route_value.flags & MUP_FLAG_RETURN_IP) ?
-				reverse->route_value.return_ip :
-				reverse->route_value.server_local_ip;
-			if (local)
-				result = mup_rewrite_udp_partial(
-					&packet, source_ip,
-					reverse->route_key.client.advertised_ip,
-					reverse->route_value.server_port,
-					registration->listen_port,
-					reverse->route_key.peer_token);
-			else
-				result = mup_rewrite_udp(
-					&packet, source_ip,
-					reverse->route_key.client.advertised_ip,
-					reverse->route_value.server_port,
-					registration->listen_port);
-			if (result)
-				return count_and_drop(skb, MUP_DROP_CHECKSUM);
-		} else if (reverse->route_value.transport == MUP_TRANSPORT_ICMP) {
-			__be32 source_ip;
-			__be32 destination_ip;
-			__u8 type;
-
-			if (reverse->route_value.flags &
-			    (MUP_FLAG_RETURN_IP | MUP_FLAG_RETURN_POOL)) {
-				source_ip = reverse->route_key.client.advertised_ip;
-				destination_ip =
-					(reverse->route_value.flags & MUP_FLAG_RETURN_POOL) ?
-					pool_addr : reverse->route_value.return_ip;
-				type = MUP_ICMP_ECHO_REQUEST;
-			} else {
-				source_ip = reverse->route_value.server_local_ip;
-				destination_ip =
-					reverse->route_key.client.advertised_ip;
-				type = MUP_ICMP_ECHO_REPLY;
-			}
-			if (local)
-				result = mup_rewrite_icmp_partial(
-					&packet, source_ip, destination_ip, type,
-					reverse->route_value.server_port,
-					reverse->route_key.peer_token);
-			else
-				result = mup_rewrite_icmp(
-					&packet, source_ip, destination_ip, type,
-					reverse->route_value.server_port,
-					(__u16)reverse->route_key.peer_token);
-			if (result)
-				return count_and_drop(skb, MUP_DROP_CHECKSUM);
-		} else {
-			return count_and_drop(skb, MUP_DROP_TRANSPORT);
-		}
-		return redirect_packet(reverse->route_value.ifindex);
+		return server_target_reply(
+			skb, &packet, reverse,
+			configuration->target_ip == configuration->source_ip, 0);
 	}
 
 	ports = bpf_map_lookup_elem(&server_ports, &configuration_key);
@@ -1169,13 +1207,73 @@ int mup_server_ingress(struct __sk_buff *skb)
 					    &target_port);
 	if (result != MUP_DROP_NONE)
 		return count_and_drop(skb, result);
+	/*
+	 * With ingress delivery, the packet comes from the advertised IP of the
+	 * client, so the target answers it there, and the answer leaves through
+	 * the egress hook of the target interface.
+	 */
 	if (mup_clear_peer_token(&packet) ||
-	    mup_rewrite_udp(&packet, configuration->source_ip,
+	    mup_rewrite_udp(&packet,
+			    inject ? route_key.client.advertised_ip :
+				     configuration->source_ip,
 			    configuration->target_ip, target_port,
 			    configuration->target_port))
 		return count_and_drop(skb, MUP_DROP_CHECKSUM);
+	if (inject) {
+#pragma clang loop unroll(full)
+		for (int index = 0; index < 6; index++)
+			packet.ethernet->destination[index] = inject->mac[index];
+		return bpf_redirect(inject->ifindex, BPF_F_INGRESS);
+	}
 
 	return redirect_packet(configuration->ifindex);
+}
+
+/*
+ * mup_server_egress catches the replies of a target with ingress delivery.
+ * The target answers the advertised IP of the client at the target port of the
+ * route. An earlier egress program can rewrite the reply source to the target
+ * address, as a WireGuard router does, so this program must run after it. Every
+ * packet of the interface passes here, so a cheap header check comes first,
+ * and every other packet goes on unchanged.
+ */
+SEC("tc")
+int mup_server_egress(struct __sk_buff *skb)
+{
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	struct ethhdr *ethernet = data;
+	struct mup_iphdr *ipv4 = (void *)(ethernet + 1);
+	struct mup_udphdr *udp = (void *)(ipv4 + 1);
+	struct mup_packet packet = {};
+	struct server_config_v1 *configuration;
+	struct target_ingress_v1 *inject;
+	struct server_reverse_value_v1 *reverse;
+	__u32 configuration_key = 0;
+
+	if ((void *)(udp + 1) > data_end)
+		return MUP_TCX_NEXT;
+	if (mup_read_be16((const __u8 *)&ethernet->protocol) != MUP_ETH_P_IPV4 ||
+	    ipv4->version_ihl != 0x45 || ipv4->protocol != MUP_IPPROTO_UDP)
+		return MUP_TCX_NEXT;
+	configuration = bpf_map_lookup_elem(&server_config, &configuration_key);
+	if (!configuration || ipv4->source != configuration->target_ip ||
+	    mup_read_be16((const __u8 *)&udp->source) !=
+		    configuration->target_port)
+		return MUP_TCX_NEXT;
+	inject = bpf_map_lookup_elem(&target_ingress, &configuration_key);
+	if (!inject || !inject->ifindex || inject->ifindex != skb->ifindex)
+		return MUP_TCX_NEXT;
+	if (parse_ipv4_l4(skb, &packet) != MUP_DROP_NONE ||
+	    packet.transport != MUP_TRANSPORT_UDP)
+		return MUP_TCX_NEXT;
+	reverse = bpf_map_lookup_elem(&server_route_by_port,
+				      &packet.destination_port);
+	if (!reverse ||
+	    packet.ipv4->destination != reverse->route_key.client.advertised_ip)
+		return MUP_TCX_NEXT;
+	return server_target_reply(skb, &packet, reverse,
+				   mup_udp_is_partial(&packet), 1);
 }
 
 SEC("tc")

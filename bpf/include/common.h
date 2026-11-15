@@ -33,6 +33,9 @@ typedef __u64 __be64;
 #define TC_ACT_SHOT 2
 #define TC_ACT_REDIRECT 7
 
+/* bpf_redirect flag: the packet enters the ingress path of the device. */
+#define BPF_F_INGRESS (1ULL << 0)
+
 enum bpf_map_type {
 	BPF_MAP_TYPE_HASH = 1,
 	BPF_MAP_TYPE_ARRAY = 2,

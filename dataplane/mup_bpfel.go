@@ -183,6 +183,13 @@ type mupServerRouteValueV1 struct {
 	LastSeenNs     uint64
 }
 
+type mupTargetIngressV1 struct {
+	_       structs.HostLayout
+	Ifindex uint32
+	Mac     [6]uint8
+	Padding [2]uint8
+}
+
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
@@ -210,7 +217,9 @@ const (
 	mupMapServerRouteByKey         = "server_route_by_key"
 	mupMapServerRouteByPort        = "server_route_by_port"
 	mupMapStats                    = "stats"
+	mupMapTargetIngress            = "target_ingress"
 	mupProgMupClientIngress        = "mup_client_ingress"
+	mupProgMupServerEgress         = "mup_server_egress"
 	mupProgMupServerIngress        = "mup_server_ingress"
 	mupProgMupTestControl          = "mup_test_control"
 	mupProgMupTestParse            = "mup_test_parse"
@@ -261,6 +270,7 @@ type mupSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type mupProgramSpecs struct {
 	MupClientIngress        *ebpf.ProgramSpec `ebpf:"mup_client_ingress"`
+	MupServerEgress         *ebpf.ProgramSpec `ebpf:"mup_server_egress"`
 	MupServerIngress        *ebpf.ProgramSpec `ebpf:"mup_server_ingress"`
 	MupTestControl          *ebpf.ProgramSpec `ebpf:"mup_test_control"`
 	MupTestParse            *ebpf.ProgramSpec `ebpf:"mup_test_parse"`
@@ -295,6 +305,7 @@ type mupMapSpecs struct {
 	ServerRouteByKey      *ebpf.MapSpec `ebpf:"server_route_by_key"`
 	ServerRouteByPort     *ebpf.MapSpec `ebpf:"server_route_by_port"`
 	Stats                 *ebpf.MapSpec `ebpf:"stats"`
+	TargetIngress         *ebpf.MapSpec `ebpf:"target_ingress"`
 }
 
 // mupVariableSpecs contains global variables before they are loaded into the kernel.
@@ -346,6 +357,7 @@ type mupMaps struct {
 	ServerRouteByKey      *ebpf.Map `ebpf:"server_route_by_key"`
 	ServerRouteByPort     *ebpf.Map `ebpf:"server_route_by_port"`
 	Stats                 *ebpf.Map `ebpf:"stats"`
+	TargetIngress         *ebpf.Map `ebpf:"target_ingress"`
 }
 
 func (m *mupMaps) Close() error {
@@ -373,6 +385,7 @@ func (m *mupMaps) Close() error {
 		m.ServerRouteByKey,
 		m.ServerRouteByPort,
 		m.Stats,
+		m.TargetIngress,
 	)
 }
 
@@ -387,6 +400,7 @@ type mupVariables struct {
 // It can be passed to loadMupObjects or ebpf.CollectionSpec.LoadAndAssign.
 type mupPrograms struct {
 	MupClientIngress        *ebpf.Program `ebpf:"mup_client_ingress"`
+	MupServerEgress         *ebpf.Program `ebpf:"mup_server_egress"`
 	MupServerIngress        *ebpf.Program `ebpf:"mup_server_ingress"`
 	MupTestControl          *ebpf.Program `ebpf:"mup_test_control"`
 	MupTestParse            *ebpf.Program `ebpf:"mup_test_parse"`
@@ -397,6 +411,7 @@ type mupPrograms struct {
 func (p *mupPrograms) Close() error {
 	return _MupClose(
 		p.MupClientIngress,
+		p.MupServerEgress,
 		p.MupServerIngress,
 		p.MupTestControl,
 		p.MupTestParse,

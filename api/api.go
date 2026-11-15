@@ -46,6 +46,7 @@ type ServerStatus struct {
 	Port             uint16 `json:"port"`
 	PortLast         uint16 `json:"port_last,omitempty"`
 	Target           string `json:"target"`
+	TargetIngress    bool   `json:"target_ingress,omitempty"`
 	Clients          uint64 `json:"clients"`
 	Paths            uint64 `json:"paths"`
 	Peers            uint64 `json:"peers"`

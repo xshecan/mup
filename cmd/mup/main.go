@@ -19,7 +19,7 @@ import (
 
 const usage = `usage:
   mup --config FILE
-  mup server -p PORT[-LAST] -r TARGET_IP:PORT [--control-socket PATH]
+  mup server -p PORT[-LAST] -r TARGET_IP:PORT [--target-ingress] [--control-socket PATH]
   mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT/udp|icmp [via RETURN_IP]" [-u ...] -s CLIENT_IP
              [-r RETURN_IP] [--mode fallback|balancer|burst] [--control-socket PATH]
 `
@@ -183,7 +183,9 @@ func parseServerArgs(args []string) (*config.Server, error) {
 	fs := flag.NewFlagSet("mup server", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var portRaw, targetRaw, controlSocket string
+	var targetIngress bool
 	fs.StringVar(&portRaw, "p", "", "UDP port and ICMP identifier, as PORT or FIRST-LAST")
+	fs.BoolVar(&targetIngress, "target-ingress", false, "deliver packets into the ingress hook of the target interface")
 	fs.StringVar(&targetRaw, "r", "", "WireGuard UDP target as IPv4:PORT")
 	fs.StringVar(&controlSocket, "control-socket", api.DefaultServerSocket, "Unix socket for mupctl, or empty to disable")
 	if err := fs.Parse(args); err != nil {
@@ -200,7 +202,7 @@ func parseServerArgs(args []string) (*config.Server, error) {
 	if err != nil {
 		return nil, errors.New("server -r must be a nonzero IPv4:PORT")
 	}
-	server := &config.Server{Port: serverPort, Target: target, ControlSocket: controlSocket}
+	server := &config.Server{Port: serverPort, Target: target, ControlSocket: controlSocket, TargetIngress: targetIngress}
 	if err := server.Validate(); err != nil {
 		return nil, err
 	}

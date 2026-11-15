@@ -126,10 +126,24 @@ func attachClient(lifecycle fx.Lifecycle, runtime *dataplane.Runtime, plan runti
 
 func attachServer(lifecycle fx.Lifecycle, runtime *dataplane.Runtime, plan runtimePlan) {
 	lifecycle.Append(fx.StartHook(func() error {
+		// The egress program goes on before the ingress delivery starts, so
+		// no reply of the target leaves without it.
+		ingress := plan.server.IngressIfindex
+		if ingress > 0 {
+			if err := runtime.AttachServerEgress(ingress); err != nil {
+				return err
+			}
+		}
 		if err := runtime.ConfigureServer(*plan.server); err != nil {
 			return err
 		}
-		return runtime.AttachServer(plan.attachIfindexes)
+		if err := runtime.AttachServer(plan.attachIfindexes); err != nil {
+			return err
+		}
+		if ingress == 0 {
+			return runtime.AttachServerEgress(0)
+		}
+		return nil
 	}))
 }
 

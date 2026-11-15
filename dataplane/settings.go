@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 
 	"github.com/xshecan/mup/config"
@@ -44,6 +45,11 @@ type ServerSettings struct {
 	SourceIP    netip.Addr
 	Ifindex     int
 	ServerPorts config.PortRange
+	// IngressIfindex turns on the ingress delivery of a target on this host,
+	// and zero turns it off. IngressMAC is the Ethernet address of that
+	// interface, which the injected packets carry as their destination.
+	IngressIfindex int
+	IngressMAC     net.HardwareAddr
 }
 
 func encodeClientSettings(settings ClientSettings) (
@@ -207,6 +213,27 @@ func encodeServerSettings(settings ServerSettings) (mupServerConfigV1, mupServer
 		TargetPort: settings.Target.Port(),
 		ServerPort: settings.ServerPorts.First,
 	}, mupServerPortsV1{First: settings.ServerPorts.First, Last: settings.ServerPorts.Last}, nil
+}
+
+// encodeTargetIngress encodes the ingress delivery of a target. A zero
+// interface index encodes the off state.
+func encodeTargetIngress(settings ServerSettings) (mupTargetIngressV1, error) {
+	var ingress mupTargetIngressV1
+	if settings.IngressIfindex == 0 {
+		return ingress, nil
+	}
+	if settings.IngressIfindex < 0 {
+		return ingress, errors.New("target ingress interface index must be positive")
+	}
+	if len(settings.IngressMAC) != 6 {
+		return ingress, errors.New("target ingress interface needs a 6-byte Ethernet address")
+	}
+	if settings.Target.Addr() != settings.SourceIP {
+		return ingress, errors.New("target ingress needs a target address on this host")
+	}
+	ingress.Ifindex = uint32(settings.IngressIfindex)
+	copy(ingress.Mac[:], settings.IngressMAC)
+	return ingress, nil
 }
 
 func requiredIPv4Word(address netip.Addr, name string) (uint32, error) {

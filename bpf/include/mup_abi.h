@@ -128,6 +128,20 @@ struct server_config_v1 {
 };
 
 /*
+ * target_ingress_v1 turns on the ingress delivery of a target on the server
+ * host, for example a WireGuard router with a TC fast path on that interface.
+ * The server injects each upstream packet into the ingress hook of ifindex,
+ * from the advertised IP of the client and the target port of the route, with
+ * mac as the Ethernet destination. It catches the replies of the target in
+ * the egress hook of the same interface. An ifindex of zero turns it off.
+ */
+struct target_ingress_v1 {
+	__u32 ifindex;
+	__u8 mac[6];
+	__u8 padding[2];
+};
+
+/*
  * The server accepts every port from first to last. server_config_v1 keeps
  * the first port, so a server without this entry accepts only that port.
  */
@@ -264,6 +278,7 @@ _Static_assert(sizeof(struct client_config_v1) == 16, "client_config_v1 ABI");
 _Static_assert(sizeof(struct path_group_v1) == 8, "path_group_v1 ABI");
 _Static_assert(sizeof(struct server_config_v1) == 16, "server_config_v1 ABI");
 _Static_assert(sizeof(struct server_ports_v1) == 4, "server_ports_v1 ABI");
+_Static_assert(sizeof(struct target_ingress_v1) == 12, "target_ingress_v1 ABI");
 _Static_assert(sizeof(struct registration_value_v1) == 16, "registration_value_v1 ABI");
 _Static_assert(sizeof(struct registered_path_value_v1) == 32, "registered_path_value_v1 ABI");
 _Static_assert(sizeof(struct peer_endpoint_key_v1) == 12, "peer_endpoint_key_v1 ABI");

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/netip"
 	"slices"
 
@@ -17,6 +18,7 @@ type routeResolver interface {
 	Resolve(destination netip.Addr, interfaceName string) (source netip.Addr, ifindex int, err error)
 	UpInterfaceIndexes() ([]int, error)
 	LoopbackIndex() (int, error)
+	HardwareAddr(ifindex int) (net.HardwareAddr, error)
 }
 
 type runtimePlan struct {
@@ -91,7 +93,23 @@ func buildPlan(appConfig config.App, nonce uint64, resolver routeResolver) (runt
 	if ifindex <= 0 {
 		return runtimePlan{}, fmt.Errorf("resolve server target route: invalid interface index %d", ifindex)
 	}
-	if sourceIP == server.Target.Addr() {
+	var ingressMAC net.HardwareAddr
+	ingressIfindex := 0
+	if server.TargetIngress {
+		// The target must be an address of this host, so that the packets
+		// injected into the ingress hook of its interface reach it.
+		if sourceIP != server.Target.Addr() {
+			return runtimePlan{}, fmt.Errorf("server target_ingress needs a target address on this host, but %s routes from %s", server.Target.Addr(), sourceIP)
+		}
+		ingressMAC, err = resolver.HardwareAddr(ifindex)
+		if err != nil {
+			return runtimePlan{}, fmt.Errorf("resolve target ingress interface: %w", err)
+		}
+		if len(ingressMAC) != 6 {
+			return runtimePlan{}, fmt.Errorf("server target_ingress needs an Ethernet interface, and interface %d has no Ethernet address", ifindex)
+		}
+		ingressIfindex = ifindex
+	} else if sourceIP == server.Target.Addr() {
 		ifindex, err = resolver.LoopbackIndex()
 		if err != nil {
 			return runtimePlan{}, fmt.Errorf("resolve local server target: %w", err)
@@ -102,10 +120,12 @@ func buildPlan(appConfig config.App, nonce uint64, resolver routeResolver) (runt
 	}
 	attachIfindexes = append(attachIfindexes, ifindex)
 	settings := dataplane.ServerSettings{
-		Target:      server.Target,
-		SourceIP:    sourceIP,
-		Ifindex:     ifindex,
-		ServerPorts: server.Port,
+		Target:         server.Target,
+		SourceIP:       sourceIP,
+		Ifindex:        ifindex,
+		ServerPorts:    server.Port,
+		IngressIfindex: ingressIfindex,
+		IngressMAC:     ingressMAC,
 	}
 	return runtimePlan{
 		pinRoot:         defaultPinRoot + "/server",

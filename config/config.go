@@ -338,6 +338,12 @@ type Server struct {
 	Port          PortRange      `yaml:"port"`
 	Target        netip.AddrPort `yaml:"target"`
 	ControlSocket string         `yaml:"control_socket"`
+	// TargetIngress delivers each upstream packet into the ingress hook of
+	// the interface that holds the target address, from the advertised IP
+	// of the client. A program on that hook, for example the TC fast path of
+	// a WireGuard router, then sees the packet as a packet from the client.
+	// The target must be an address of this host on an Ethernet interface.
+	TargetIngress bool `yaml:"target_ingress"`
 }
 
 // UnmarshalYAML keeps the default socket when the file does not set one. An
@@ -357,6 +363,14 @@ func (s Server) Validate() error {
 	}
 	if !isNonzeroIPv4(s.Target.Addr()) || s.Target.Port() == 0 {
 		return errors.New("server target must be a nonzero IPv4:PORT")
+	}
+	if s.TargetIngress {
+		if s.Target.Addr().IsLoopback() {
+			return errors.New("server target_ingress needs a target on an Ethernet interface, not on loopback")
+		}
+		if s.Port.Contains(s.Target.Port()) {
+			return errors.New("server target_ingress needs a target port outside the server ports")
+		}
 	}
 	return nil
 }

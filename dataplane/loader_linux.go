@@ -172,8 +172,9 @@ func (r *Runtime) ConfigureServer(settings ServerSettings) error {
 		return fmt.Errorf("configure server: MUP dataplane is closed")
 	}
 	if err := applyServerSettings(configurationMaps{
-		server: r.objects.ServerConfig,
-		ports:  r.objects.ServerPorts,
+		server:  r.objects.ServerConfig,
+		ports:   r.objects.ServerPorts,
+		ingress: r.objects.TargetIngress,
 	}, settings); err != nil {
 		return err
 	}

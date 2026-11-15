@@ -42,6 +42,7 @@ func (s *serverInspector) Status() (api.Status, error) {
 			Port:             s.server.Port.First,
 			PortLast:         s.server.Port.Last,
 			Target:           s.server.Target.String(),
+			TargetIngress:    s.server.TargetIngress,
 			Clients:          snapshot.Registrations,
 			Paths:            snapshot.RegisteredPaths,
 			Peers:            snapshot.ServerRoutes,

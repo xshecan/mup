@@ -52,7 +52,11 @@ func printStatus(w io.Writer, status api.Status, clients []api.RegisteredClient,
 			port += "-" + strconv.Itoa(int(server.PortLast))
 		}
 		field("Port", port)
-		field("Target", server.Target)
+		target := server.Target
+		if server.TargetIngress {
+			target += " (ingress delivery)"
+		}
+		field("Target", target)
 		field("Uptime", humanDuration(now.Sub(status.StartedAt)))
 		field("Clients", fmt.Sprintf("%d, with %d paths", server.Clients, server.Paths))
 		field("Peers", strconv.FormatUint(server.Peers, 10))

@@ -82,6 +82,14 @@ func (systemResolver) LoopbackIndex() (int, error) {
 	return 0, errors.New("no loopback interface is up")
 }
 
+func (systemResolver) HardwareAddr(ifindex int) (net.HardwareAddr, error) {
+	networkInterface, err := net.InterfaceByIndex(ifindex)
+	if err != nil {
+		return nil, fmt.Errorf("find interface %d: %w", ifindex, err)
+	}
+	return networkInterface.HardwareAddr, nil
+}
+
 func checkEthernetHeader(interfaceName string) error {
 	if !hasEthernetHeader(interfaceName) {
 		return fmt.Errorf("interface %s has no Ethernet header, and MUP does not support it", interfaceName)

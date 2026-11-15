@@ -79,6 +79,10 @@ func (*Runtime) AttachServer([]int) error {
 	return ErrUnsupportedPlatform
 }
 
+func (*Runtime) AttachServerEgress(int) error {
+	return ErrUnsupportedPlatform
+}
+
 func (*Runtime) SetPath(int, PathSettings) error {
 	return ErrUnsupportedPlatform
 }

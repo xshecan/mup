@@ -16,6 +16,7 @@ type configurationMaps struct {
 	client  configurationMap
 	server  configurationMap
 	ports   configurationMap
+	ingress configurationMap
 	groups  configurationMap
 	paths   configurationMap
 	returns configurationMap
@@ -66,11 +67,20 @@ func applyServerSettings(maps configurationMaps, settings ServerSettings) error 
 	if err != nil {
 		return err
 	}
+	ingress, err := encodeTargetIngress(settings)
+	if err != nil {
+		return err
+	}
 	if err := maps.ports.Update(uint32(0), ports, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("update server ports: %w", err)
 	}
 	if err := maps.server.Update(uint32(0), server, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("update server configuration: %w", err)
+	}
+	if maps.ingress != nil {
+		if err := maps.ingress.Update(uint32(0), ingress, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("update target ingress: %w", err)
+		}
 	}
 	return nil
 }
