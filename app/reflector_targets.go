@@ -4,6 +4,8 @@ import (
 	"net/netip"
 	"sync"
 	"time"
+
+	"github.com/xshecan/mup/protocol"
 )
 
 // reflectorTarget is one client that the server probes for one UDP return pool.
@@ -68,4 +70,28 @@ func (t *reflectorTargets) active(now time.Time) []reflectorTarget {
 		targets = append(targets, entry.target)
 	}
 	return targets
+}
+
+// confirms reports whether a probe reply answers a probe of an active target:
+// the reply must name the client identity and path of the target, and the
+// reflector must be in the pool of that path. The server ignores every other
+// reply, so a stray frame cannot mark a reflector healthy.
+func (t *reflectorTargets) confirms(frame protocol.ControlFrame, now time.Time) bool {
+	if frame.Type != protocol.ControlProbeReply || frame.Transport != protocol.TransportUDP ||
+		!frame.ReturnIP.Is4() {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, entry := range t.entries {
+		target := entry.target
+		if now.After(entry.expires) || target.advertisedIP != frame.AdvertisedIP ||
+			target.nonce != frame.InstanceNonce || target.pathID != frame.PathID {
+			continue
+		}
+		if netip.PrefixFrom(target.base, int(target.prefix)).Contains(frame.ReturnIP) {
+			return true
+		}
+	}
+	return false
 }

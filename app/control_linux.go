@@ -270,7 +270,7 @@ func serveServerUDPConnection(
 		// the client, not from the spoofed source.
 		if frame, err := protocol.DecodeControlFrame(buffer[:count]); err == nil &&
 			frame.Type == protocol.ControlProbeReply {
-			if frame.Transport == protocol.TransportUDP && frame.ReturnIP.IsValid() {
+			if targets != nil && targets.confirms(frame, time.Now()) {
 				_ = sink.ConfirmReflector(frame.ReturnIP)
 			}
 			continue
