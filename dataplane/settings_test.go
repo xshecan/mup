@@ -2,6 +2,7 @@ package dataplane
 
 import (
 	"encoding/binary"
+	"net"
 	"net/netip"
 	"testing"
 
@@ -109,6 +110,40 @@ func TestEncodeServerSettings(t *testing.T) {
 	}
 	if got := nativeIPv4Bytes(encoded.TargetIp); got != [4]byte{193, 24, 210, 185} {
 		t.Fatalf("target IP bytes = %v", got)
+	}
+}
+
+func TestEncodeTargetIngress(t *testing.T) {
+	t.Parallel()
+
+	settings := ServerSettings{
+		Target:         netip.MustParseAddrPort("160.119.74.6:51820"),
+		SourceIP:       netip.MustParseAddr("160.119.74.6"),
+		Ifindex:        2,
+		ServerPorts:    config.PortRange{First: 9000, Last: 9999},
+		IngressIfindex: 2,
+		IngressMAC:     net.HardwareAddr{0xbc, 0x24, 0x11, 0xac, 0x91, 0x92},
+	}
+	encoded, err := encodeTargetIngress(settings)
+	if err != nil {
+		t.Fatalf("encodeTargetIngress: %v", err)
+	}
+	if encoded.Ifindex != 2 || encoded.Mac != [6]byte{0xbc, 0x24, 0x11, 0xac, 0x91, 0x92} {
+		t.Fatalf("target ingress = %#v", encoded)
+	}
+	off, err := encodeTargetIngress(ServerSettings{})
+	if err != nil || off != (mupTargetIngressV1{}) {
+		t.Fatalf("off state = %#v, %v, want the zero value", off, err)
+	}
+	remote := settings
+	remote.SourceIP = netip.MustParseAddr("160.119.74.7")
+	if _, err := encodeTargetIngress(remote); err == nil {
+		t.Fatal("ingress delivery to a target on another host was accepted")
+	}
+	short := settings
+	short.IngressMAC = nil
+	if _, err := encodeTargetIngress(short); err == nil {
+		t.Fatal("ingress delivery without an Ethernet address was accepted")
 	}
 }
 

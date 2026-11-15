@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"net"
 	"net/netip"
 	"slices"
 	"testing"
@@ -16,6 +17,7 @@ type fakeResolver struct {
 	up       []int
 	catchAll int
 	loopback int
+	macs     map[int]net.HardwareAddr
 }
 
 type route struct {
@@ -33,6 +35,10 @@ func (r fakeResolver) Resolve(destination netip.Addr, interfaceName string) (net
 
 func (r fakeResolver) UpInterfaceIndexes() ([]int, error) {
 	return append([]int(nil), r.up...), nil
+}
+
+func (r fakeResolver) HardwareAddr(ifindex int) (net.HardwareAddr, error) {
+	return r.macs[ifindex], nil
 }
 
 func (r fakeResolver) LoopbackIndex() (int, error) {
@@ -144,6 +150,54 @@ func TestBuildServerPlanDeliversLocalTargetThroughLoopback(t *testing.T) {
 		if !slices.Equal(plan.attachIfindexes, test.wantAttach) {
 			t.Fatalf("attach indexes for %s = %v, want %v", test.target, plan.attachIfindexes, test.wantAttach)
 		}
+	}
+}
+
+func TestBuildServerPlanTargetIngress(t *testing.T) {
+	t.Parallel()
+
+	mac := net.HardwareAddr{0xbc, 0x24, 0x11, 0xac, 0x91, 0x92}
+	resolver := fakeResolver{
+		routes: map[string]route{
+			"160.119.74.6%":  {source: netip.MustParseAddr("160.119.74.6"), ifindex: 2},
+			"198.51.100.7%":  {source: netip.MustParseAddr("160.119.74.6"), ifindex: 2},
+			"160.119.74.66%": {source: netip.MustParseAddr("160.119.74.66"), ifindex: 3},
+		},
+		up:       []int{2, 3},
+		loopback: 1,
+		macs:     map[int]net.HardwareAddr{2: mac},
+	}
+	plan, err := buildPlan(config.App{Server: &config.Server{
+		Port:          config.PortRange{First: 9000, Last: 9999},
+		Target:        netip.MustParseAddrPort("160.119.74.6:51820"),
+		TargetIngress: true,
+	}}, 0, resolver)
+	if err != nil {
+		t.Fatalf("buildPlan: %v", err)
+	}
+	// The target stays on its own interface, not on loopback.
+	if plan.server.Ifindex != 2 || plan.server.IngressIfindex != 2 || plan.server.IngressMAC.String() != mac.String() {
+		t.Fatalf("server plan = %#v, want ingress delivery on ifindex 2", plan.server)
+	}
+	if !slices.Equal(plan.attachIfindexes, []int{2, 3}) {
+		t.Fatalf("attach indexes = %v, want [2 3]", plan.attachIfindexes)
+	}
+
+	_, err = buildPlan(config.App{Server: &config.Server{
+		Port:          config.SinglePort(9000),
+		Target:        netip.MustParseAddrPort("198.51.100.7:51820"),
+		TargetIngress: true,
+	}}, 0, resolver)
+	if err == nil {
+		t.Fatal("ingress delivery to a target on another host was accepted")
+	}
+	_, err = buildPlan(config.App{Server: &config.Server{
+		Port:          config.SinglePort(9000),
+		Target:        netip.MustParseAddrPort("160.119.74.66:51820"),
+		TargetIngress: true,
+	}}, 0, resolver)
+	if err == nil {
+		t.Fatal("ingress delivery on an interface without an Ethernet address was accepted")
 	}
 }
 

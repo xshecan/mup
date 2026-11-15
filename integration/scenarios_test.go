@@ -131,15 +131,24 @@ func TestPrivilegedLocalTarget(t *testing.T) {
 	}
 	binaryPath := buildDaemon(t)
 
+	// With ingress delivery, the target sees the packets as packets from the
+	// advertised IP of the client, and its replies leave through the egress
+	// hook. With checksum offload on, the replies keep CHECKSUM_PARTIAL.
 	tests := []struct {
 		name      string
 		target    string
 		transport string
+		ingress   bool
+		offload   bool
 	}{
 		{name: "loopback-udp", target: "127.0.0.1:51820", transport: "udp"},
 		{name: "loopback-icmp", target: "127.0.0.1:51820", transport: "icmp"},
 		{name: "own-address-udp", target: "10.210.1.2:51820", transport: "udp"},
 		{name: "own-address-icmp", target: "10.210.1.2:51820", transport: "icmp"},
+		{name: "ingress-udp", target: "10.210.1.2:51820", transport: "udp", ingress: true},
+		{name: "ingress-icmp", target: "10.210.1.2:51820", transport: "icmp", ingress: true},
+		{name: "ingress-udp-offload", target: "10.210.1.2:51820", transport: "udp", ingress: true, offload: true},
+		{name: "ingress-icmp-offload", target: "10.210.1.2:51820", transport: "icmp", ingress: true, offload: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -154,14 +163,25 @@ func TestPrivilegedLocalTarget(t *testing.T) {
 			linkPair(t, "mc"+suffix, clientNS, "ms"+suffix, serverNS)
 			addressLink(t, clientNS, "mc"+suffix, "10.210.1.1/24")
 			addressLink(t, serverNS, "ms"+suffix, "10.210.1.2/24")
-			runInNamespace(t, serverNS, "ethtool", "-K", "ms"+suffix, "tx", "off")
+			if !test.offload {
+				runInNamespace(t, serverNS, "ethtool", "-K", "ms"+suffix, "tx", "off")
+			}
 
-			target := startEchoTarget(t, serverNS, test.target)
+			var targetEnvironment []string
+			if test.ingress {
+				// The target must see the advertised IP of the client.
+				targetEnvironment = append(targetEnvironment, "MUP_TARGET_SOURCE_IP=10.210.1.1")
+			}
+			target := startEchoTarget(t, serverNS, test.target, targetEnvironment...)
 			defer target.stop(t)
 
 			directory := t.TempDir()
 			serverSocket := filepath.Join(directory, "server.sock")
-			server := startNamespaced(t, serverNS, binaryPath, "server", "-p", "5000", "-r", test.target, "--control-socket", serverSocket)
+			arguments := []string{"server", "-p", "5000", "-r", test.target, "--control-socket", serverSocket}
+			if test.ingress {
+				arguments = append(arguments, "--target-ingress")
+			}
+			server := startNamespaced(t, serverNS, binaryPath, arguments...)
 			defer server.stop(t)
 			client := startDaemon(t, clientNS, binaryPath, "client", "-p", "51820", "-u", "10.210.1.2:5000/"+test.transport, "-s", "10.210.1.1")
 			defer client.stop(t)
@@ -357,10 +377,11 @@ func TestPrivilegedReturnPool(t *testing.T) {
 	}
 }
 
-func startEchoTarget(t *testing.T, namespace, address string) *process {
+func startEchoTarget(t *testing.T, namespace, address string, environment ...string) *process {
 	t.Helper()
 	readyFile := filepath.Join(t.TempDir(), "target-ready")
-	target := startHelper(t, namespace, "echo", readyFile, "MUP_TARGET_ADDRESS="+address)
+	environment = append([]string{"MUP_TARGET_ADDRESS=" + address}, environment...)
+	target := startHelper(t, namespace, "echo", readyFile, environment...)
 	waitForFile(t, readyFile, 5*time.Second)
 	return target
 }
@@ -513,6 +534,9 @@ func runEchoTargetHelper(t *testing.T) {
 		}
 		payload := buffer[:count]
 		assertWireGuardFixture(t, payload)
+		if expected := os.Getenv("MUP_TARGET_SOURCE_IP"); expected != "" && source.IP.String() != expected {
+			t.Fatalf("target received a packet from %s, want the source IP %s", source, expected)
+		}
 		if !bytes.Equal(payload[1:4], []byte{0, 0, 0}) {
 			t.Fatalf("target received nonzero WireGuard reserved bytes: %x", payload[1:4])
 		}

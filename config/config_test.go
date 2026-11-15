@@ -149,3 +149,23 @@ func TestParsePortRange(t *testing.T) {
 		t.Fatal("a range larger than MaxServerPorts was accepted")
 	}
 }
+
+func TestServerValidateTargetIngress(t *testing.T) {
+	t.Parallel()
+
+	valid := Server{Port: PortRange{First: 9000, Last: 9999}, Target: netip.MustParseAddrPort("160.119.74.6:51820"), TargetIngress: true}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid ingress delivery rejected: %v", err)
+	}
+	loopback := valid
+	loopback.Target = netip.MustParseAddrPort("127.0.0.1:51820")
+	if err := loopback.Validate(); err == nil {
+		t.Fatal("ingress delivery to a loopback target was accepted")
+	}
+	// An injected packet to a server port would come back to the server.
+	overlap := valid
+	overlap.Target = netip.MustParseAddrPort("160.119.74.6:9500")
+	if err := overlap.Validate(); err == nil {
+		t.Fatal("ingress delivery to a target port inside the server ports was accepted")
+	}
+}

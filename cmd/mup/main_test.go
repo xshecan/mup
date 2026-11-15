@@ -144,6 +144,13 @@ func TestParseArgsServerExample(t *testing.T) {
 	if app.Server.Port != config.SinglePort(5000) || app.Server.Target != netip.MustParseAddrPort("193.24.210.185:51820") {
 		t.Fatalf("unexpected server config: %#v", app.Server)
 	}
+	if app.Server.TargetIngress {
+		t.Fatal("target ingress is on without its flag")
+	}
+	app, err = parseArgs([]string{"server", "-p", "9000-9999", "-r", "160.119.74.6:51820", "--target-ingress"})
+	if err != nil || !app.Server.TargetIngress {
+		t.Fatalf("parseArgs with --target-ingress = %#v, %v", app.Server, err)
+	}
 }
 
 func TestParseArgsRejectsInvalidContracts(t *testing.T) {
