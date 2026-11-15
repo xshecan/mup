@@ -3,6 +3,8 @@ package dataplane
 import (
 	"net/netip"
 	"testing"
+
+	"github.com/xshecan/mup/protocol"
 )
 
 func TestPoolAddresses(t *testing.T) {
@@ -80,5 +82,24 @@ func TestEncodeReflectorPoolRejectsOversize(t *testing.T) {
 	}
 	if _, err := encodeReflectorPool(addresses, nil); err == nil {
 		t.Fatal("oversize pool should be rejected")
+	}
+}
+
+func TestReflectorKeySeparatesTransports(t *testing.T) {
+	t.Parallel()
+	base := netip.MustParseAddr("94.184.45.48")
+	udp, err := reflectorKey(PoolKey{Base: base, Transport: protocol.TransportUDP})
+	if err != nil {
+		t.Fatalf("reflectorKey UDP: %v", err)
+	}
+	icmp, err := reflectorKey(PoolKey{Base: base, Transport: protocol.TransportICMP})
+	if err != nil {
+		t.Fatalf("reflectorKey ICMP: %v", err)
+	}
+	if udp == icmp {
+		t.Fatalf("UDP and ICMP pools of %s share the key %+v", base, udp)
+	}
+	if udp.Base != icmp.Base {
+		t.Fatalf("bases differ: %d and %d", udp.Base, icmp.Base)
 	}
 }

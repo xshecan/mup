@@ -98,6 +98,13 @@ type mupPeerTokenValueV1 struct {
 	LastSeenNs uint64
 }
 
+type mupReflectorKeyV1 struct {
+	_         structs.HostLayout
+	Base      uint32
+	Transport uint8
+	Padding   [3]uint8
+}
+
 type mupReflectorPoolV1 struct {
 	_           structs.HostLayout
 	Count       uint32
@@ -195,7 +202,7 @@ const (
 	mupMapPathReturns              = "path_returns"
 	mupMapPathState                = "path_state"
 	mupMapReflectorCursor          = "reflector_cursor"
-	mupMapReflectorHealth          = "reflector_health"
+	mupMapReflectorPools           = "reflector_pools"
 	mupMapRegisteredPaths          = "registered_paths"
 	mupMapRegistrationByKey        = "registration_by_key"
 	mupMapServerConfig             = "server_config"
@@ -280,7 +287,7 @@ type mupMapSpecs struct {
 	PathReturns           *ebpf.MapSpec `ebpf:"path_returns"`
 	PathState             *ebpf.MapSpec `ebpf:"path_state"`
 	ReflectorCursor       *ebpf.MapSpec `ebpf:"reflector_cursor"`
-	ReflectorHealth       *ebpf.MapSpec `ebpf:"reflector_health"`
+	ReflectorPools        *ebpf.MapSpec `ebpf:"reflector_pools"`
 	RegisteredPaths       *ebpf.MapSpec `ebpf:"registered_paths"`
 	RegistrationByKey     *ebpf.MapSpec `ebpf:"registration_by_key"`
 	ServerConfig          *ebpf.MapSpec `ebpf:"server_config"`
@@ -331,7 +338,7 @@ type mupMaps struct {
 	PathReturns           *ebpf.Map `ebpf:"path_returns"`
 	PathState             *ebpf.Map `ebpf:"path_state"`
 	ReflectorCursor       *ebpf.Map `ebpf:"reflector_cursor"`
-	ReflectorHealth       *ebpf.Map `ebpf:"reflector_health"`
+	ReflectorPools        *ebpf.Map `ebpf:"reflector_pools"`
 	RegisteredPaths       *ebpf.Map `ebpf:"registered_paths"`
 	RegistrationByKey     *ebpf.Map `ebpf:"registration_by_key"`
 	ServerConfig          *ebpf.Map `ebpf:"server_config"`
@@ -358,7 +365,7 @@ func (m *mupMaps) Close() error {
 		m.PathReturns,
 		m.PathState,
 		m.ReflectorCursor,
-		m.ReflectorHealth,
+		m.ReflectorPools,
 		m.RegisteredPaths,
 		m.RegistrationByKey,
 		m.ServerConfig,

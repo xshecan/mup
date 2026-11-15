@@ -43,7 +43,7 @@ func (*Runtime) Reflectors() ([]Reflector, error) {
 	return nil, ErrUnsupportedPlatform
 }
 
-func (*Runtime) SetPoolHealth(netip.Addr, []bool) error {
+func (*Runtime) SetPoolHealth(PoolKey, []bool) error {
 	return ErrUnsupportedPlatform
 }
 

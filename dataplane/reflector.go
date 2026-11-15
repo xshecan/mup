@@ -11,6 +11,18 @@ import (
 // MUP_MAX_POOL in bpf/include/mup_abi.h.
 const MaxPool = 16
 
+// PoolKey names a return pool. A UDP route and an ICMP route can use the same
+// range, and each has its own pool and health.
+type PoolKey struct {
+	Base      netip.Addr
+	Transport protocol.TransportID
+}
+
+// Key returns the key of the pool.
+func (p PoolInfo) Key() PoolKey {
+	return PoolKey{Base: p.Base, Transport: p.Transport}
+}
+
 // PoolInfo describes a return pool that the server observed from a
 // registration. The prober uses it to ping the members of an ICMP pool.
 type PoolInfo struct {
@@ -73,4 +85,13 @@ func encodeReflectorPool(addresses []netip.Addr, healthy []bool) (mupReflectorPo
 		}
 	}
 	return pool, nil
+}
+
+// reflectorKey builds the map key of a pool.
+func reflectorKey(key PoolKey) (mupReflectorKeyV1, error) {
+	base, err := requiredIPv4Word(key.Base, "pool base")
+	if err != nil {
+		return mupReflectorKeyV1{}, err
+	}
+	return mupReflectorKeyV1{Base: base, Transport: uint8(key.Transport)}, nil
 }

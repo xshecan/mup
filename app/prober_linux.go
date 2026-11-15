@@ -26,7 +26,7 @@ const (
 // reflectorRuntime is the part of the dataplane that the prober uses.
 type reflectorRuntime interface {
 	Pools() []dataplane.PoolInfo
-	SetPoolHealth(base netip.Addr, healthy []bool) error
+	SetPoolHealth(key dataplane.PoolKey, healthy []bool) error
 }
 
 // reflectorProber pings the members of each ICMP return pool and writes their
@@ -120,5 +120,5 @@ func (p *reflectorProber) probePool(ctx context.Context, connection *net.IPConn,
 			healthy[index] = p.misses[address] < reflectorMissThreshold
 		}
 	}
-	return p.runtime.SetPoolHealth(pool.Base, healthy)
+	return p.runtime.SetPoolHealth(pool.Key(), healthy)
 }

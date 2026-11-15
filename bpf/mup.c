@@ -137,9 +137,9 @@ struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 256);
 	MUP_PINNED;
-	__type(key, __be32);
+	__type(key, struct reflector_key_v1);
 	__type(value, struct reflector_pool_v1);
-} reflector_health SEC(".maps");
+} reflector_pools SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -893,21 +893,25 @@ int mup_client_ingress(struct __sk_buff *skb)
 }
 
 /*
- * pick_reflector chooses one healthy address from the pool with base base.
+ * pick_reflector chooses one healthy address from the pool with base base and
+ * transport transport.
  * The per-peer mode hashes the peer token to a slot, and the per-packet mode
  * steps a per-CPU cursor. Both start at a slot and walk to the next healthy
  * slot. It returns 0 when the pool is missing or has no healthy address.
  */
-__attribute__((noinline)) __be32 pick_reflector(__be32 base, __u8 flags,
-						__u32 peer_token)
+__attribute__((noinline)) __be32 pick_reflector(__be32 base, __u8 transport,
+						__u8 flags, __u32 peer_token)
 {
+	struct reflector_key_v1 key = {};
 	struct reflector_pool_v1 *pool;
 	__u32 cursor_key = 0;
 	__u32 count;
 	__u32 slot;
 	__u32 min_dist;
 
-	pool = bpf_map_lookup_elem(&reflector_health, &base);
+	key.base = base;
+	key.transport = transport;
+	pool = bpf_map_lookup_elem(&reflector_pools, &key);
 	if (!pool)
 		return 0;
 	count = pool->count;
@@ -1017,6 +1021,7 @@ int mup_server_ingress(struct __sk_buff *skb)
 		if (reverse->route_value.flags & MUP_FLAG_RETURN_POOL) {
 			pool_addr = pick_reflector(
 				reverse->route_value.return_ip,
+				reverse->route_value.transport,
 				reverse->route_value.flags,
 				reverse->route_key.peer_token);
 			if (!pool_addr)

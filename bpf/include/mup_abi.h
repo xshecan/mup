@@ -212,7 +212,17 @@ struct path_return_v1 {
 };
 
 /*
- * reflector_pool_v1 holds the reflectors of one pool, keyed by the pool base.
+ * reflector_key_v1 names a return pool by its base and transport. A UDP route
+ * and an ICMP route can share a range, and each keeps its own health.
+ */
+struct reflector_key_v1 {
+	__be32 base;
+	__u8 transport;
+	__u8 padding[3];
+};
+
+/*
+ * reflector_pool_v1 holds the reflectors of one pool, keyed by reflector_key_v1.
  * The Go prober writes it. count is the number of addresses, healthy_mask has
  * one bit for each healthy address, and addresses holds the pool members. The
  * server program reads it when it reflects a downstream reply.
@@ -263,6 +273,7 @@ _Static_assert(sizeof(struct server_route_value_v1) == 32, "server_route_value_v
 _Static_assert(sizeof(struct server_reverse_value_v1) == 56, "server_reverse_value_v1 ABI");
 _Static_assert(sizeof(struct path_config_v1) == 16, "path_config_v1 ABI");
 _Static_assert(sizeof(struct path_return_v1) == 8, "path_return_v1 ABI");
+_Static_assert(sizeof(struct reflector_key_v1) == 8, "reflector_key_v1 ABI");
 _Static_assert(sizeof(struct reflector_pool_v1) == 80, "reflector_pool_v1 ABI");
 _Static_assert(sizeof(struct path_state_v1) == 8, "path_state_v1 ABI");
 _Static_assert(sizeof(struct duplicate_key_v1) == 48, "duplicate_key_v1 ABI");

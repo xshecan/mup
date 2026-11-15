@@ -23,7 +23,7 @@ type Runtime struct {
 	pinRoot        string
 	peerQuarantine resourceQuarantine[uint32]
 	portQuarantine resourceQuarantine[uint16]
-	pools          map[netip.Addr]PoolInfo
+	pools          map[PoolKey]PoolInfo
 	closed         bool
 }
 
@@ -42,9 +42,13 @@ func Load(cfg Config) (runtime *Runtime, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("inspect target-port queue pin: %w", err)
 	}
+	// v0.1.9 pinned the pool map under this name with a smaller key.
+	if err := os.Remove(filepath.Join(cfg.PinRoot, "reflector_health")); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("remove old reflector pin: %w", err)
+	}
 	options := &ebpf.CollectionOptions{}
 	options.Maps.PinPath = cfg.PinRoot
-	runtime = &Runtime{pinRoot: cfg.PinRoot, pools: make(map[netip.Addr]PoolInfo)}
+	runtime = &Runtime{pinRoot: cfg.PinRoot, pools: make(map[PoolKey]PoolInfo)}
 	if err := loadMupObjects(&runtime.objects, options); err != nil {
 		return nil, fmt.Errorf("load MUP BPF objects: %w", err)
 	}
@@ -229,26 +233,27 @@ func (r *Runtime) ObservePool(base netip.Addr, prefix uint8, transport protocol.
 	if r.closed {
 		return fmt.Errorf("observe pool: MUP dataplane is closed")
 	}
-	if _, exists := r.pools[base]; exists {
+	key := PoolKey{Base: base, Transport: transport}
+	if _, exists := r.pools[key]; exists {
 		return nil
 	}
 	pool, err := encodeReflectorPool(addresses, nil)
 	if err != nil {
 		return err
 	}
-	baseWord, err := requiredIPv4Word(base, "pool base")
+	mapKey, err := reflectorKey(key)
 	if err != nil {
 		return err
 	}
-	if err := r.objects.ReflectorHealth.Update(baseWord, pool, ebpf.UpdateAny); err != nil {
-		return fmt.Errorf("seed reflector pool %s: %w", base, err)
+	if err := r.objects.ReflectorPools.Update(mapKey, pool, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("seed reflector pool %s %s: %w", base, transport, err)
 	}
-	r.pools[base] = PoolInfo{Base: base, Prefix: prefix, Transport: transport, Addresses: addresses}
+	r.pools[key] = PoolInfo{Base: base, Prefix: prefix, Transport: transport, Addresses: addresses}
 	return nil
 }
 
 // Reflectors returns every pool address with its current health, sorted by
-// pool base and address.
+// pool base, transport, and address.
 func (r *Runtime) Reflectors() ([]Reflector, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -256,21 +261,21 @@ func (r *Runtime) Reflectors() ([]Reflector, error) {
 		return nil, fmt.Errorf("list reflectors: MUP dataplane is closed")
 	}
 	var reflectors []Reflector
-	for base, info := range r.pools {
-		baseWord, err := requiredIPv4Word(base, "pool base")
+	for key, info := range r.pools {
+		mapKey, err := reflectorKey(key)
 		if err != nil {
 			return nil, err
 		}
 		var pool mupReflectorPoolV1
-		if err := r.objects.ReflectorHealth.Lookup(baseWord, &pool); err != nil {
+		if err := r.objects.ReflectorPools.Lookup(mapKey, &pool); err != nil {
 			if errors.Is(err, ebpf.ErrKeyNotExist) {
 				continue
 			}
-			return nil, fmt.Errorf("read reflector pool %s: %w", base, err)
+			return nil, fmt.Errorf("read reflector pool %s %s: %w", key.Base, key.Transport, err)
 		}
 		for index, address := range info.Addresses {
 			reflectors = append(reflectors, Reflector{
-				Base:      base,
+				Base:      key.Base,
 				Prefix:    info.Prefix,
 				Transport: info.Transport,
 				Address:   address,
@@ -281,6 +286,9 @@ func (r *Runtime) Reflectors() ([]Reflector, error) {
 	slices.SortFunc(reflectors, func(a, b Reflector) int {
 		if c := a.Base.Compare(b.Base); c != 0 {
 			return c
+		}
+		if a.Transport != b.Transport {
+			return int(a.Transport) - int(b.Transport)
 		}
 		return a.Address.Compare(b.Address)
 	})
@@ -300,15 +308,15 @@ func (r *Runtime) Pools() []PoolInfo {
 
 // SetPoolHealth writes the health of a pool. The healthy slice has one entry
 // for each address, in the order of PoolInfo.Addresses.
-func (r *Runtime) SetPoolHealth(base netip.Addr, healthy []bool) error {
+func (r *Runtime) SetPoolHealth(key PoolKey, healthy []bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
 		return fmt.Errorf("set pool health: MUP dataplane is closed")
 	}
-	info, exists := r.pools[base]
+	info, exists := r.pools[key]
 	if !exists {
-		return fmt.Errorf("set pool health: pool %s is not observed", base)
+		return fmt.Errorf("set pool health: pool %s %s is not observed", key.Base, key.Transport)
 	}
 	if len(healthy) != len(info.Addresses) {
 		return fmt.Errorf("set pool health: got %d health bits, want %d", len(healthy), len(info.Addresses))
@@ -317,11 +325,11 @@ func (r *Runtime) SetPoolHealth(base netip.Addr, healthy []bool) error {
 	if err != nil {
 		return err
 	}
-	baseWord, err := requiredIPv4Word(base, "pool base")
+	mapKey, err := reflectorKey(key)
 	if err != nil {
 		return err
 	}
-	return r.objects.ReflectorHealth.Update(baseWord, pool, ebpf.UpdateAny)
+	return r.objects.ReflectorPools.Update(mapKey, pool, ebpf.UpdateAny)
 }
 
 func (r *Runtime) UpdatePathState(healthyMask uint8, generation uint32) error {
