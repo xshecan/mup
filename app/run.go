@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"log"
 	"runtime"
 	"sync"
 	"time"
@@ -19,12 +20,34 @@ const (
 	stopTimeout  = 10 * time.Second
 )
 
+// Option changes how Run runs the daemon.
+type Option func(*runOptions)
+
+type runOptions struct {
+	logger *log.Logger
+}
+
+// WithLogger sends the log lines of the daemon to logger. The default is the
+// standard logger of the log package. A logger that writes to io.Discard
+// turns the lines off.
+func WithLogger(logger *log.Logger) Option {
+	return func(options *runOptions) {
+		if logger != nil {
+			options.logger = logger
+		}
+	}
+}
+
 // Run runs the daemon until ctx ends or a daemon loop fails.
-func Run(ctx context.Context, appConfig config.App) error {
+func Run(ctx context.Context, appConfig config.App, options ...Option) error {
 	if runtime.GOOS != "linux" {
 		return dataplane.ErrUnsupportedPlatform
 	}
-	return runDaemon(ctx, daemonOptions(appConfig))
+	settings := runOptions{logger: log.Default()}
+	for _, option := range options {
+		option(&settings)
+	}
+	return runDaemon(ctx, daemonOptions(appConfig, settings.logger))
 }
 
 func runDaemon(ctx context.Context, options fx.Option) error {

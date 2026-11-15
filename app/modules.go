@@ -32,7 +32,7 @@ type registrationSink interface {
 // daemonOptions builds the application of the configured role. Fx starts the
 // hooks in the order that they are added, and stops them in reverse order. The
 // role module runs first, so the program is attached before the loops start.
-func daemonOptions(appConfig config.App) fx.Option {
+func daemonOptions(appConfig config.App, logger *log.Logger) fx.Option {
 	var role fx.Option
 	if appConfig.Client != nil {
 		role = clientModule(*appConfig.Client)
@@ -40,7 +40,7 @@ func daemonOptions(appConfig config.App) fx.Option {
 		role = serverModule(*appConfig.Server)
 	}
 	return fx.Options(
-		fx.Supply(appConfig, time.Now()),
+		fx.Supply(appConfig, time.Now(), logger),
 		fx.Provide(
 			func() routeResolver { return systemResolver{} },
 			newRuntimePlan,
@@ -162,10 +162,10 @@ func newAPILoop(socket controlSocket, handler http.Handler) loop {
 	}
 }
 
-func newEventLoop(runtime *dataplane.Runtime) loop {
+func newEventLoop(runtime *dataplane.Runtime, logger *log.Logger) loop {
 	return func(ctx context.Context) error {
 		return runtime.ConsumeEvents(ctx, func(event dataplane.Event) {
-			log.Printf(
+			logger.Printf(
 				"mup dataplane event: reason=%d ifindex=%d monotonic_ns=%d",
 				event.Reason,
 				event.Ifindex,

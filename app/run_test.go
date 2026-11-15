@@ -1,8 +1,10 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"net/netip"
 	"slices"
 	"sync"
@@ -29,7 +31,7 @@ func TestDaemonOptionsResolveEveryDependency(t *testing.T) {
 	for name, appConfig := range roles {
 		t.Run(name, func(t *testing.T) {
 			var daemon *supervisor
-			if err := fx.ValidateApp(fx.NopLogger, daemonOptions(appConfig), fx.Populate(&daemon)); err != nil {
+			if err := fx.ValidateApp(fx.NopLogger, daemonOptions(appConfig, log.Default()), fx.Populate(&daemon)); err != nil {
 				t.Fatalf("ValidateApp: %v", err)
 			}
 		})
@@ -151,5 +153,27 @@ func TestRoleHooksStartBeforeTheLoops(t *testing.T) {
 	}
 	if !slices.Equal(order, []string{"attach", "loop", "detach"}) {
 		t.Fatalf("order = %v, want [attach loop detach]", order)
+	}
+}
+
+func TestWithLoggerSetsTheDaemonLogger(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	logger := log.New(&output, "", 0)
+	settings := runOptions{logger: log.Default()}
+	WithLogger(logger)(&settings)
+	if settings.logger != logger {
+		t.Fatal("WithLogger did not set the logger")
+	}
+	// A nil logger keeps the one that is there.
+	WithLogger(nil)(&settings)
+	if settings.logger != logger {
+		t.Fatal("WithLogger(nil) replaced the logger")
+	}
+	var daemon *supervisor
+	appConfig := config.App{Server: &config.Server{Port: config.SinglePort(5000), Target: netip.MustParseAddrPort("198.51.100.7:51820")}}
+	if err := fx.ValidateApp(fx.NopLogger, daemonOptions(appConfig, logger), fx.Populate(&daemon)); err != nil {
+		t.Fatalf("daemon options with a logger: %v", err)
 	}
 }

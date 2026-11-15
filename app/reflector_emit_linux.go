@@ -21,6 +21,7 @@ const reflectorEmitInterval = 2 * time.Second
 // each pool member, so the client can confirm which members reach it. It uses a
 // raw socket, because the probe source is the reflector, not the server.
 type reflectorEmitter struct {
+	logger  *log.Logger
 	members memberSource
 	targets *reflectorTargets
 	seq     uint32
@@ -31,8 +32,8 @@ type memberSource interface {
 	PoolMembers(key dataplane.PoolKey) []netip.Addr
 }
 
-func newReflectorEmitLoop(runtime *dataplane.Runtime, targets *reflectorTargets) loop {
-	emitter := &reflectorEmitter{members: runtime, targets: targets}
+func newReflectorEmitLoop(runtime *dataplane.Runtime, targets *reflectorTargets, logger *log.Logger) loop {
+	emitter := &reflectorEmitter{logger: logger, members: runtime, targets: targets}
 	return emitter.run
 }
 
@@ -41,7 +42,7 @@ func (e *reflectorEmitter) run(ctx context.Context) error {
 	if err != nil {
 		// The emitter needs a raw socket. Without it the server still runs,
 		// but it cannot measure UDP reflector health, so it logs and idles.
-		log.Printf("mup reflector probe emitter disabled: %v", err)
+		e.logger.Printf("mup reflector probe emitter disabled: %v", err)
 		<-ctx.Done()
 		return ctx.Err()
 	}

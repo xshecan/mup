@@ -33,12 +33,13 @@ type reflectorRuntime interface {
 // hosts, and writes their health to the dataplane.
 type reflectorProber struct {
 	runtime reflectorRuntime
+	logger  *log.Logger
 	states  map[dataplane.PoolKey]*poolProbeState
 	seq     uint16
 }
 
-func newReflectorProbeLoop(runtime *dataplane.Runtime) loop {
-	prober := &reflectorProber{runtime: runtime, states: make(map[dataplane.PoolKey]*poolProbeState)}
+func newReflectorProbeLoop(runtime *dataplane.Runtime, logger *log.Logger) loop {
+	prober := &reflectorProber{runtime: runtime, logger: logger, states: make(map[dataplane.PoolKey]*poolProbeState)}
 	return prober.run
 }
 
@@ -51,7 +52,7 @@ func (p *reflectorProber) run(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			if err := p.probeAll(ctx); err != nil && ctx.Err() == nil {
-				log.Printf("mup reflector probe: %v", err)
+				p.logger.Printf("mup reflector probe: %v", err)
 			}
 		}
 	}
@@ -104,7 +105,7 @@ func (p *reflectorProber) probeAll(ctx context.Context) error {
 			continue
 		}
 		if live, changed := state.liveChanged(); changed {
-			log.Printf("mup reflector pool %s/%d %s: %d of %d addresses answer ping, %d members",
+			p.logger.Printf("mup reflector pool %s/%d %s: %d of %d addresses answer ping, %d members",
 				pool.Base, pool.Prefix, pool.Transport, live, len(candidates[pool.Key()]), len(members))
 		}
 	}
