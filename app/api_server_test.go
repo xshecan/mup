@@ -65,6 +65,10 @@ func (fakeServerAPI) Peers() (api.PeerList, error) {
 	return api.PeerList{Routes: []api.Route{{Client: "192.0.2.10", Token: 4}}}, nil
 }
 
+func (fakeServerAPI) Reflectors() (api.ReflectorList, error) {
+	return api.ReflectorList{}, nil
+}
+
 func (fakeServerAPI) Clients() ([]api.RegisteredClient, error) {
 	return []api.RegisteredClient{{AdvertisedIP: "192.0.2.10"}}, nil
 }

@@ -31,6 +31,7 @@ Commands:
   get paths                              List the paths of a client
   get peers                              List the peers of a client, or the peer routes of a server
   get clients                            List the clients that are registered on a server
+  get reflectors                         List the return-pool reflectors of a server and their health
   get drops                              List the drop counters
   add path SERVER[%IFACE]:PORT/udp|icmp [via RETURN_IP]
                                          Add a path to a group
@@ -203,13 +204,16 @@ func parseCommand(opts options) (command, error) {
 			return showPeers, nil
 		case "client", "clients":
 			return showClients, nil
+		case "reflector", "reflectors":
+			return showReflectors, nil
 		case "drop", "drops":
 			return showDrops, nil
 		}
-		return nil, fmt.Errorf("unknown resource %q: use groups, paths, peers, clients, or drops", args[1])
+		return nil, fmt.Errorf("unknown resource %q: use groups, paths, peers, clients, reflectors, or drops", args[1])
 	case "add":
-		if len(args) != 3 && (len(args) != 5 || args[3] != "via") {
-			return nil, fmt.Errorf("add path takes SERVER[%%IFACE]:PORT/udp|icmp [via RETURN_IP]")
+		if len(args) != 3 && !(len(args) == 5 && args[3] == "via") &&
+			!(len(args) == 7 && args[3] == "via" && args[5] == "balance") {
+			return nil, fmt.Errorf("add path takes SERVER[%%IFACE]:PORT/udp|icmp [via RETURN_IP | via POOL_CIDR balance MODE]")
 		}
 		if !isPathResource(args[1]) {
 			return nil, fmt.Errorf("add supports only paths")
@@ -334,6 +338,18 @@ func showClients(ctx context.Context, s invocation, w io.Writer) error {
 		return writeJSON(w, clients)
 	}
 	printClients(w, clients, s.wide())
+	return nil
+}
+
+func showReflectors(ctx context.Context, s invocation, w io.Writer) error {
+	reflectors, err := s.daemon.Reflectors(ctx)
+	if err != nil {
+		return err
+	}
+	if s.output == "json" {
+		return writeJSON(w, reflectors)
+	}
+	printReflectors(w, reflectors.Reflectors)
 	return nil
 }
 

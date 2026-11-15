@@ -83,6 +83,12 @@ func (c *DaemonClient) Clients(ctx context.Context) ([]RegisteredClient, error) 
 	return clients, err
 }
 
+func (c *DaemonClient) Reflectors(ctx context.Context) (ReflectorList, error) {
+	var reflectors ReflectorList
+	err := c.do(ctx, http.MethodGet, "/v1/reflectors", nil, &reflectors)
+	return reflectors, err
+}
+
 func (c *DaemonClient) do(ctx context.Context, method, path string, request, response any) error {
 	var body io.Reader
 	if request != nil {

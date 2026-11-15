@@ -102,6 +102,19 @@ type PeerList struct {
 	Routes []Route `json:"routes,omitempty"`
 }
 
+// ReflectorList is the reflector pool health of a server.
+type ReflectorList struct {
+	Reflectors []Reflector `json:"reflectors"`
+}
+
+// Reflector is one address of a return pool, with its health.
+type Reflector struct {
+	Pool      string `json:"pool"`
+	Address   string `json:"address"`
+	Transport string `json:"transport"`
+	Healthy   bool   `json:"healthy"`
+}
+
 // RegisteredClient is one client registration on a server.
 type RegisteredClient struct {
 	AdvertisedIP string           `json:"advertised_ip"`

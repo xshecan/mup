@@ -14,6 +14,7 @@ type serverDataplane interface {
 	ServerRoutes() ([]dataplane.ServerRoute, error)
 	Registrations() ([]dataplane.Registration, error)
 	RegisteredPaths() ([]dataplane.RegisteredPath, error)
+	Reflectors() ([]dataplane.Reflector, error)
 }
 
 // serverInspector answers the read-only API calls of a server.
@@ -126,6 +127,23 @@ func (s *serverInspector) Clients() ([]api.RegisteredClient, error) {
 		}
 	}
 	return clients, nil
+}
+
+func (s *serverInspector) Reflectors() (api.ReflectorList, error) {
+	reflectors, err := s.dataplane.Reflectors()
+	if err != nil {
+		return api.ReflectorList{}, err
+	}
+	list := make([]api.Reflector, 0, len(reflectors))
+	for _, reflector := range reflectors {
+		list = append(list, api.Reflector{
+			Pool:      fmt.Sprintf("%s/%d", reflector.Base, reflector.Prefix),
+			Address:   reflector.Address.String(),
+			Transport: reflector.Transport.String(),
+			Healthy:   reflector.Healthy,
+		})
+	}
+	return api.ReflectorList{Reflectors: list}, nil
 }
 
 func formatNonce(nonce uint64) string {

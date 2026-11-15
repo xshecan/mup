@@ -164,6 +164,23 @@ func printRoutes(w io.Writer, routes []api.Route, wide bool) {
 	_ = table.Flush()
 }
 
+func printReflectors(w io.Writer, reflectors []api.Reflector) {
+	if len(reflectors) == 0 {
+		_, _ = fmt.Fprintln(w, "No return pools found.")
+		return
+	}
+	table := newTable(w)
+	row(table, "POOL", "ADDRESS", "TRANSPORT", "HEALTHY")
+	for _, reflector := range reflectors {
+		healthy := "no"
+		if reflector.Healthy {
+			healthy = "yes"
+		}
+		row(table, reflector.Pool, reflector.Address, reflector.Transport, healthy)
+	}
+	_ = table.Flush()
+}
+
 func printClients(w io.Writer, clients []api.RegisteredClient, wide bool) {
 	if len(clients) == 0 {
 		_, _ = fmt.Fprintln(w, "No clients found.")

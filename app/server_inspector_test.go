@@ -14,6 +14,7 @@ type fakeServerDataplane struct {
 	routes        []dataplane.ServerRoute
 	registrations []dataplane.Registration
 	paths         []dataplane.RegisteredPath
+	reflectors    []dataplane.Reflector
 }
 
 func (f fakeServerDataplane) Snapshot() (dataplane.StatsSnapshot, error) {
@@ -26,6 +27,8 @@ func (f fakeServerDataplane) Snapshot() (dataplane.StatsSnapshot, error) {
 }
 
 func (f fakeServerDataplane) ServerRoutes() ([]dataplane.ServerRoute, error) { return f.routes, nil }
+
+func (f fakeServerDataplane) Reflectors() ([]dataplane.Reflector, error) { return f.reflectors, nil }
 
 func (f fakeServerDataplane) Registrations() ([]dataplane.Registration, error) {
 	return f.registrations, nil

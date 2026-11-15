@@ -32,6 +32,7 @@ type serverAPI interface {
 	Status() (api.Status, error)
 	Peers() (api.PeerList, error)
 	Clients() ([]api.RegisteredClient, error)
+	Reflectors() (api.ReflectorList, error)
 }
 
 // apiError carries the HTTP status of a failed request. Other errors become
@@ -77,6 +78,7 @@ func newAPIHandler(client clientAPI, server serverAPI) http.Handler {
 	mux.HandleFunc("PUT /v1/mode", handler.setMode)
 	mux.HandleFunc("GET /v1/peers", handler.peers)
 	mux.HandleFunc("GET /v1/clients", handler.clients)
+	mux.HandleFunc("GET /v1/reflectors", handler.reflectors)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, notFound("unknown API path"))
 	})
@@ -161,6 +163,15 @@ func (h apiHandler) clients(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	value, err := h.server.Clients()
+	writeResult(w, http.StatusOK, value, err)
+}
+
+func (h apiHandler) reflectors(w http.ResponseWriter, _ *http.Request) {
+	if h.server == nil {
+		writeError(w, conflict("the daemon runs as a client, and only a server has return pools"))
+		return
+	}
+	value, err := h.server.Reflectors()
 	writeResult(w, http.StatusOK, value, err)
 }
 
