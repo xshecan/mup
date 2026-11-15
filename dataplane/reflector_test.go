@@ -17,8 +17,10 @@ func TestPoolAddresses(t *testing.T) {
 		wantLast  string
 	}{
 		{"194.225.72.0", 24, 16, "194.225.72.1", "194.225.72.16"},
-		{"10.0.0.0", 30, 3, "10.0.0.1", "10.0.0.3"},
-		{"10.0.0.0", 29, 7, "10.0.0.1", "10.0.0.7"},
+		{"10.0.0.0", 30, 2, "10.0.0.1", "10.0.0.2"},
+		{"10.0.0.0", 29, 6, "10.0.0.1", "10.0.0.6"},
+		{"188.229.116.16", 30, 2, "188.229.116.17", "188.229.116.18"},
+		{"10.0.0.0", 31, 2, "10.0.0.0", "10.0.0.1"},
 	}
 	for _, tt := range tests {
 		addresses, err := poolAddresses(netip.MustParseAddr(tt.base), tt.prefix)
@@ -43,11 +45,12 @@ func TestPoolCandidatesSweepsTheWholeRange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PoolCandidates /24: %v", err)
 	}
-	if len(addresses) != 255 {
-		t.Fatalf("/24 candidates = %d, want 255", len(addresses))
+	// The broadcast address is not a host, so a /24 has 254 candidates.
+	if len(addresses) != 254 {
+		t.Fatalf("/24 candidates = %d, want 254", len(addresses))
 	}
-	if addresses[0].String() != "194.225.72.1" || addresses[254].String() != "194.225.72.255" {
-		t.Fatalf("/24 range = %s..%s", addresses[0], addresses[254])
+	if addresses[0].String() != "194.225.72.1" || addresses[253].String() != "194.225.72.254" {
+		t.Fatalf("/24 range = %s..%s", addresses[0], addresses[253])
 	}
 }
 

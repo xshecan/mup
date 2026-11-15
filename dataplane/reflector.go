@@ -42,9 +42,10 @@ type Reflector struct {
 	Healthy   bool
 }
 
-// PoolCandidates returns the host addresses of a pool range, after the network
-// base, up to max addresses. The prober pings them to discover which reflectors
-// are live. A max of zero returns no addresses.
+// PoolCandidates returns the host addresses of a pool range in order, up to max
+// addresses. The network and broadcast addresses are not hosts, except in a /31
+// (RFC 3021). The prober pings them to discover which reflectors are live. A
+// max of zero returns no addresses.
 func PoolCandidates(base netip.Addr, prefix uint8, max int) ([]netip.Addr, error) {
 	if !base.Is4() {
 		return nil, fmt.Errorf("pool base %s must be IPv4", base)
@@ -55,12 +56,16 @@ func PoolCandidates(base netip.Addr, prefix uint8, max int) ([]netip.Addr, error
 	if max <= 0 {
 		return nil, nil
 	}
-	count := uint64(1)<<(32-prefix) - 1
+	address := base.Next()
+	count := uint64(1)<<(32-prefix) - 2
+	if prefix == 31 {
+		address = base
+		count = 2
+	}
 	if count > uint64(max) {
 		count = uint64(max)
 	}
 	addresses := make([]netip.Addr, 0, count)
-	address := base.Next()
 	for index := uint64(0); index < count; index++ {
 		addresses = append(addresses, address)
 		address = address.Next()

@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -16,8 +17,8 @@ import (
 const (
 	reflectorProbeInterval = 2 * time.Second
 	reflectorProbeWindow   = time.Second
-	// reflectorMaxSweep caps how many addresses one sweep pings, so a wide
-	// prefix does not flood the range.
+	// reflectorMaxSweep caps how many addresses one sweep pings in each pool,
+	// so a wide prefix does not flood the range.
 	reflectorMaxSweep = 1024
 	reflectorProbeID  = 0x4d50
 )
@@ -56,64 +57,83 @@ func (p *reflectorProber) run(ctx context.Context) error {
 	}
 }
 
+// probeAll pings the candidates of every pool in one sweep, so one cycle takes
+// one probe window for any number of pools. A UDP pool and an ICMP pool of the
+// same range share their pings.
 func (p *reflectorProber) probeAll(ctx context.Context) error {
 	pools := p.runtime.Pools()
 	if len(pools) == 0 {
 		return nil
+	}
+	candidates := make(map[dataplane.PoolKey][]netip.Addr, len(pools))
+	seen := make(map[netip.Addr]bool)
+	var all []netip.Addr
+	for _, pool := range pools {
+		addresses, err := dataplane.PoolCandidates(pool.Base, pool.Prefix, reflectorMaxSweep)
+		if err != nil {
+			return err
+		}
+		candidates[pool.Key()] = addresses
+		for _, address := range addresses {
+			if !seen[address] {
+				seen[address] = true
+				all = append(all, address)
+			}
+		}
 	}
 	connection, err := net.ListenIP("ip4:icmp", &net.IPAddr{IP: net.IPv4zero})
 	if err != nil {
 		return fmt.Errorf("listen ICMP: %w", err)
 	}
 	defer connection.Close()
+	p.seq++
+	responders := sweepEcho(ctx, connection, all, reflectorProbeID, p.seq, reflectorProbeWindow)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	var errs []error
 	for _, pool := range pools {
-		if err := p.probePool(ctx, connection, pool); err != nil {
-			return err
+		state := p.states[pool.Key()]
+		if state == nil {
+			state = newPoolProbeState()
+			p.states[pool.Key()] = state
+		}
+		members, healthy := state.update(poolResponders(responders, pool), pool.Transport, candidates[pool.Key()])
+		if err := p.runtime.SetPool(pool.Key(), members, healthy); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if live, changed := state.liveChanged(); changed {
+			log.Printf("mup reflector pool %s/%d %s: %d of %d addresses answer ping, %d members",
+				pool.Base, pool.Prefix, pool.Transport, live, len(candidates[pool.Key()]), len(members))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
-func (p *reflectorProber) probePool(ctx context.Context, connection *net.IPConn, pool dataplane.PoolInfo) error {
-	candidates, err := dataplane.PoolCandidates(pool.Base, pool.Prefix, reflectorMaxSweep)
-	if err != nil {
-		return err
-	}
-	responders := p.sweep(ctx, connection, candidates)
-	state := p.states[pool.Key()]
-	if state == nil {
-		state = newPoolProbeState()
-		p.states[pool.Key()] = state
-	}
-	members, healthy := state.update(responders, pool.Transport)
-	return p.runtime.SetPool(pool.Key(), members, healthy)
-}
-
-// sweep pings every candidate once and returns the set of addresses that
-// answered within the window.
-func (p *reflectorProber) sweep(ctx context.Context, connection *net.IPConn, candidates []netip.Addr) map[netip.Addr]bool {
-	p.seq++
-	sequence := p.seq
-	payload := []byte("mup-reflector-probe")
+// sweepEcho sends one Echo Request to every candidate and returns the set of
+// addresses that answered within the window. ReadFromIP returns an ip4 packet
+// without its IPv4 header, because the net package strips it. ReadMsgIP keeps
+// the header, so only the ReadMsgIP callers strip it themselves.
+func sweepEcho(ctx context.Context, connection *net.IPConn, candidates []netip.Addr,
+	identifier, sequence uint16, window time.Duration,
+) map[netip.Addr]bool {
+	request := marshalICMPEcho(icmpEchoRequest, identifier, sequence, []byte("mup-reflector-probe"))
 	for _, address := range candidates {
-		echo := marshalICMPEcho(icmpEchoRequest, reflectorProbeID, sequence, payload)
-		_, _ = connection.WriteToIP(echo, &net.IPAddr{IP: address.AsSlice()})
+		_, _ = connection.WriteToIP(request, &net.IPAddr{IP: address.AsSlice()})
 	}
 	responders := make(map[netip.Addr]bool, len(candidates))
-	deadline := time.Now().Add(reflectorProbeWindow)
+	deadline := time.Now().Add(window)
 	buffer := make([]byte, 1500)
-	for {
-		if ctx.Err() != nil {
-			return responders
-		}
+	for ctx.Err() == nil {
 		_ = connection.SetReadDeadline(deadline)
 		count, source, err := connection.ReadFromIP(buffer)
 		if err != nil {
 			break
 		}
-		echo, err := parseICMPEcho(stripIPv4Header(buffer[:count]))
+		echo, err := parseICMPEcho(buffer[:count])
 		if err != nil || echo.echoType != icmpEchoReply ||
-			echo.identifier != reflectorProbeID || echo.sequence != sequence {
+			echo.identifier != identifier || echo.sequence != sequence {
 			continue
 		}
 		if address, ok := netip.AddrFromSlice(source.IP.To4()); ok {
