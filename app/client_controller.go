@@ -496,7 +496,10 @@ func (c *clientController) pathLocked(slot int, inUse [config.MaxPaths]bool) api
 		name = c.interfaceName(current.ifindex)
 	}
 	var returnIP string
-	if current.path.ReturnIP.IsValid() {
+	switch {
+	case current.path.IsPool():
+		returnIP = netip.PrefixFrom(current.path.ReturnIP, int(current.path.ReturnPrefix)).String()
+	case current.path.ReturnIP.IsValid():
 		returnIP = current.path.ReturnIP.String()
 	}
 	return api.Path{

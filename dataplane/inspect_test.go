@@ -108,6 +108,36 @@ func TestDecodeRegisteredPath(t *testing.T) {
 	}
 }
 
+func TestDecodeReturnPool(t *testing.T) {
+	t.Parallel()
+
+	base := netip.MustParseAddr("94.184.45.48")
+	client := mupClientKeyV1{AdvertisedIp: mustWord(t, netip.MustParseAddr("192.0.2.10")), InstanceNonce: 3}
+	path := decodeRegisteredPath(
+		mupRegisteredPathKeyV1{
+			SourceIp:   mustWord(t, netip.MustParseAddr("192.0.2.10")),
+			LocalIp:    mustWord(t, netip.MustParseAddr("203.0.113.5")),
+			ServerPort: 9000,
+		},
+		mupRegisteredPathValueV1{Client: client, Flags: protocol.ControlFlagReturnPool, Prefix: 28, ReturnIp: mustWord(t, base)},
+		0,
+	)
+	if path.ReturnIP != base || path.ReturnPrefix != 28 {
+		t.Fatalf("pool path return = %s/%d, want %s/28", path.ReturnIP, path.ReturnPrefix, base)
+	}
+	registration := decodeRegistration(client, mupRegistrationValueV1{Flags: protocol.ControlFlagReturnPool, ReturnIp: mustWord(t, base)}, 0)
+	if registration.ReturnIP != base || !registration.ReturnPool {
+		t.Fatalf("pool registration = %#v", registration)
+	}
+	route := decodeServerRoute(mupServerReverseValueV1{
+		RouteKey:   mupServerRouteKeyV1{Client: client, PeerToken: 1},
+		RouteValue: mupServerRouteValueV1{Flags: protocol.ControlFlagReturnPool | protocol.ControlFlagBalancePerPacket, ReturnIp: mustWord(t, base)},
+	}, 0)
+	if route.ReturnIP != base || !route.ReturnPool {
+		t.Fatalf("pool route = %#v", route)
+	}
+}
+
 func mustWord(t *testing.T, address netip.Addr) uint32 {
 	t.Helper()
 	word, err := requiredIPv4Word(address, "test address")

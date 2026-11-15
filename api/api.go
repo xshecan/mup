@@ -131,6 +131,7 @@ type RegisteredPath struct {
 	Source       string  `json:"source"`
 	Local        string  `json:"local"`
 	Transport    string  `json:"transport"`
+	ReturnIP     string  `json:"return_ip,omitempty"`
 	LeaseSeconds float64 `json:"lease_seconds"`
 }
 

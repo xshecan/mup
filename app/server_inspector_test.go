@@ -80,3 +80,40 @@ func TestServerInspectorGroupsPathsAndPeersByClient(t *testing.T) {
 		t.Fatalf("Peers = %#v, %v", peers, err)
 	}
 }
+
+func TestServerInspectorShowsReturnPools(t *testing.T) {
+	t.Parallel()
+
+	client := dataplane.ClientKey{AdvertisedIP: netip.MustParseAddr("91.216.217.188"), InstanceNonce: 7}
+	orphan := dataplane.ClientKey{AdvertisedIP: netip.MustParseAddr("91.216.217.189"), InstanceNonce: 8}
+	base := netip.MustParseAddr("94.184.45.48")
+	fake := fakeServerDataplane{
+		registrations: []dataplane.Registration{
+			{Client: client, ListenPort: 51821, ReturnIP: base, ReturnPool: true},
+			{Client: orphan, ListenPort: 51821, ReturnIP: base, ReturnPool: true},
+		},
+		paths: []dataplane.RegisteredPath{
+			{Client: client, PathID: 0, Transport: protocol.TransportUDP, Source: client.AdvertisedIP, Local: netip.MustParseAddr("160.119.74.66"), ReturnIP: base, ReturnPrefix: 28},
+		},
+		routes: []dataplane.ServerRoute{
+			{Client: client, Token: 9, TargetPort: 20000, Transport: protocol.TransportUDP, ReturnIP: base, ReturnPool: true},
+		},
+	}
+	inspector := newServerInspector(config.Server{Port: config.SinglePort(9000), Target: netip.MustParseAddrPort("127.0.0.1:51820")}, fake, time.Unix(0, 0))
+	inspector.interfaceName = func(int) string { return "eth0" }
+
+	clients, err := inspector.Clients()
+	if err != nil || len(clients) != 2 {
+		t.Fatalf("Clients = %#v, %v", clients, err)
+	}
+	if clients[0].ReturnIP != "94.184.45.48/28" || clients[0].Paths[0].ReturnIP != "94.184.45.48/28" {
+		t.Fatalf("client return = %q, path return = %q, want the pool CIDR", clients[0].ReturnIP, clients[0].Paths[0].ReturnIP)
+	}
+	if clients[1].ReturnIP != "94.184.45.48 pool" {
+		t.Fatalf("client without a path shows %q, want the base and the word pool", clients[1].ReturnIP)
+	}
+	peers, err := inspector.Peers()
+	if err != nil || len(peers.Routes) != 1 || peers.Routes[0].ReturnIP != "94.184.45.48/28" {
+		t.Fatalf("Peers = %#v, %v", peers, err)
+	}
+}

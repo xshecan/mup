@@ -26,16 +26,20 @@ type ServerRoute struct {
 	PathID       uint16
 	ClientSource netip.Addr
 	ServerLocal  netip.Addr
-	ReturnIP     netip.Addr
-	Ifindex      int
-	Idle         time.Duration
+	// ReturnIP is the return IP, or the pool base when ReturnPool is set.
+	ReturnIP   netip.Addr
+	ReturnPool bool
+	Ifindex    int
+	Idle       time.Duration
 }
 
 // Registration is one client registration on a server. ExpiresIn is
 // negative after the lease ended.
 type Registration struct {
-	Client     ClientKey
+	Client ClientKey
+	// ReturnIP is the return IP, or the pool base when ReturnPool is set.
 	ReturnIP   netip.Addr
+	ReturnPool bool
 	ListenPort uint16
 	ExpiresIn  time.Duration
 }
@@ -49,6 +53,10 @@ type RegisteredPath struct {
 	Transport  protocol.TransportID
 	PathID     uint16
 	ExpiresIn  time.Duration
+	// ReturnIP is the return IP, or the pool base when ReturnPrefix is
+	// nonzero.
+	ReturnIP     netip.Addr
+	ReturnPrefix uint8
 }
 
 // sinceNS returns how long ago a monotonic timestamp was, and zero for a
@@ -100,9 +108,7 @@ func decodeServerRoute(reverse mupServerReverseValueV1, nowNS uint64) ServerRout
 		Ifindex:      int(value.Ifindex),
 		Idle:         sinceNS(value.LastSeenNs, nowNS),
 	}
-	if value.Flags&protocol.ControlFlagReturnIP != 0 {
-		route.ReturnIP = ipv4FromWord(value.ReturnIp)
-	}
+	route.ReturnIP, route.ReturnPool = decodeReturn(value.Flags, value.ReturnIp)
 	return route
 }
 
@@ -112,14 +118,25 @@ func decodeRegistration(key mupClientKeyV1, value mupRegistrationValueV1, nowNS 
 		ListenPort: value.ListenPort,
 		ExpiresIn:  untilNS(value.ExpiresAtNs, nowNS),
 	}
-	if value.Flags&protocol.ControlFlagReturnIP != 0 {
-		registration.ReturnIP = ipv4FromWord(value.ReturnIp)
-	}
+	registration.ReturnIP, registration.ReturnPool = decodeReturn(value.Flags, value.ReturnIp)
 	return registration
 }
 
+// decodeReturn reads the return IP or the pool base of a route, and whether it
+// is a pool.
+func decodeReturn(flags uint8, word uint32) (netip.Addr, bool) {
+	switch {
+	case flags&protocol.ControlFlagReturnPool != 0:
+		return ipv4FromWord(word), true
+	case flags&protocol.ControlFlagReturnIP != 0:
+		return ipv4FromWord(word), false
+	default:
+		return netip.Addr{}, false
+	}
+}
+
 func decodeRegisteredPath(key mupRegisteredPathKeyV1, value mupRegisteredPathValueV1, nowNS uint64) RegisteredPath {
-	return RegisteredPath{
+	path := RegisteredPath{
 		Client:     decodeClientKey(value.Client),
 		Source:     ipv4FromWord(key.SourceIp),
 		Local:      ipv4FromWord(key.LocalIp),
@@ -128,4 +145,10 @@ func decodeRegisteredPath(key mupRegisteredPathKeyV1, value mupRegisteredPathVal
 		PathID:     value.PathId,
 		ExpiresIn:  untilNS(value.ExpiresAtNs, nowNS),
 	}
+	var pool bool
+	path.ReturnIP, pool = decodeReturn(value.Flags, value.ReturnIp)
+	if pool {
+		path.ReturnPrefix = value.Prefix
+	}
+	return path
 }

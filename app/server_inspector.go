@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"net/netip"
 	"time"
 
 	"github.com/xshecan/mup/api"
@@ -57,6 +58,11 @@ func (s *serverInspector) Peers() (api.PeerList, error) {
 	if err != nil {
 		return api.PeerList{}, err
 	}
+	paths, err := s.dataplane.RegisteredPaths()
+	if err != nil {
+		return api.PeerList{}, err
+	}
+	prefixes := poolPrefixes(paths)
 	list := make([]api.Route, 0, len(routes))
 	for _, route := range routes {
 		converted := api.Route{
@@ -71,9 +77,7 @@ func (s *serverInspector) Peers() (api.PeerList, error) {
 			Interface:   s.interfaceName(route.Ifindex),
 			IdleSeconds: route.Idle.Seconds(),
 		}
-		if route.ReturnIP.IsValid() {
-			converted.ReturnIP = route.ReturnIP.String()
-		}
+		converted.ReturnIP = returnText(route.Client, route.ReturnIP, route.ReturnPool, prefixes)
 		list = append(list, converted)
 	}
 	return api.PeerList{Routes: list}, nil
@@ -92,6 +96,7 @@ func (s *serverInspector) Clients() ([]api.RegisteredClient, error) {
 	if err != nil {
 		return nil, err
 	}
+	prefixes := poolPrefixes(paths)
 	clients := make([]api.RegisteredClient, 0, len(registrations))
 	index := make(map[dataplane.ClientKey]int, len(registrations))
 	for _, registration := range registrations {
@@ -102,9 +107,7 @@ func (s *serverInspector) Clients() ([]api.RegisteredClient, error) {
 			LeaseSeconds: registration.ExpiresIn.Seconds(),
 			Paths:        []api.RegisteredPath{},
 		}
-		if registration.ReturnIP.IsValid() {
-			client.ReturnIP = registration.ReturnIP.String()
-		}
+		client.ReturnIP = returnText(registration.Client, registration.ReturnIP, registration.ReturnPool, prefixes)
 		index[registration.Client] = len(clients)
 		clients = append(clients, client)
 	}
@@ -118,6 +121,7 @@ func (s *serverInspector) Clients() ([]api.RegisteredClient, error) {
 			Source:       path.Source.String(),
 			Local:        path.Local.String(),
 			Transport:    path.Transport.String(),
+			ReturnIP:     returnText(path.Client, path.ReturnIP, path.ReturnPrefix != 0, prefixes),
 			LeaseSeconds: path.ExpiresIn.Seconds(),
 		})
 	}
@@ -144,6 +148,38 @@ func (s *serverInspector) Reflectors() (api.ReflectorList, error) {
 		})
 	}
 	return api.ReflectorList{Reflectors: list}, nil
+}
+
+type poolPrefixKey struct {
+	client dataplane.ClientKey
+	base   netip.Addr
+}
+
+// poolPrefixes maps each client and pool base to its prefix length. Only a
+// registered path keeps the prefix, so a route or a registration finds it here.
+func poolPrefixes(paths []dataplane.RegisteredPath) map[poolPrefixKey]uint8 {
+	prefixes := make(map[poolPrefixKey]uint8)
+	for _, path := range paths {
+		if path.ReturnPrefix != 0 {
+			prefixes[poolPrefixKey{client: path.Client, base: path.ReturnIP}] = path.ReturnPrefix
+		}
+	}
+	return prefixes
+}
+
+// returnText formats a return IP, or a return pool as a CIDR. A pool without a
+// known prefix shows its base and the word pool.
+func returnText(client dataplane.ClientKey, address netip.Addr, pool bool, prefixes map[poolPrefixKey]uint8) string {
+	if !address.IsValid() {
+		return ""
+	}
+	if !pool {
+		return address.String()
+	}
+	if prefix, ok := prefixes[poolPrefixKey{client: client, base: address}]; ok {
+		return netip.PrefixFrom(address, int(prefix)).String()
+	}
+	return address.String() + " pool"
 }
 
 func formatNonce(nonce uint64) string {
