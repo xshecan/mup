@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 
+	"github.com/xshecan/mup/config"
 	"github.com/xshecan/mup/protocol"
 )
 
@@ -84,7 +85,14 @@ func registrationFrame(registration pathRegistration, sequence uint32) ([]byte, 
 		AdvertisedIP:  registration.advertisedIP,
 		ReturnIP:      registration.returnIP,
 	}
-	if registration.returnIP.IsValid() {
+	switch {
+	case registration.path.IsPool():
+		frame.ReturnPrefix = registration.path.ReturnPrefix
+		frame.Flags = protocol.ControlFlagReturnPool
+		if registration.path.Balance == config.BalancePerPacket {
+			frame.Flags |= protocol.ControlFlagBalancePerPacket
+		}
+	case registration.returnIP.IsValid():
 		frame.Flags = protocol.ControlFlagReturnIP
 	}
 	packet := make([]byte, protocol.ControlFrameLength)

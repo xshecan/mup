@@ -370,10 +370,16 @@ func acceptRegistration(
 	if err != nil {
 		return nil, err
 	}
+	balance := config.BalancePerPeer
+	if frame.Flags&protocol.ControlFlagBalancePerPacket != 0 {
+		balance = config.BalancePerPacket
+	}
 	settings := dataplane.RegistrationSettings{
 		AdvertisedIP:  frame.AdvertisedIP,
 		InstanceNonce: frame.InstanceNonce,
 		ReturnIP:      frame.ReturnIP,
+		ReturnPrefix:  frame.ReturnPrefix,
+		Balance:       balance,
 		ListenPort:    frame.ListenPort,
 		PathCount:     1,
 		ExpiresAtNS:   now + uint64(registrationLeaseSeconds)*uint64(time.Second),
@@ -387,6 +393,11 @@ func acceptRegistration(
 	}
 	if err := sink.RegisterPath(settings); err != nil {
 		return nil, err
+	}
+	if frame.Flags&protocol.ControlFlagReturnPool != 0 {
+		if err := sink.ObservePool(frame.ReturnIP, frame.ReturnPrefix, transport); err != nil {
+			return nil, err
+		}
 	}
 	ackFrame := frame
 	ackFrame.Type = protocol.ControlRegisterACK

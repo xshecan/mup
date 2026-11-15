@@ -246,6 +246,13 @@ func TestUDPPathKeepsWorkingAfterAnotherPathCloses(t *testing.T) {
 
 type recordingSink struct {
 	registered []dataplane.RegistrationSettings
+	pools      []recordedPool
+}
+
+type recordedPool struct {
+	base      netip.Addr
+	prefix    uint8
+	transport protocol.TransportID
 }
 
 func (s *recordingSink) RegisterPath(settings dataplane.RegistrationSettings) error {
@@ -254,6 +261,11 @@ func (s *recordingSink) RegisterPath(settings dataplane.RegistrationSettings) er
 }
 
 func (s *recordingSink) RevokeRegistration(dataplane.ClientKey) error {
+	return nil
+}
+
+func (s *recordingSink) ObservePool(base netip.Addr, prefix uint8, transport protocol.TransportID) error {
+	s.pools = append(s.pools, recordedPool{base: base, prefix: prefix, transport: transport})
 	return nil
 }
 

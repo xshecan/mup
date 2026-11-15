@@ -64,6 +64,8 @@ func buildPlan(appConfig config.App, nonce uint64, resolver routeResolver) (runt
 					Transport:     path.Transport,
 					Priority:      uint8(slot),
 					ReturnIP:      path.ReturnIP,
+					ReturnPrefix:  path.ReturnPrefix,
+					Balance:       path.Balance,
 				})
 				pathMask |= 1 << slot
 			}

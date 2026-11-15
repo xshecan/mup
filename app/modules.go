@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"go.uber.org/fx"
@@ -22,6 +23,7 @@ const registrationLeaseSeconds = 30
 type controlSocket string
 
 type registrationSink interface {
+	ObservePool(base netip.Addr, prefix uint8, transport protocol.TransportID) error
 	RegisterPath(dataplane.RegistrationSettings) error
 	RevokeRegistration(dataplane.ClientKey) error
 }
@@ -79,6 +81,7 @@ func serverModule(server config.Server) fx.Option {
 				return control.NewRegistry(server.Port.First, server.Port.Last, registrationLeaseSeconds*time.Second)
 			},
 			asLoop(newServerControlLoop),
+			asLoop(newReflectorProbeLoop),
 		),
 		fx.Invoke(attachServer),
 	)
