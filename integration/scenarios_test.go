@@ -274,6 +274,77 @@ func TestPrivilegedPingPassesThePrograms(t *testing.T) {
 	}
 }
 
+// TestPrivilegedReturnPool drives a UDP return pool end to end. The server
+// reflects the downstream with a source from the pool, and the client must
+// accept any source in the pool range. A successful exchange proves the pool.
+func TestPrivilegedReturnPool(t *testing.T) {
+	requirePrivilegedLinux(t)
+	binaryPath := buildDaemon(t)
+
+	for _, balance := range []string{"per-peer", "per-packet"} {
+		t.Run(balance, func(t *testing.T) {
+			suffix := strconv.FormatInt(time.Now().UnixNano()%1_000_000, 10)
+			clientNS, peerNS := "mup-client-"+suffix, "mup-peer-"+suffix
+			serverNS, targetNS := "mup-server-"+suffix, "mup-target-"+suffix
+			for _, namespace := range []string{clientNS, peerNS, serverNS, targetNS} {
+				addNamespace(t, namespace)
+			}
+			linkPair(t, "cp"+suffix, clientNS, "pc"+suffix, peerNS)
+			addressLink(t, clientNS, "cp"+suffix, "10.210.3.1/24")
+			addressLink(t, peerNS, "pc"+suffix, "10.210.3.2/24")
+			linkPair(t, "mc"+suffix, clientNS, "ms"+suffix, serverNS)
+			addressLink(t, clientNS, "mc"+suffix, "10.210.1.1/24")
+			addressLink(t, serverNS, "ms"+suffix, "10.210.1.2/24")
+			linkPair(t, "st"+suffix, serverNS, "ts"+suffix, targetNS)
+			addressLink(t, serverNS, "st"+suffix, "10.210.2.1/24")
+			addressLink(t, targetNS, "ts"+suffix, "10.210.2.2/24")
+
+			target := startEchoTarget(t, targetNS, "10.210.2.2:51820")
+			defer target.stop(t)
+
+			directory := t.TempDir()
+			serverSocket := filepath.Join(directory, "server.sock")
+			clientSocket := filepath.Join(directory, "client.sock")
+			server := startNamespaced(t, serverNS, binaryPath, "server", "-p", "5000", "-r", "10.210.2.2:51820", "--control-socket", serverSocket)
+			defer server.stop(t)
+
+			configuration := filepath.Join(directory, "client.yaml")
+			content := fmt.Sprintf(`client:
+  advertise: 10.210.1.1
+  control_socket: %s
+  servers:
+    - port: 51820
+      mode: fallback
+      routes: ["10.210.1.2:5000/udp via 10.211.9.0/30 balance %s"]
+`, clientSocket, balance)
+			if err := os.WriteFile(configuration, []byte(content), 0o600); err != nil {
+				t.Fatalf("write client configuration: %v", err)
+			}
+			client := startNamespaced(t, clientNS, binaryPath, "--config", configuration)
+			defer client.stop(t)
+
+			logs := func() string {
+				return fmt.Sprintf("client log:\n%s\nserver log:\n%s\ntarget log:\n%s", client.log(t), server.log(t), target.log(t))
+			}
+			serverAPI := api.NewDaemonClient(serverSocket)
+			waitForRegisteredPaths(t, serverAPI, 1, logs)
+
+			// Per-packet rotates the pool source each packet, so several
+			// exchanges cover more than one pool member.
+			exchange(t, peerNS, "10.210.3.1:51820", 4, logs)
+
+			clientAPI := api.NewDaemonClient(clientSocket)
+			status, err := clientAPI.Status(context.Background())
+			if err != nil {
+				t.Fatalf("client status: %v\n%s", err, logs())
+			}
+			if refused := dropCount(status.Drops, "DOWNSTREAM_SOURCE"); refused != 0 {
+				t.Fatalf("client refused %d pool-source downstream packets\n%s\n%s", refused, dropText(t, clientAPI), logs())
+			}
+		})
+	}
+}
+
 func startEchoTarget(t *testing.T, namespace, address string) *process {
 	t.Helper()
 	readyFile := filepath.Join(t.TempDir(), "target-ready")
