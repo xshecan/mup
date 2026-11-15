@@ -180,6 +180,21 @@ A UDP packet from the target address and port arrives at a target port. The serv
 4. It writes the token and rewrites the headers for the return path of the route.
 5. It sends the packet out of the interface where the latest upstream packet of the route arrived.
 
+### Ingress delivery
+
+Ingress delivery (`target_ingress`) is for a target on the server host that has its own TC program on an interface, for example a WireGuard router with an eBPF fast path. Without it, the server sends to a target on the server host through the loopback interface, and a program on another interface never sees the packets.
+
+With ingress delivery, the target address must be an address of the server host on an Ethernet interface. The server changes two steps of the upstream flow:
+
+1. It rewrites the packet from the advertised IP of the client and the target port of the route, not from its own address.
+2. It injects the packet into the ingress hook of the interface that holds the target address, with the Ethernet address of that interface as the destination.
+
+The programs on that hook then see a packet from the client, and the kernel delivers it to the target. The target answers the advertised IP of the client, so the reply leaves through the egress hook of the same interface. There, `mup_server_egress` catches a UDP packet from the target address and port to the advertised IP of a route at the target port of that route. It then does the target reply steps. If the reply leaves on the same interface, the program writes the Ethernet header from a FIB lookup and passes the packet on. Otherwise, it redirects the packet.
+
+A program before `mup_server_egress` on the egress hook can rewrite the reply source to the target address, as a WireGuard router does. So `mup_server_egress` goes after the programs that are on the hook when it attaches. Such a program must attach at the head of the hook. The target port must be outside the server ports, because an injected packet passes the server program again.
+
+If the target checksum offload is on, the reply has `CHECKSUM_PARTIAL`. The program detects this from the checksum field, which then holds only the pseudo-header sum, and uses the partial rewrites.
+
 ### Client downstream
 
 A packet with a nonzero token arrives at the advertised IP. The client program then does these steps:
@@ -379,7 +394,7 @@ A program returns `TCX_NEXT` for traffic that it does not own. This traffic incl
 
 ## Attachment and restarts
 
-The loader pins the maps by name under `/sys/fs/bpf/mup/client` or `/sys/fs/bpf/mup/server`. It pins each TCX link under `/sys/fs/bpf/mup/<role>/<role>/<ifindex>/ingress`. The client attaches to every Ethernet interface that is up and to the interface of each path. The server attaches to every Ethernet interface that is up and to the interface that leads to the target.
+The loader pins the maps by name under `/sys/fs/bpf/mup/client` or `/sys/fs/bpf/mup/server`. It pins each TCX link under `/sys/fs/bpf/mup/<role>/<role>/<ifindex>/ingress`. With ingress delivery, the server also pins the egress link of the target interface under `/sys/fs/bpf/mup/server/server/<ifindex>/egress`. Without it, the server removes that link at start. The client attaches to every Ethernet interface that is up and to the interface of each path. The server attaches to every Ethernet interface that is up and to the interface that leads to the target.
 
 The programs read an Ethernet header from every packet. So MUP does not attach to an interface without one, for example a PPP, tun, WireGuard, or raw-IP modem interface. If a path or the target route uses such an interface, the start fails with an error.
 

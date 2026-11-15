@@ -144,6 +144,7 @@ server:
 | `server.port` | `-p` | The UDP ports and the ICMP Echo identifiers that the server accepts, as `PORT` or `FIRST-LAST`, for example `5000-6000`. |
 | `server.target` | `-r` | The WireGuard target that receives all traffic. |
 | `server.control_socket` | `--control-socket` | Optional. The socket for `mupctl`. An empty value turns the socket off. |
+| `server.target_ingress` | `--target-ingress` | Optional. Delivers each packet into the ingress hook of the interface that holds the target address, from the advertised IP of the client. Use it for a target on the server host with its own TC program on that interface, for example a WireGuard router with an eBPF fast path. |
 
 The daemon does not start with an unknown key in the file. A value can use `${VARIABLE}`, or `${VARIABLE:default}` with a default value.
 
@@ -212,13 +213,14 @@ mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT/udp|icmp [via RETURN_IP]" [
 ### Server
 
 ```text
-mup server -p PORT[-LAST] -r TARGET_IP:TARGET_PORT [--control-socket PATH]
+mup server -p PORT[-LAST] -r TARGET_IP:TARGET_PORT [--target-ingress] [--control-socket PATH]
 ```
 
 | Flag | Value | Meaning |
 | --- | --- | --- |
 | `-p` | port or range | The UDP ports and the ICMP Echo identifiers that the server accepts, as `PORT` or `FIRST-LAST`. |
 | `-r` | IPv4:port | The WireGuard target that receives all traffic. |
+| `--target-ingress` | | Optional. Delivers each packet into the ingress hook of the target interface. See the `server.target_ingress` key. |
 | `--control-socket` | path | The socket for `mupctl`. The default is `/run/mup/server.sock`. An empty value turns the socket off. |
 
 There are no authentication keys. WireGuard authenticates the payload end to end.
