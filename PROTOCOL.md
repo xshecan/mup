@@ -119,7 +119,20 @@ In the UDP reflected mode, the return IP host never receives the packet. The ser
 
 In the ICMP reflected mode, the server sends an Echo Request from `-s` to the reflector. The reflector answers with an Echo Reply to `-s`, which is the client. Any host that answers ping can be the reflector. The network between the server and the reflector must accept the spoofed source. The server sends the Echo Request out of the interface that received the traffic of the path. So the reflector must be reachable through that interface.
 
-The client accepts a downstream packet only from a source that a path of the group of the peer expects. The packet must also have the port and the transport of that path. If the path has a return IP, the source must equal it. If the path has no return IP, the source must be the server address of the path. The client drops any other downstream packet and counts reason 22.
+The client accepts a downstream packet only from a source that a path of the group of the peer expects. The packet must also have the port and the transport of that path. If the path has a return IP, the source must equal it. If the path has a return pool, the source must be in the pool range. If the path has neither, the source must be the server address of the path. The client drops any other downstream packet and counts reason 22.
+
+### Return pools
+
+A return pool is a range of return IPs, for example `via 94.184.45.48/28`. The base must be the network address of the range.
+
+The server picks one member of the pool for each downstream packet. In the per-peer balance mode, all packets of one peer use one member. In the per-packet mode, each packet uses the next member. A pool has at most 16 members, and only a healthy member carries packets. If a pool has no healthy member, the server drops the packet and counts reason 15.
+
+Every 2 seconds, the server sends one Echo Request to each host address of each pool range, up to 1024 addresses in each range. A /31 has two host addresses. In a larger range, the network address and the broadcast address are not host addresses. A host that replies within 1 second is live.
+
+- An ICMP member must reply to ping, because it sends the Echo Reply to the client. The members are the live hosts. A member that misses 3 sweeps in a row is unhealthy, and a member that misses 15 sweeps leaves the pool.
+- A UDP member is only a spoofed source, so it does not have to reply to ping. The members are the live hosts first, then the other hosts of the range in order. Every 2 seconds, the server sends a control probe to the client from each member as a spoofed source. The client sends a probe reply to the real server for each probe that arrives. A UDP member is healthy for 6 seconds after its latest probe reply.
+
+If a probe reply names the client, the instance nonce, and the path of a live registration, the server accepts it. The member must also be in the pool of that path. When the number of live hosts of a pool changes, the server logs a line. `mupctl get reflectors` shows each member and its health.
 
 ## Packet flow
 
