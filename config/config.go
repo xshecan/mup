@@ -115,6 +115,39 @@ func (m *Mode) UnmarshalText(text []byte) error {
 	return nil
 }
 
+// Balance is how a return pool spreads the downstream replies of a route.
+type Balance uint8
+
+const (
+	// BalancePerPeer sends all replies of one peer through one reflector.
+	BalancePerPeer Balance = iota
+	// BalancePerPacket sends each reply through the next reflector in turn.
+	BalancePerPacket
+)
+
+func (b Balance) String() string {
+	switch b {
+	case BalancePerPeer:
+		return "per-peer"
+	case BalancePerPacket:
+		return "per-packet"
+	default:
+		return fmt.Sprintf("balance(%d)", uint8(b))
+	}
+}
+
+// ParseBalance parses a balance mode name.
+func ParseBalance(raw string) (Balance, error) {
+	switch raw {
+	case "per-peer":
+		return BalancePerPeer, nil
+	case "per-packet":
+		return BalancePerPacket, nil
+	default:
+		return 0, fmt.Errorf("invalid balance %q: use per-peer or per-packet", raw)
+	}
+}
+
 // App is the configuration of one daemon. Exactly one of Client and Server is
 // set.
 type App struct {
@@ -214,13 +247,22 @@ func (g Group) validate() error {
 
 // Path is one route to a server. If ReturnIP is set, the server returns the
 // replies of the path through it: a UDP reply has the return IP as its source,
-// and an ICMP reply goes to the return IP as an Echo Request.
+// and an ICMP reply goes to the return IP as an Echo Request. If ReturnPrefix
+// is nonzero, ReturnIP is a pool base and the server spreads the replies over
+// the pool by Balance.
 type Path struct {
-	Server     netip.Addr
-	ServerPort uint16
-	Transport  protocol.TransportID
-	Interface  string
-	ReturnIP   netip.Addr
+	Server       netip.Addr
+	ServerPort   uint16
+	Transport    protocol.TransportID
+	Interface    string
+	ReturnIP     netip.Addr
+	ReturnPrefix uint8
+	Balance      Balance
+}
+
+// IsPool reports whether the path returns through a pool of addresses.
+func (p Path) IsPool() bool {
+	return p.ReturnPrefix != 0
 }
 
 // String formats the path as SERVER[%IFACE]:PORT/TRANSPORT [via RETURN_IP],
@@ -231,16 +273,20 @@ func (p Path) String() string {
 		host += "%" + p.Interface
 	}
 	text := fmt.Sprintf("%s:%d/%s", host, p.ServerPort, p.Transport)
-	if p.ReturnIP.IsValid() {
+	if p.IsPool() {
+		text += fmt.Sprintf(" via %s/%d balance %s", p.ReturnIP, p.ReturnPrefix, p.Balance)
+	} else if p.ReturnIP.IsValid() {
 		text += " via " + p.ReturnIP.String()
 	}
 	return text
 }
 
-// Route returns the path without its return IP. Two paths with the same route
-// are the same path.
+// Route returns the path without its return IP or pool. Two paths with the
+// same route are the same path.
 func (p Path) Route() Path {
 	p.ReturnIP = netip.Addr{}
+	p.ReturnPrefix = 0
+	p.Balance = BalancePerPeer
 	return p
 }
 
@@ -273,6 +319,18 @@ func (p Path) validate() error {
 	if p.ReturnIP.IsValid() && !isNonzeroIPv4(p.ReturnIP) {
 		return errors.New("return IP must be a nonzero IPv4 address")
 	}
+	if p.IsPool() {
+		if p.ReturnPrefix < 1 || p.ReturnPrefix > 31 {
+			return errors.New("return pool prefix must be between 1 and 31")
+		}
+		prefix := netip.PrefixFrom(p.ReturnIP, int(p.ReturnPrefix))
+		if prefix.Masked().Addr() != p.ReturnIP {
+			return errors.New("return pool base must be the network address of the prefix")
+		}
+	}
+	if p.Balance != BalancePerPeer && !p.IsPool() {
+		return errors.New("balance applies only to a return pool")
+	}
 	return nil
 }
 
@@ -303,21 +361,51 @@ func (s Server) Validate() error {
 	return nil
 }
 
-// ParsePath parses SERVER[%IFACE]:PORT/udp or SERVER[%IFACE]:PORT/icmp, with
-// an optional "via RETURN_IP" after it.
+// ParsePath parses SERVER[%IFACE]:PORT/udp or SERVER[%IFACE]:PORT/icmp. It
+// accepts an optional "via RETURN_IP", or "via POOL_CIDR" with an optional
+// "balance per-peer" or "balance per-packet" after the pool.
 func ParsePath(raw string) (Path, error) {
 	fields := strings.Fields(raw)
 	var returnIP netip.Addr
+	var returnPrefix uint8
+	balance := BalancePerPeer
+	usage := errors.New("path must use IPv4:PORT/udp or /icmp, with an optional via RETURN_IP, or via POOL_CIDR balance MODE")
 	switch {
 	case len(fields) == 1:
-	case len(fields) == 3 && fields[1] == "via":
-		address, err := netip.ParseAddr(fields[2])
-		if err != nil || !isNonzeroIPv4(address) {
-			return Path{}, errors.New("return IP must be a nonzero IPv4 address")
+	case (len(fields) == 3 || len(fields) == 5) && fields[1] == "via":
+		target := fields[2]
+		if strings.Contains(target, "/") {
+			prefix, err := netip.ParsePrefix(target)
+			if err != nil || !isNonzeroIPv4(prefix.Addr()) {
+				return Path{}, errors.New("return pool must be a nonzero IPv4 CIDR")
+			}
+			if prefix.Bits() < 1 || prefix.Bits() > 31 {
+				return Path{}, errors.New("return pool prefix must be between 1 and 31")
+			}
+			returnIP = prefix.Masked().Addr()
+			returnPrefix = uint8(prefix.Bits())
+		} else {
+			address, err := netip.ParseAddr(target)
+			if err != nil || !isNonzeroIPv4(address) {
+				return Path{}, errors.New("return IP must be a nonzero IPv4 address")
+			}
+			returnIP = address
 		}
-		returnIP = address
+		if len(fields) == 5 {
+			if fields[3] != "balance" {
+				return Path{}, usage
+			}
+			if returnPrefix == 0 {
+				return Path{}, errors.New("balance applies only to a return pool")
+			}
+			parsed, err := ParseBalance(fields[4])
+			if err != nil {
+				return Path{}, err
+			}
+			balance = parsed
+		}
 	default:
-		return Path{}, errors.New("path must use IPv4:PORT/udp or /icmp, with an optional via RETURN_IP")
+		return Path{}, usage
 	}
 	raw = fields[0]
 	slash := strings.LastIndexByte(raw, '/')
@@ -341,7 +429,7 @@ func ParsePath(raw string) (Path, error) {
 	if err != nil {
 		return Path{}, errors.New("server path address must be a nonzero IPv4")
 	}
-	path := Path{Server: address, ServerPort: serverPort, Transport: transportID, Interface: interfaceName, ReturnIP: returnIP}
+	path := Path{Server: address, ServerPort: serverPort, Transport: transportID, Interface: interfaceName, ReturnIP: returnIP, ReturnPrefix: returnPrefix, Balance: balance}
 	if err := path.validate(); err != nil {
 		return Path{}, err
 	}
