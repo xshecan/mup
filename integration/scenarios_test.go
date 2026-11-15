@@ -299,6 +299,15 @@ func TestPrivilegedReturnPool(t *testing.T) {
 			addressLink(t, serverNS, "st"+suffix, "10.210.2.1/24")
 			addressLink(t, targetNS, "ts"+suffix, "10.210.2.2/24")
 
+			// The pool reflectors answer the server's discovery ping from its
+			// own loopback, and the client routes the pool range back through
+			// the server, so it accepts the spoofed-source probe that proves
+			// each reflector reaches it.
+			runInNamespace(t, serverNS, "ip", "link", "set", "lo", "up")
+			runInNamespace(t, serverNS, "ip", "addr", "add", "10.211.9.1/32", "dev", "lo")
+			runInNamespace(t, serverNS, "ip", "addr", "add", "10.211.9.2/32", "dev", "lo")
+			runInNamespace(t, clientNS, "ip", "route", "add", "10.211.9.0/30", "via", "10.210.1.2", "dev", "mc"+suffix)
+
 			target := startEchoTarget(t, targetNS, "10.210.2.2:51820")
 			defer target.stop(t)
 
@@ -328,6 +337,9 @@ func TestPrivilegedReturnPool(t *testing.T) {
 			}
 			serverAPI := api.NewDaemonClient(serverSocket)
 			waitForRegisteredPaths(t, serverAPI, 1, logs)
+			// A UDP reflector is used only after the client confirms it, so wait
+			// for the probe round trip to mark a member healthy.
+			waitForHealthyReflector(t, serverAPI, logs)
 
 			// Per-packet rotates the pool source each packet, so several
 			// exchanges cover more than one pool member.
@@ -403,6 +415,22 @@ func waitForRegisteredPaths(t *testing.T, server *api.DaemonClient, paths uint64
 			return false, err
 		}
 		return status.Server.Paths >= paths, nil
+	})
+}
+
+func waitForHealthyReflector(t *testing.T, server *api.DaemonClient, logs func() string) {
+	t.Helper()
+	waitFor(t, 20*time.Second, "a healthy UDP reflector", logs, func() (bool, error) {
+		list, err := server.Reflectors(context.Background())
+		if err != nil {
+			return false, err
+		}
+		for _, reflector := range list.Reflectors {
+			if reflector.Transport == "udp" && reflector.Healthy {
+				return true, nil
+			}
+		}
+		return false, nil
 	})
 }
 

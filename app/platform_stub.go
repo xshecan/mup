@@ -19,7 +19,7 @@ func newClientPathOpener() pathOpener {
 	}
 }
 
-func serveServerControls(context.Context, config.Server, *control.Registry, registrationSink) error {
+func serveServerControls(context.Context, config.Server, *control.Registry, registrationSink, *reflectorTargets) error {
 	return dataplane.ErrUnsupportedPlatform
 }
 

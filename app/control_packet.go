@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/binary"
 	"errors"
+	"net/netip"
 
 	"github.com/xshecan/mup/config"
 	"github.com/xshecan/mup/protocol"
@@ -70,6 +71,29 @@ func validateRegistrationACK(packet []byte, nonce uint64, pathID uint16, sequenc
 		return errors.New("registration ACK does not match request")
 	}
 	return nil
+}
+
+// probeReplyFrame answers a reflector probe. It names the reflector that
+// reached the client in its return IP, because the reply comes from the client,
+// not from the spoofed source.
+func probeReplyFrame(registration pathRegistration, reflector netip.Addr, sequence uint32) ([]byte, error) {
+	frame := protocol.ControlFrame{
+		Type:          protocol.ControlProbeReply,
+		Transport:     protocol.TransportUDP,
+		Flags:         protocol.ControlFlagReturnIP,
+		PathID:        registration.pathID,
+		Sequence:      sequence,
+		ListenPort:    registration.listenPort,
+		ServerPort:    registration.path.ServerPort,
+		InstanceNonce: registration.nonce,
+		AdvertisedIP:  registration.advertisedIP,
+		ReturnIP:      reflector,
+	}
+	packet := make([]byte, protocol.ControlFrameLength)
+	if err := protocol.EncodeControlFrame(packet, frame); err != nil {
+		return nil, err
+	}
+	return packet, nil
 }
 
 func registrationFrame(registration pathRegistration, sequence uint32) ([]byte, error) {

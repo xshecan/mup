@@ -247,6 +247,7 @@ func TestUDPPathKeepsWorkingAfterAnotherPathCloses(t *testing.T) {
 type recordingSink struct {
 	registered []dataplane.RegistrationSettings
 	pools      []recordedPool
+	confirmed  []netip.Addr
 }
 
 type recordedPool struct {
@@ -269,6 +270,11 @@ func (s *recordingSink) ObservePool(base netip.Addr, prefix uint8, transport pro
 	return nil
 }
 
+func (s *recordingSink) ConfirmReflector(source netip.Addr) error {
+	s.confirmed = append(s.confirmed, source)
+	return nil
+}
+
 func TestAcceptRegistrationUsesTheReceivingPort(t *testing.T) {
 	t.Parallel()
 
@@ -286,13 +292,14 @@ func TestAcceptRegistrationUsesTheReceivingPort(t *testing.T) {
 	registry := control.NewRegistry(5000, 5001, 30*time.Second)
 	sink := &recordingSink{}
 
-	if _, err := acceptRegistration(frame, protocol.TransportUDP, 5000, client, local, registry, sink); !errors.Is(err, control.ErrRegistrationPort) {
+	targets := newReflectorTargets()
+	if _, err := acceptRegistration(frame, protocol.TransportUDP, 5000, client, local, registry, sink, targets); !errors.Is(err, control.ErrRegistrationPort) {
 		t.Fatalf("acceptRegistration on another port error = %v, want %v", err, control.ErrRegistrationPort)
 	}
 	if len(sink.registered) != 0 {
 		t.Fatalf("rejected frame reached the dataplane: %#v", sink.registered)
 	}
-	if _, err := acceptRegistration(frame, protocol.TransportUDP, 5001, client, local, registry, sink); err != nil {
+	if _, err := acceptRegistration(frame, protocol.TransportUDP, 5001, client, local, registry, sink, targets); err != nil {
 		t.Fatalf("acceptRegistration on the named port: %v", err)
 	}
 	if len(sink.registered) != 1 || sink.registered[0].Path.ServerPort != 5001 {

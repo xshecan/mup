@@ -10,11 +10,17 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/cilium/ebpf"
 
 	"github.com/xshecan/mup/protocol"
 )
+
+// reflectorConfirmTTL is how long a UDP reflector stays healthy after the
+// client last confirmed it received a spoofed-source probe from it. It is a few
+// probe cycles, so a reflector stays healthy while the probe keeps arriving.
+const reflectorConfirmTTL = 6 * time.Second
 
 type Runtime struct {
 	mu             sync.Mutex
@@ -24,7 +30,11 @@ type Runtime struct {
 	peerQuarantine resourceQuarantine[uint32]
 	portQuarantine resourceQuarantine[uint16]
 	pools          map[PoolKey]PoolInfo
-	closed         bool
+	// confirmations holds, for each UDP reflector source the client reported
+	// receiving, the monotonic time of that report. A UDP pool member is healthy
+	// while its confirmation is fresh.
+	confirmations map[netip.Addr]uint64
+	closed        bool
 }
 
 func Load(cfg Config) (runtime *Runtime, err error) {
@@ -48,7 +58,11 @@ func Load(cfg Config) (runtime *Runtime, err error) {
 	}
 	options := &ebpf.CollectionOptions{}
 	options.Maps.PinPath = cfg.PinRoot
-	runtime = &Runtime{pinRoot: cfg.PinRoot, pools: make(map[PoolKey]PoolInfo)}
+	runtime = &Runtime{
+		pinRoot:       cfg.PinRoot,
+		pools:         make(map[PoolKey]PoolInfo),
+		confirmations: make(map[netip.Addr]uint64),
+	}
 	if err := loadMupObjects(&runtime.objects, options); err != nil {
 		return nil, fmt.Errorf("load MUP BPF objects: %w", err)
 	}
@@ -221,8 +235,10 @@ func (r *Runtime) RevokeRegistration(client ClientKey) error {
 }
 
 // ObservePool records a return pool from a registration. On the first sight of
-// a pool it seeds the health map with every address healthy, so the server can
-// reflect through the pool at once. The prober refines the health later.
+// a pool it seeds a bootstrap member set so the server can reflect at once. An
+// ICMP pool seeds every member healthy, and the prober refines it. A UDP pool
+// seeds every member unhealthy, because a UDP reflector is used only after the
+// client confirms it reaches them. The prober and probe refine both later.
 func (r *Runtime) ObservePool(base netip.Addr, prefix uint8, transport protocol.TransportID) error {
 	addresses, err := poolAddresses(base, prefix)
 	if err != nil {
@@ -237,7 +253,11 @@ func (r *Runtime) ObservePool(base netip.Addr, prefix uint8, transport protocol.
 	if _, exists := r.pools[key]; exists {
 		return nil
 	}
-	pool, err := encodeReflectorPool(addresses, nil)
+	var healthy []bool
+	if transport == protocol.TransportUDP {
+		healthy = make([]bool, len(addresses))
+	}
+	pool, err := encodeReflectorPool(addresses, healthy)
 	if err != nil {
 		return err
 	}
@@ -306,30 +326,124 @@ func (r *Runtime) Pools() []PoolInfo {
 	return pools
 }
 
-// SetPoolHealth writes the health of a pool. The healthy slice has one entry
-// for each address, in the order of PoolInfo.Addresses.
-func (r *Runtime) SetPoolHealth(key PoolKey, healthy []bool) error {
+// SetPool replaces the members of a pool and their health. The prober calls it
+// each cycle with the addresses it discovered alive and which of them are
+// healthy. For a UDP pool the health argument is ignored and each member is
+// healthy only while its client confirmation is fresh, because a UDP reflector
+// never answers the server and its real health comes from the client receipt.
+// An empty address slice writes an empty pool, so the server reflects nothing
+// until the next sweep finds a live member.
+func (r *Runtime) SetPool(key PoolKey, addresses []netip.Addr, healthy []bool) error {
+	if len(healthy) != len(addresses) {
+		return fmt.Errorf("set pool: got %d health bits, want %d", len(healthy), len(addresses))
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return fmt.Errorf("set pool health: MUP dataplane is closed")
+		return fmt.Errorf("set pool: MUP dataplane is closed")
 	}
 	info, exists := r.pools[key]
 	if !exists {
-		return fmt.Errorf("set pool health: pool %s %s is not observed", key.Base, key.Transport)
+		return fmt.Errorf("set pool: pool %s %s is not observed", key.Base, key.Transport)
 	}
-	if len(healthy) != len(info.Addresses) {
-		return fmt.Errorf("set pool health: got %d health bits, want %d", len(healthy), len(info.Addresses))
+	info.Addresses = append([]netip.Addr(nil), addresses...)
+	if key.Transport == protocol.TransportUDP {
+		now, err := monotonicDuration()
+		if err != nil {
+			return err
+		}
+		r.pruneConfirmationsLocked(uint64(now))
+		healthy = r.udpHealthLocked(info.Addresses, uint64(now))
 	}
-	pool, err := encodeReflectorPool(info.Addresses, healthy)
+	if err := r.writePoolLocked(key, info.Addresses, healthy); err != nil {
+		return err
+	}
+	r.pools[key] = info
+	return nil
+}
+
+// ConfirmReflector records that the client received a spoofed-source probe from
+// a UDP reflector, and refreshes the health of every UDP pool that holds it.
+func (r *Runtime) ConfirmReflector(source netip.Addr) error {
+	if !source.Is4() {
+		return fmt.Errorf("confirm reflector %s: must be IPv4", source)
+	}
+	now, err := monotonicDuration()
 	if err != nil {
 		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return fmt.Errorf("confirm reflector: MUP dataplane is closed")
+	}
+	r.confirmations[source] = uint64(now)
+	for key, info := range r.pools {
+		if key.Transport != protocol.TransportUDP {
+			continue
+		}
+		if !netip.PrefixFrom(info.Base, int(info.Prefix)).Contains(source) {
+			continue
+		}
+		healthy := r.udpHealthLocked(info.Addresses, uint64(now))
+		if err := r.writePoolLocked(key, info.Addresses, healthy); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PoolMembers returns the current member addresses of a pool. The UDP probe
+// emitter reads them to probe each reflector.
+func (r *Runtime) PoolMembers(key PoolKey) []netip.Addr {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	info, exists := r.pools[key]
+	if !exists {
+		return nil
+	}
+	return append([]netip.Addr(nil), info.Addresses...)
+}
+
+// udpHealthLocked returns the health of each address from the freshness of its
+// client confirmation.
+func (r *Runtime) udpHealthLocked(addresses []netip.Addr, now uint64) []bool {
+	healthy := make([]bool, len(addresses))
+	for index, address := range addresses {
+		confirmed, ok := r.confirmations[address]
+		healthy[index] = ok && now >= confirmed && now-confirmed < uint64(reflectorConfirmTTL)
+	}
+	return healthy
+}
+
+// pruneConfirmationsLocked forgets confirmations older than the health window.
+func (r *Runtime) pruneConfirmationsLocked(now uint64) {
+	for address, confirmed := range r.confirmations {
+		if now < confirmed || now-confirmed >= uint64(reflectorConfirmTTL) {
+			delete(r.confirmations, address)
+		}
+	}
+}
+
+// writePoolLocked writes a pool's members and health to the BPF map. An empty
+// address slice writes an empty pool.
+func (r *Runtime) writePoolLocked(key PoolKey, addresses []netip.Addr, healthy []bool) error {
+	var pool mupReflectorPoolV1
+	if len(addresses) > 0 {
+		encoded, err := encodeReflectorPool(addresses, healthy)
+		if err != nil {
+			return err
+		}
+		pool = encoded
 	}
 	mapKey, err := reflectorKey(key)
 	if err != nil {
 		return err
 	}
-	return r.objects.ReflectorPools.Update(mapKey, pool, ebpf.UpdateAny)
+	if err := r.objects.ReflectorPools.Update(mapKey, pool, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("update reflector pool %s %s: %w", key.Base, key.Transport, err)
+	}
+	return nil
 }
 
 func (r *Runtime) UpdatePathState(healthyMask uint8, generation uint32) error {

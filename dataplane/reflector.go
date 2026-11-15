@@ -42,19 +42,22 @@ type Reflector struct {
 	Healthy   bool
 }
 
-// poolAddresses returns the first addresses of the pool, after the network
-// base. It returns at most MaxPool addresses.
-func poolAddresses(base netip.Addr, prefix uint8) ([]netip.Addr, error) {
+// PoolCandidates returns the host addresses of a pool range, after the network
+// base, up to max addresses. The prober pings them to discover which reflectors
+// are live. A max of zero returns no addresses.
+func PoolCandidates(base netip.Addr, prefix uint8, max int) ([]netip.Addr, error) {
 	if !base.Is4() {
 		return nil, fmt.Errorf("pool base %s must be IPv4", base)
 	}
 	if prefix < 1 || prefix > 31 {
 		return nil, fmt.Errorf("pool prefix %d must be between 1 and 31", prefix)
 	}
-	block := uint64(1) << (32 - prefix)
-	count := block - 1
-	if count > MaxPool {
-		count = MaxPool
+	if max <= 0 {
+		return nil, nil
+	}
+	count := uint64(1)<<(32-prefix) - 1
+	if count > uint64(max) {
+		count = uint64(max)
 	}
 	addresses := make([]netip.Addr, 0, count)
 	address := base.Next()
@@ -63,6 +66,13 @@ func poolAddresses(base netip.Addr, prefix uint8) ([]netip.Addr, error) {
 		address = address.Next()
 	}
 	return addresses, nil
+}
+
+// poolAddresses returns the first addresses of the pool, after the network
+// base. It returns at most MaxPool addresses, for the bootstrap of a pool
+// before the prober discovers its live members.
+func poolAddresses(base netip.Addr, prefix uint8) ([]netip.Addr, error) {
+	return PoolCandidates(base, prefix, MaxPool)
 }
 
 // encodeReflectorPool builds the map value of a pool. A nil healthy slice marks

@@ -69,8 +69,10 @@ type udpControlSocket struct {
 }
 
 type udpControlWaiter struct {
-	pathID  uint16
-	replies chan udpControlReply
+	pathID       uint16
+	registration pathRegistration
+	ifindex      int
+	replies      chan udpControlReply
 }
 
 func (s *udpControlSockets) acquire(local netip.AddrPort) (*udpControlSocket, error) {
@@ -122,6 +124,10 @@ func (s *udpControlSocket) read() {
 		if err != nil {
 			continue
 		}
+		if frame.Type == protocol.ControlProbe {
+			s.respondToProbe(frame, source.Addr().Unmap())
+			continue
+		}
 		reply := udpControlReply{
 			source:  netip.AddrPortFrom(source.Addr().Unmap(), source.Port()),
 			ifindex: ifindex,
@@ -129,6 +135,40 @@ func (s *udpControlSocket) read() {
 		copy(reply.frame[:], buffer[:count])
 		s.deliver(frame.PathID, reply)
 	}
+}
+
+// respondToProbe answers a reflector probe. The server sent it spoofed from the
+// reflector, so the reflector is the packet source. The client confirms it only
+// when the probe is for this client and the reflector is in the path's pool, and
+// it answers the real server, not the spoofed source.
+func (s *udpControlSocket) respondToProbe(frame protocol.ControlFrame, reflector netip.Addr) {
+	s.mu.Lock()
+	var registration pathRegistration
+	ifindex := 0
+	found := false
+	for _, waiter := range s.waiters {
+		if waiter.pathID == frame.PathID {
+			registration = waiter.registration
+			ifindex = waiter.ifindex
+			found = true
+			break
+		}
+	}
+	s.mu.Unlock()
+	if !found || !registration.path.IsPool() {
+		return
+	}
+	if frame.AdvertisedIP != registration.advertisedIP || frame.InstanceNonce != registration.nonce {
+		return
+	}
+	if !netip.PrefixFrom(registration.path.ReturnIP, int(registration.path.ReturnPrefix)).Contains(reflector) {
+		return
+	}
+	reply, err := probeReplyFrame(registration, reflector, frame.Sequence)
+	if err != nil {
+		return
+	}
+	_ = s.conn.writeControl(reply, registration.path.Endpoint(), ifindex)
 }
 
 func (s *udpControlSocket) deliver(pathID uint16, reply udpControlReply) {
@@ -145,8 +185,13 @@ func (s *udpControlSocket) deliver(pathID uint16, reply udpControlReply) {
 	}
 }
 
-func (s *udpControlSocket) subscribe(pathID uint16) *udpControlWaiter {
-	waiter := &udpControlWaiter{pathID: pathID, replies: make(chan udpControlReply, udpReplyQueueLength)}
+func (s *udpControlSocket) subscribe(registration pathRegistration, ifindex int) *udpControlWaiter {
+	waiter := &udpControlWaiter{
+		pathID:       registration.pathID,
+		registration: registration,
+		ifindex:      ifindex,
+		replies:      make(chan udpControlReply, udpReplyQueueLength),
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.waiters = append(s.waiters, waiter)
@@ -199,7 +244,7 @@ func (s *udpControlSockets) openPath(registration pathRegistration, ifindex int)
 		ifindex:      ifindex,
 		sockets:      s,
 		socket:       socket,
-		waiter:       socket.subscribe(registration.pathID),
+		waiter:       socket.subscribe(registration, ifindex),
 		closed:       make(chan struct{}),
 	}, nil
 }

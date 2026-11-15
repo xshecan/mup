@@ -24,6 +24,7 @@ type controlSocket string
 
 type registrationSink interface {
 	ObservePool(base netip.Addr, prefix uint8, transport protocol.TransportID) error
+	ConfirmReflector(source netip.Addr) error
 	RegisterPath(dataplane.RegistrationSettings) error
 	RevokeRegistration(dataplane.ClientKey) error
 }
@@ -80,8 +81,10 @@ func serverModule(server config.Server) fx.Option {
 			func() *control.Registry {
 				return control.NewRegistry(server.Port.First, server.Port.Last, registrationLeaseSeconds*time.Second)
 			},
+			newReflectorTargets,
 			asLoop(newServerControlLoop),
 			asLoop(newReflectorProbeLoop),
+			asLoop(newReflectorEmitLoop),
 		),
 		fx.Invoke(attachServer),
 	)
@@ -130,9 +133,9 @@ func attachServer(lifecycle fx.Lifecycle, runtime *dataplane.Runtime, plan runti
 	}))
 }
 
-func newServerControlLoop(server config.Server, registry *control.Registry, runtime *dataplane.Runtime) loop {
+func newServerControlLoop(server config.Server, registry *control.Registry, runtime *dataplane.Runtime, targets *reflectorTargets) loop {
 	return func(ctx context.Context) error {
-		if err := serveServerControls(ctx, server, registry, runtime); err != nil {
+		if err := serveServerControls(ctx, server, registry, runtime, targets); err != nil {
 			return fmt.Errorf("serve control plane: %w", err)
 		}
 		return nil

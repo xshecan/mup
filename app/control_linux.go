@@ -168,15 +168,16 @@ func serveServerControls(
 	server config.Server,
 	registry *control.Registry,
 	sink registrationSink,
+	targets *reflectorTargets,
 ) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := make(chan error, 3)
 	go func() {
-		results <- serveServerUDPControl(ctx, server, registry, sink)
+		results <- serveServerUDPControl(ctx, server, registry, sink, targets)
 	}()
 	go func() {
-		results <- serveServerICMPControl(ctx, server, registry, sink)
+		results <- serveServerICMPControl(ctx, server, registry, sink, targets)
 	}()
 	go func() {
 		results <- expireRegistry(ctx, registry)
@@ -212,6 +213,7 @@ func serveServerUDPControl(
 	server config.Server,
 	registry *control.Registry,
 	sink registrationSink,
+	targets *reflectorTargets,
 ) error {
 	connections := make([]*net.UDPConn, 0, server.Port.Len())
 	defer func() {
@@ -232,7 +234,7 @@ func serveServerUDPControl(
 	results := make(chan error, len(connections))
 	for _, connection := range connections {
 		go func() {
-			results <- serveServerUDPConnection(ctx, connection, registry, sink)
+			results <- serveServerUDPConnection(ctx, connection, registry, sink, targets)
 		}()
 	}
 	return <-results
@@ -243,6 +245,7 @@ func serveServerUDPConnection(
 	connection *net.UDPConn,
 	registry *control.Registry,
 	sink registrationSink,
+	targets *reflectorTargets,
 ) error {
 	serverPort := uint16(connection.LocalAddr().(*net.UDPAddr).Port)
 	buffer := make([]byte, udpControlBufferLength)
@@ -262,6 +265,16 @@ func serveServerUDPConnection(
 		if count != protocol.ControlFrameLength {
 			continue
 		}
+		// A probe reply confirms a UDP reflector reached the client. It carries
+		// the reflector in its return IP, because the reply itself comes from
+		// the client, not from the spoofed source.
+		if frame, err := protocol.DecodeControlFrame(buffer[:count]); err == nil &&
+			frame.Type == protocol.ControlProbeReply {
+			if frame.Transport == protocol.TransportUDP && frame.ReturnIP.IsValid() {
+				_ = sink.ConfirmReflector(frame.ReturnIP)
+			}
+			continue
+		}
 		local, err := packetInfoDestination(oob[:oobCount])
 		if err != nil {
 			continue
@@ -274,6 +287,7 @@ func serveServerUDPConnection(
 			local,
 			registry,
 			sink,
+			targets,
 		)
 		if err == nil {
 			_, _, _ = connection.WriteMsgUDP(ack, replySource(local), source)
@@ -286,6 +300,7 @@ func serveServerICMPControl(
 	server config.Server,
 	registry *control.Registry,
 	sink registrationSink,
+	targets *reflectorTargets,
 ) error {
 	connection, err := net.ListenIP("ip4:icmp", &net.IPAddr{IP: net.IPv4zero})
 	if err != nil {
@@ -325,6 +340,7 @@ func serveServerICMPControl(
 			local,
 			registry,
 			sink,
+			targets,
 		)
 		if err == nil {
 			reply := marshalICMPEcho(icmpEchoReply, echo.identifier, echo.sequence, ack)
@@ -340,6 +356,7 @@ func acceptRegistration(
 	source, local netip.Addr,
 	registry *control.Registry,
 	sink registrationSink,
+	targets *reflectorTargets,
 ) ([]byte, error) {
 	frame, err := protocol.DecodeControlFrame(packet)
 	if err != nil {
@@ -397,6 +414,19 @@ func acceptRegistration(
 	if frame.Flags&protocol.ControlFlagReturnPool != 0 {
 		if err := sink.ObservePool(frame.ReturnIP, frame.ReturnPrefix, transport); err != nil {
 			return nil, err
+		}
+		// A UDP reflector is a spoofed source, so the server probes it toward
+		// the client and the client confirms it. Record the client as a target.
+		if transport == protocol.TransportUDP && targets != nil {
+			targets.add(reflectorTarget{
+				advertisedIP: frame.AdvertisedIP,
+				listenPort:   frame.ListenPort,
+				nonce:        frame.InstanceNonce,
+				pathID:       frame.PathID,
+				serverPort:   serverPort,
+				base:         frame.ReturnIP,
+				prefix:       frame.ReturnPrefix,
+			}, time.Now().Add(registrationLeaseSeconds*time.Second))
 		}
 	}
 	ackFrame := frame

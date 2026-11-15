@@ -2,9 +2,9 @@ package dataplane
 
 import (
 	"net/netip"
-	"testing"
 
 	"github.com/xshecan/mup/protocol"
+	"testing"
 )
 
 func TestPoolAddresses(t *testing.T) {
@@ -36,6 +36,33 @@ func TestPoolAddresses(t *testing.T) {
 		}
 	}
 }
+
+func TestPoolCandidatesSweepsTheWholeRange(t *testing.T) {
+	t.Parallel()
+	addresses, err := PoolCandidates(netip.MustParseAddr("194.225.72.0"), 24, reflectorSweepCapForTest)
+	if err != nil {
+		t.Fatalf("PoolCandidates /24: %v", err)
+	}
+	if len(addresses) != 255 {
+		t.Fatalf("/24 candidates = %d, want 255", len(addresses))
+	}
+	if addresses[0].String() != "194.225.72.1" || addresses[254].String() != "194.225.72.255" {
+		t.Fatalf("/24 range = %s..%s", addresses[0], addresses[254])
+	}
+}
+
+func TestPoolCandidatesRespectsTheCap(t *testing.T) {
+	t.Parallel()
+	addresses, err := PoolCandidates(netip.MustParseAddr("10.0.0.0"), 8, 1024)
+	if err != nil {
+		t.Fatalf("PoolCandidates /8: %v", err)
+	}
+	if len(addresses) != 1024 {
+		t.Fatalf("/8 candidates = %d, want the cap 1024", len(addresses))
+	}
+}
+
+const reflectorSweepCapForTest = 1024
 
 func TestPoolAddressesRejectsBadPrefix(t *testing.T) {
 	t.Parallel()
