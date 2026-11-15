@@ -18,6 +18,9 @@ typedef __u64 __be64;
 #define LIBBPF_PIN_BY_NAME 1
 #define MUP_PINNED __uint(pinning, LIBBPF_PIN_BY_NAME)
 
+/* The loopback device of a network namespace always has ifindex 1. */
+#define MUP_LOOPBACK_IFINDEX 1
+
 #define BPF_ANY 0
 #define BPF_NOEXIST 1
 #define BPF_EXIST 2

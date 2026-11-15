@@ -188,6 +188,24 @@ static __always_inline int mup_rewrite_udp(struct mup_packet *packet,
 }
 
 /*
+ * mup_udp_is_partial reports a UDP packet whose checksum field holds only the
+ * pseudo-header sum. The kernel writes this sum for a CHECKSUM_PARTIAL packet
+ * from a local socket, and the device completes the checksum later.
+ */
+static __always_inline int mup_udp_is_partial(const struct mup_packet *packet)
+{
+	const __u8 *ipv4 = (const __u8 *)packet->ipv4;
+	const __u8 *l4 = packet->l4;
+
+	if (packet->transport != MUP_TRANSPORT_UDP)
+		return 0;
+	return mup_l4_checksum(packet) ==
+	       mup_csum_fold(mup_read_be16(ipv4 + 12) + mup_read_be16(ipv4 + 14) +
+			     mup_read_be16(ipv4 + 16) + mup_read_be16(ipv4 + 18) +
+			     MUP_IPPROTO_UDP + mup_read_be16(l4 + 4));
+}
+
+/*
  * A packet from a local socket has CHECKSUM_PARTIAL. Its UDP checksum field
  * holds only the pseudo-header sum, and the device adds the UDP header and
  * the payload when it sends the packet. So this rewrite does not derive a

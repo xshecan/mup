@@ -482,17 +482,34 @@ static __always_inline int redirect_packet(__u32 ifindex)
 	return bpf_redirect_neigh(ifindex, 0, 0, 0);
 }
 
+/*
+ * A partial packet came from a local socket and still has CHECKSUM_PARTIAL,
+ * so the rewrite leaves the checksum to the device.
+ */
 static __always_inline int rewrite_for_path(
 	struct mup_packet *packet,
 	__u16 listen_port,
 	const struct path_config_v1 *path,
-	__u32 peer_token)
+	__u32 peer_token,
+	int partial)
 {
+	if (path->transport == MUP_TRANSPORT_UDP && partial)
+		return mup_rewrite_udp_partial(packet, path->source_ip,
+					       path->destination_ip,
+					       listen_port,
+					       path->server_port,
+					       peer_token);
 	if (path->transport == MUP_TRANSPORT_UDP)
 		return mup_rewrite_udp(packet, path->source_ip,
 				       path->destination_ip,
 				       listen_port,
 				       path->server_port);
+	if (path->transport == MUP_TRANSPORT_ICMP && partial)
+		return mup_rewrite_icmp_partial(packet, path->source_ip,
+						path->destination_ip,
+						MUP_ICMP_ECHO_REQUEST,
+						path->server_port,
+						peer_token);
 	if (path->transport == MUP_TRANSPORT_ICMP)
 		return mup_rewrite_icmp(packet, path->source_ip,
 					path->destination_ip,
@@ -541,7 +558,8 @@ static __always_inline int prepare_clone_l2(
 #define MUP_BURST_FAILED 2
 
 __attribute__((noinline)) int mup_burst_clone(struct __sk_buff *skb, __u32 index,
-					      __u32 listen_port, __u32 peer_token)
+					      __u32 listen_port, __u32 peer_token,
+					      __u32 partial)
 {
 	struct mup_packet packet = {};
 	struct path_config_v1 *mapped_path;
@@ -557,7 +575,8 @@ __attribute__((noinline)) int mup_burst_clone(struct __sk_buff *skb, __u32 index
 	    !mapped_path->ifindex || mapped_path->transport > MUP_TRANSPORT_ICMP)
 		return MUP_BURST_SKIPPED;
 	path = *mapped_path;
-	result = rewrite_for_path(&packet, (__u16)listen_port, &path, peer_token);
+	result = rewrite_for_path(&packet, (__u16)listen_port, &path, peer_token,
+				  partial);
 	if (result) {
 		count_reason(result == -2 ? MUP_DROP_TRANSPORT : MUP_DROP_CHECKSUM);
 		return MUP_BURST_FAILED;
@@ -579,7 +598,8 @@ static __always_inline int burst_client_packet(
 	struct mup_packet *packet,
 	__u16 listen_port,
 	__u32 path_mask,
-	__u32 peer_token)
+	__u32 peer_token,
+	int partial)
 {
 	struct path_state_v1 *state;
 	struct path_config_v1 *mapped_path;
@@ -617,7 +637,8 @@ static __always_inline int burst_client_packet(
 	for (int index = 0; index < 8; index++) {
 		if (!mup_mask_has(healthy_mask, index) || index == final_index)
 			continue;
-		result = mup_burst_clone(skb, index, listen_port, peer_token);
+		result = mup_burst_clone(skb, index, listen_port, peer_token,
+					 partial);
 		if (result == MUP_BURST_FAILED)
 			return TC_ACT_SHOT;
 		if (result == MUP_BURST_SENT)
@@ -634,7 +655,8 @@ static __always_inline int burst_client_packet(
 	    !mapped_path->ifindex || mapped_path->transport > MUP_TRANSPORT_ICMP)
 		return cloned ? TC_ACT_SHOT : count_and_drop(skb, MUP_DROP_NO_PATH);
 	path = *mapped_path;
-	result = rewrite_for_path(packet, listen_port, &path, peer_token);
+	result = rewrite_for_path(packet, listen_port, &path, peer_token,
+				  partial);
 	if (result == -2)
 		return count_and_drop(skb, MUP_DROP_TRANSPORT);
 	if (result)
@@ -795,6 +817,7 @@ int mup_client_ingress(struct __sk_buff *skb)
 	struct peer_token_value_v1 *forward;
 	__u32 configuration_key = 0;
 	__u32 peer_token = 0;
+	int partial;
 	int result;
 
 	result = parse_ipv4_l4(skb, &packet);
@@ -859,6 +882,9 @@ int mup_client_ingress(struct __sk_buff *skb)
 	result = validate_wg(&packet, 0, &peer_token);
 	if (result != MUP_DROP_NONE)
 		return count_and_drop(skb, result);
+	/* Only a packet on loopback can still have CHECKSUM_PARTIAL here. */
+	partial = skb->ifindex == MUP_LOOPBACK_IFINDEX &&
+		  mup_udp_is_partial(&packet);
 
 	endpoint.source_ip = packet.ipv4->source;
 	endpoint.local_ip = packet.ipv4->destination;
@@ -876,14 +902,16 @@ int mup_client_ingress(struct __sk_buff *skb)
 		if (mup_set_peer_token(&packet, peer_token))
 			return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
 		return burst_client_packet(skb, &packet, endpoint.listen_port,
-					   group->path_mask, peer_token);
+					   group->path_mask, peer_token,
+					   partial);
 	}
 	path = select_client_path(group, peer_token);
 	if (!path)
 		return count_and_drop(skb, MUP_DROP_NO_PATH);
 	if (mup_set_peer_token(&packet, peer_token))
 		return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
-	result = rewrite_for_path(&packet, endpoint.listen_port, path, peer_token);
+	result = rewrite_for_path(&packet, endpoint.listen_port, path, peer_token,
+				  partial);
 	if (result == -2)
 		return count_and_drop(skb, MUP_DROP_TRANSPORT);
 	if (result)

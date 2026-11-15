@@ -288,3 +288,23 @@ func protocolName(protocol uint8) string {
 	}
 	return "icmp"
 }
+
+func TestIsUDPPartialFindsALocalSocketPacket(t *testing.T) {
+	t.Parallel()
+
+	random := rand.New(rand.NewPCG(1, 2))
+	payload := randomWireGuardPayload(random, MessageHandshakeInitiation, HandshakeInitiationLength)
+	packet := buildPacket(t, IPProtocolUDP, payload)
+	if IsUDPPartial(packet) {
+		t.Fatal("a packet with a full checksum is partial")
+	}
+	loopback := netip.MustParseAddr("127.0.0.1")
+	copy(packet[12:16], loopback.AsSlice())
+	copy(packet[16:20], loopback.AsSlice())
+	// The kernel wrote 0xfeaf for a 148-byte initiation from 127.0.0.1 to
+	// 127.0.0.1 on scx-gw-1.
+	binary.BigEndian.PutUint16(packet[26:28], 0xfeaf)
+	if !IsUDPPartial(packet) {
+		t.Fatal("the pseudo-header sum of a loopback packet is not partial")
+	}
+}

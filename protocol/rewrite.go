@@ -30,6 +30,19 @@ func RewriteUDP(packet []byte, source, destination netip.Addr, sourcePort, desti
 	return nil
 }
 
+// IsUDPPartial reports a UDP packet whose checksum field holds only the
+// pseudo-header sum, as a local socket sends it with CHECKSUM_PARTIAL.
+func IsUDPPartial(packet []byte) bool {
+	parsed, err := ParseIPv4L4(packet)
+	if err != nil || parsed.Protocol != IPProtocolUDP {
+		return false
+	}
+	l4 := packet[20:]
+	sum := wordAt(packet, 12) + wordAt(packet, 14) + wordAt(packet, 16) +
+		wordAt(packet, 18) + uint32(IPProtocolUDP) + wordAt(l4, 4)
+	return transportChecksum(IPProtocolUDP, l4) == checksumFold(sum)
+}
+
 // RewriteUDPPartial rewrites a UDP packet with CHECKSUM_PARTIAL in place. A
 // local socket sends such a packet: its checksum field holds only the
 // pseudo-header sum, and the device adds the UDP header and the payload. The
