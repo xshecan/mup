@@ -67,9 +67,9 @@ func startLoopbackPath(t *testing.T, sockets *udpControlSockets, registration pa
 	ctx, cancel := context.WithCancel(context.Background())
 	running := &runningPath{outcomes: make(chan probeOutcome, 16), cancel: cancel, done: make(chan error, 1)}
 	go func() {
-		running.done <- path.Run(ctx, func(ctx context.Context, sequence uint32, _ time.Time, success bool) error {
+		running.done <- path.Run(ctx, func(ctx context.Context, sequence uint32, _ time.Time, result registerResult) error {
 			select {
-			case running.outcomes <- probeOutcome{sequence: sequence, success: success}:
+			case running.outcomes <- probeOutcome{sequence: sequence, success: result == registerAcked}:
 			default:
 			}
 			return nil
@@ -248,6 +248,8 @@ type recordingSink struct {
 	registered []dataplane.RegistrationSettings
 	pools      []recordedPool
 	confirmed  []netip.Addr
+	// noReflector makes every pool report that it has no healthy member.
+	noReflector bool
 }
 
 type recordedPool struct {
@@ -268,6 +270,10 @@ func (s *recordingSink) RevokeRegistration(dataplane.ClientKey) error {
 func (s *recordingSink) ObservePool(base netip.Addr, prefix uint8, transport protocol.TransportID) error {
 	s.pools = append(s.pools, recordedPool{base: base, prefix: prefix, transport: transport})
 	return nil
+}
+
+func (s *recordingSink) PoolReady(netip.Addr, protocol.TransportID) (bool, error) {
+	return !s.noReflector, nil
 }
 
 func (s *recordingSink) ConfirmReflector(source netip.Addr) error {
@@ -304,5 +310,52 @@ func TestAcceptRegistrationUsesTheReceivingPort(t *testing.T) {
 	}
 	if len(sink.registered) != 1 || sink.registered[0].Path.ServerPort != 5001 {
 		t.Fatalf("registered = %#v, want one path on port 5001", sink.registered)
+	}
+}
+
+func TestAcceptRegistrationReportsAPoolWithoutReflector(t *testing.T) {
+	t.Parallel()
+
+	client := netip.MustParseAddr("192.0.2.10")
+	local := netip.MustParseAddr("198.51.100.1")
+	frame, err := registrationFrame(pathRegistration{
+		advertisedIP: client,
+		listenPort:   51821,
+		returnIP:     netip.MustParseAddr("188.229.116.16"),
+		path: config.Path{
+			Server: local, ServerPort: 9002, Transport: protocol.TransportUDP,
+			ReturnIP: netip.MustParseAddr("188.229.116.16"), ReturnPrefix: 30,
+		},
+		nonce:  1,
+		pathID: 4,
+	}, 1)
+	if err != nil {
+		t.Fatalf("registrationFrame: %v", err)
+	}
+	for _, test := range []struct {
+		noReflector bool
+		want        protocol.ControlStatus
+	}{
+		{noReflector: false, want: protocol.ControlStatusOK},
+		{noReflector: true, want: protocol.ControlStatusNoReflector},
+	} {
+		registry := control.NewRegistry(9000, 9999, 30*time.Second)
+		sink := &recordingSink{noReflector: test.noReflector}
+		ack, err := acceptRegistration(frame, protocol.TransportUDP, 9002, client, local, registry, sink, newReflectorTargets())
+		if err != nil {
+			t.Fatalf("acceptRegistration: %v", err)
+		}
+		decoded, err := protocol.DecodeControlFrame(ack)
+		if err != nil {
+			t.Fatalf("decode ACK: %v", err)
+		}
+		if decoded.Status != test.want {
+			t.Fatalf("ACK status with noReflector=%v = %d, want %d", test.noReflector, decoded.Status, test.want)
+		}
+		// The server keeps the registration, so the path comes back when a
+		// reflector does.
+		if len(sink.registered) != 1 {
+			t.Fatalf("registered = %d paths, want 1", len(sink.registered))
+		}
 	}
 }

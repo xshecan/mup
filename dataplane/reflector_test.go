@@ -133,3 +133,25 @@ func TestReflectorKeySeparatesTransports(t *testing.T) {
 		t.Fatalf("bases differ: %d and %d", udp.Base, icmp.Base)
 	}
 }
+
+func TestPoolHasHealthy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		pool mupReflectorPoolV1
+		want bool
+	}{
+		{"empty", mupReflectorPoolV1{}, false},
+		{"no healthy member", mupReflectorPoolV1{Count: 2}, false},
+		{"a healthy member", mupReflectorPoolV1{Count: 2, HealthyMask: 0b10}, true},
+		// The server program reads only the first count members.
+		{"a bit past the count", mupReflectorPoolV1{Count: 2, HealthyMask: 0b100}, false},
+		{"a count past the limit", mupReflectorPoolV1{Count: MaxPool + 1, HealthyMask: 1}, false},
+	}
+	for _, test := range tests {
+		if got := poolHasHealthy(test.pool); got != test.want {
+			t.Errorf("%s: poolHasHealthy = %v, want %v", test.name, got, test.want)
+		}
+	}
+}

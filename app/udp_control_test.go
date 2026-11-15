@@ -140,8 +140,8 @@ type probeOutcome struct {
 func runOneRound(path pathConn) <-chan probeOutcome {
 	outcomes := make(chan probeOutcome, 1)
 	go func() {
-		_ = path.Run(context.Background(), func(_ context.Context, sequence uint32, _ time.Time, success bool) error {
-			outcomes <- probeOutcome{sequence: sequence, success: success}
+		_ = path.Run(context.Background(), func(_ context.Context, sequence uint32, _ time.Time, result registerResult) error {
+			outcomes <- probeOutcome{sequence: sequence, success: result == registerAcked}
 			return errStopPath
 		})
 	}()
@@ -200,8 +200,9 @@ func TestUDPControlReplyMatchesOnlyItsACK(t *testing.T) {
 		{"a REGISTER", reply(testServerA, 4, func(f *protocol.ControlFrame) { f.Type = protocol.ControlRegister }), 0, false},
 	}
 	for _, test := range tests {
-		if got := test.reply.matches(registration, test.ifindex, 9); got != test.want {
-			t.Errorf("%s: matches = %v, want %v", test.name, got, test.want)
+		result, ok := test.reply.answer(registration, test.ifindex, 9)
+		if got := ok && result == registerAcked; got != test.want {
+			t.Errorf("%s: answer = %v %v, want an ACK %v", test.name, result, ok, test.want)
 		}
 	}
 }
@@ -422,7 +423,7 @@ func TestUDPPathsRunAndCloseConcurrently(t *testing.T) {
 			group.Add(1)
 			go func() {
 				defer group.Done()
-				_ = path.Run(ctx, func(context.Context, uint32, time.Time, bool) error { return nil })
+				_ = path.Run(ctx, func(context.Context, uint32, time.Time, registerResult) error { return nil })
 			}()
 		}
 		go func() {

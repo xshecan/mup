@@ -168,7 +168,7 @@ func (f controllerFixture) reply(t *testing.T, slot int, sequence uint32) {
 	f.controller.mu.Lock()
 	epoch := f.controller.slots[slot].epoch
 	f.controller.mu.Unlock()
-	probe := pathProbeResult{slot: slot, epoch: epoch, sequence: sequence, sentAt: time.Now(), success: true}
+	probe := pathProbeResult{slot: slot, epoch: epoch, sequence: sequence, sentAt: time.Now(), result: registerAcked}
 	if err := f.controller.handleProbe(probe); err != nil {
 		t.Fatalf("handleProbe: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestReusedSlotIgnoresProbesOfTheOldPath(t *testing.T) {
 	if err != nil || added.ID != 1 {
 		t.Fatalf("AddPath = %#v, %v, want slot 1", added, err)
 	}
-	stale := pathProbeResult{slot: 1, epoch: oldEpoch, sequence: 1, sentAt: time.Now(), success: true}
+	stale := pathProbeResult{slot: 1, epoch: oldEpoch, sequence: 1, sentAt: time.Now(), result: registerAcked}
 	if err := fixture.controller.handleProbe(stale); err != nil {
 		t.Fatalf("handleProbe: %v", err)
 	}
@@ -555,5 +555,38 @@ func TestControllerRunStopsWhenAPathLoopFails(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("run did not stop after cancel")
+	}
+}
+
+func TestControllerMarksAPathWithoutReflectorUnhealthy(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t, "198.51.100.1:5000/udp", "198.51.100.2:5000/udp")
+	fixture.controller.mu.Lock()
+	epoch := fixture.controller.slots[1].epoch
+	fixture.controller.mu.Unlock()
+	start := time.Now().Add(-10 * time.Second)
+	for sequence := uint32(1); sequence <= missLimit; sequence++ {
+		probe := pathProbeResult{slot: 1, epoch: epoch, sequence: sequence,
+			sentAt: start.Add(time.Duration(sequence) * time.Second), result: registerNoReflector}
+		if err := fixture.controller.handleProbe(probe); err != nil {
+			t.Fatalf("handleProbe: %v", err)
+		}
+	}
+	paths, err := fixture.controller.Paths()
+	if err != nil || len(paths) != 2 {
+		t.Fatalf("Paths = %v, %v", paths, err)
+	}
+	if paths[1].Healthy || paths[1].Reason != "no reflector" {
+		t.Fatalf("path 1 = healthy %v, reason %q, want unhealthy with no reflector", paths[1].Healthy, paths[1].Reason)
+	}
+	if fixture.dataplane.mask != 0b01 {
+		t.Fatalf("mask = %#b, want only path 0", fixture.dataplane.mask)
+	}
+	// An OK ACK brings the path back and clears the reason.
+	fixture.reply(t, 1, missLimit+1)
+	paths, _ = fixture.controller.Paths()
+	if !paths[1].Healthy || paths[1].Reason != "" {
+		t.Fatalf("path 1 after an ACK = healthy %v, reason %q", paths[1].Healthy, paths[1].Reason)
 	}
 }

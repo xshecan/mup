@@ -53,3 +53,43 @@ func TestRegistrationACKRejectsStaleSequence(t *testing.T) {
 		t.Fatal("stale ACK sequence unexpectedly accepted")
 	}
 }
+
+func TestRegistrationACKResultReadsTheStatus(t *testing.T) {
+	t.Parallel()
+
+	ack := func(status protocol.ControlStatus) []byte {
+		packet := make([]byte, protocol.ControlFrameLength)
+		err := protocol.EncodeControlFrame(packet, protocol.ControlFrame{
+			Type:          protocol.ControlRegisterACK,
+			Transport:     protocol.TransportUDP,
+			Status:        status,
+			PathID:        4,
+			Sequence:      3,
+			ListenPort:    51821,
+			ServerPort:    9002,
+			LeaseSeconds:  30,
+			AdvertisedIP:  netip.MustParseAddr("192.0.2.10"),
+			InstanceNonce: 99,
+		})
+		if err != nil {
+			t.Fatalf("EncodeControlFrame: %v", err)
+		}
+		return packet
+	}
+	if result, ok := registrationACKResult(ack(protocol.ControlStatusOK), 99, 4, 3); !ok || result != registerAcked {
+		t.Fatalf("OK ACK = %v %v, want acked", result, ok)
+	}
+	if result, ok := registrationACKResult(ack(protocol.ControlStatusNoReflector), 99, 4, 3); !ok || result != registerNoReflector {
+		t.Fatalf("no-reflector ACK = %v %v, want no reflector", result, ok)
+	}
+	if err := validateRegistrationACK(ack(protocol.ControlStatusNoReflector), 99, 4, 3); err == nil {
+		t.Fatal("a no-reflector ACK validated as a healthy ACK")
+	}
+	// A status that the client does not act on is not an answer.
+	if _, ok := registrationACKResult(ack(protocol.ControlStatusMalformed), 99, 4, 3); ok {
+		t.Fatal("a malformed-status ACK was taken as an answer")
+	}
+	if _, ok := registrationACKResult(ack(protocol.ControlStatusNoReflector), 99, 4, 2); ok {
+		t.Fatal("an ACK of another sequence was taken as an answer")
+	}
+}

@@ -106,7 +106,7 @@ func TestEncodeControlFrameRejectsInvalidPolicy(t *testing.T) {
 		{name: "path ID", alter: func(frame *ControlFrame) { frame.PathID = MaxPathID + 1 }, err: ErrControlPathID},
 		{name: "return IP without flag", alter: func(frame *ControlFrame) { frame.ReturnIP = netip.MustParseAddr("198.51.100.1") }, err: ErrControlFlags},
 		{name: "flag without return IP", alter: func(frame *ControlFrame) { frame.Flags = ControlFlagReturnIP }, err: ErrControlAddress},
-		{name: "unknown status", alter: func(frame *ControlFrame) { frame.Status = ControlStatusCapacityExhausted + 1 }, err: ErrControlStatus},
+		{name: "unknown status", alter: func(frame *ControlFrame) { frame.Status = ControlStatusNoReflector + 1 }, err: ErrControlStatus},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

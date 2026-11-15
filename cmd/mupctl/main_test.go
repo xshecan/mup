@@ -296,3 +296,21 @@ func TestHumanDuration(t *testing.T) {
 		}
 	}
 }
+
+func TestPathStatusTextShowsTheReason(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		path api.Path
+		want string
+	}{
+		{api.Path{Healthy: true}, "healthy"},
+		{api.Path{Healthy: false}, "unhealthy"},
+		{api.Path{Healthy: false, Reason: "no reflector"}, "unhealthy (no reflector)"},
+		{api.Path{Healthy: true, Reason: "no reflector"}, "healthy"},
+	} {
+		if got := pathStatusText(test.path); got != test.want {
+			t.Errorf("pathStatusText(%+v) = %q, want %q", test.path, got, test.want)
+		}
+	}
+}
