@@ -20,8 +20,12 @@ var (
 	ErrControlReserved   = errors.New("nonzero mup control reserved field")
 	ErrControlLength     = errors.New("invalid mup control frame length")
 	ErrControlTransport  = errors.New("invalid mup control transport")
+	ErrControlPrefix     = errors.New("invalid mup control pool prefix")
 	ErrZeroInstanceNonce = errors.New("instance nonce must be nonzero")
 )
+
+// allControlFlags holds every defined control flag bit.
+const allControlFlags = ControlFlagReturnIP | ControlFlagReturnPool | ControlFlagBalancePerPacket
 
 type ControlFrame struct {
 	Flags         uint8
@@ -36,6 +40,7 @@ type ControlFrame struct {
 	Transport     TransportID
 	AdvertisedIP  netip.Addr
 	ReturnIP      netip.Addr
+	ReturnPrefix  uint8
 }
 
 func EncodeControlFrame(dst []byte, frame ControlFrame) error {
@@ -58,9 +63,12 @@ func EncodeControlFrame(dst []byte, frame ControlFrame) error {
 	binary.BigEndian.PutUint16(dst[16:18], frame.ServerPort)
 	advertised := frame.AdvertisedIP.As4()
 	copy(dst[20:24], advertised[:])
-	if frame.Flags&ControlFlagReturnIP != 0 {
+	if frame.Flags&(ControlFlagReturnIP|ControlFlagReturnPool) != 0 {
 		returnIP := frame.ReturnIP.As4()
 		copy(dst[24:28], returnIP[:])
+	}
+	if frame.Flags&ControlFlagReturnPool != 0 {
+		dst[19] = frame.ReturnPrefix
 	}
 	binary.BigEndian.PutUint64(dst[28:36], frame.InstanceNonce)
 	binary.BigEndian.PutUint32(dst[36:40], frame.Sequence)
@@ -81,7 +89,7 @@ func DecodeControlFrame(src []byte) (ControlFrame, error) {
 	if binary.BigEndian.Uint16(src[8:10]) != ControlFrameLength {
 		return ControlFrame{}, ErrControlLength
 	}
-	if src[18] != 0 || src[19] != 0 || src[44] != 0 || src[45] != 0 || src[46] != 0 || src[47] != 0 {
+	if src[18] != 0 || src[44] != 0 || src[45] != 0 || src[46] != 0 || src[47] != 0 {
 		return ControlFrame{}, ErrControlReserved
 	}
 	frame := ControlFrame{
@@ -97,9 +105,14 @@ func DecodeControlFrame(src []byte) (ControlFrame, error) {
 		Sequence:      binary.BigEndian.Uint32(src[36:40]),
 		LeaseSeconds:  binary.BigEndian.Uint32(src[40:44]),
 	}
-	if frame.Flags&ControlFlagReturnIP != 0 {
+	if frame.Flags&(ControlFlagReturnIP|ControlFlagReturnPool) != 0 {
 		frame.ReturnIP = netip.AddrFrom4([4]byte(src[24:28]))
 	} else if src[24] != 0 || src[25] != 0 || src[26] != 0 || src[27] != 0 {
+		return ControlFrame{}, ErrControlReserved
+	}
+	if frame.Flags&ControlFlagReturnPool != 0 {
+		frame.ReturnPrefix = src[19]
+	} else if src[19] != 0 {
 		return ControlFrame{}, ErrControlReserved
 	}
 	if err := validateControlFrame(frame); err != nil {
@@ -131,7 +144,13 @@ func validateControlFrame(frame ControlFrame) error {
 	if frame.Transport != TransportUDP && frame.Transport != TransportICMP {
 		return ErrControlTransport
 	}
-	if frame.Flags&^ControlFlagReturnIP != 0 {
+	if frame.Flags&^allControlFlags != 0 {
+		return ErrControlFlags
+	}
+	if frame.Flags&ControlFlagReturnIP != 0 && frame.Flags&ControlFlagReturnPool != 0 {
+		return ErrControlFlags
+	}
+	if frame.Flags&ControlFlagBalancePerPacket != 0 && frame.Flags&ControlFlagReturnPool == 0 {
 		return ErrControlFlags
 	}
 	if frame.Status > ControlStatusCapacityExhausted {
@@ -143,11 +162,18 @@ func validateControlFrame(frame ControlFrame) error {
 	if !frame.AdvertisedIP.Is4() || frame.AdvertisedIP.IsUnspecified() {
 		return ErrControlAddress
 	}
-	if frame.Flags&ControlFlagReturnIP != 0 {
+	if frame.Flags&(ControlFlagReturnIP|ControlFlagReturnPool) != 0 {
 		if !frame.ReturnIP.Is4() || frame.ReturnIP.IsUnspecified() {
 			return ErrControlAddress
 		}
 	} else if frame.ReturnIP.IsValid() {
+		return ErrControlFlags
+	}
+	if frame.Flags&ControlFlagReturnPool != 0 {
+		if frame.ReturnPrefix < 1 || frame.ReturnPrefix > 31 {
+			return ErrControlPrefix
+		}
+	} else if frame.ReturnPrefix != 0 {
 		return ErrControlFlags
 	}
 	if frame.InstanceNonce == 0 {

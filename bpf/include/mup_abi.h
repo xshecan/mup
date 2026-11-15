@@ -7,6 +7,15 @@
 #define MUP_MAX_ROUTES_PER_SOURCE 1024U
 #define MUP_TCX_NEXT (-1)
 #define MUP_FLAG_RETURN_IP (1U << 0)
+/*
+ * A route with MUP_FLAG_RETURN_POOL returns through a pool of addresses. The
+ * return_ip field holds the pool base, and the prefix field holds the prefix
+ * length. MUP_FLAG_BALANCE_PER_PACKET picks the per-packet balance mode, and a
+ * route without it uses the per-peer mode.
+ */
+#define MUP_FLAG_RETURN_POOL (1U << 1)
+#define MUP_FLAG_BALANCE_PER_PACKET (1U << 2)
+#define MUP_MAX_POOL 16
 
 enum mup_mode {
 	MUP_MODE_FALLBACK = 0,
@@ -140,7 +149,7 @@ struct registered_path_value_v1 {
 	__u64 expires_at_ns;
 	__be16 path_id;
 	__u8 flags;
-	__u8 padding;
+	__u8 prefix;
 	__be32 return_ip;
 };
 
@@ -190,11 +199,28 @@ struct path_config_v1 {
 	__u8 priority;
 };
 
-/* The return IP of a client path slot, set when flags has MUP_FLAG_RETURN_IP. */
+/*
+ * The return IP of a client path slot, set when flags has MUP_FLAG_RETURN_IP.
+ * With MUP_FLAG_RETURN_POOL the return_ip is a pool base and prefix is its
+ * prefix length, so the client accepts any downstream source in the range.
+ */
 struct path_return_v1 {
 	__be32 return_ip;
 	__u8 flags;
-	__u8 padding[3];
+	__u8 prefix;
+	__u8 padding[2];
+};
+
+/*
+ * reflector_pool_v1 holds the reflectors of one pool, keyed by the pool base.
+ * The Go prober writes it. count is the number of addresses, healthy_mask has
+ * one bit for each healthy address, and addresses holds the pool members. The
+ * server program reads it when it reflects a downstream reply.
+ */
+struct reflector_pool_v1 {
+	__u32 count;
+	__u64 healthy_mask;
+	__be32 addresses[MUP_MAX_POOL];
 };
 
 struct path_state_v1 {
@@ -237,6 +263,7 @@ _Static_assert(sizeof(struct server_route_value_v1) == 32, "server_route_value_v
 _Static_assert(sizeof(struct server_reverse_value_v1) == 56, "server_reverse_value_v1 ABI");
 _Static_assert(sizeof(struct path_config_v1) == 16, "path_config_v1 ABI");
 _Static_assert(sizeof(struct path_return_v1) == 8, "path_return_v1 ABI");
+_Static_assert(sizeof(struct reflector_pool_v1) == 80, "reflector_pool_v1 ABI");
 _Static_assert(sizeof(struct path_state_v1) == 8, "path_state_v1 ABI");
 _Static_assert(sizeof(struct duplicate_key_v1) == 48, "duplicate_key_v1 ABI");
 _Static_assert(sizeof(struct event_v1) == 32, "event_v1 ABI");

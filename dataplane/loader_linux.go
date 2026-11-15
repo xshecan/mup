@@ -5,12 +5,15 @@ package dataplane
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
 	"sync"
 
 	"github.com/cilium/ebpf"
+
+	"github.com/xshecan/mup/protocol"
 )
 
 type Runtime struct {
@@ -20,6 +23,7 @@ type Runtime struct {
 	pinRoot        string
 	peerQuarantine resourceQuarantine[uint32]
 	portQuarantine resourceQuarantine[uint16]
+	pools          map[netip.Addr]PoolInfo
 	closed         bool
 }
 
@@ -40,7 +44,7 @@ func Load(cfg Config) (runtime *Runtime, err error) {
 	}
 	options := &ebpf.CollectionOptions{}
 	options.Maps.PinPath = cfg.PinRoot
-	runtime = &Runtime{pinRoot: cfg.PinRoot}
+	runtime = &Runtime{pinRoot: cfg.PinRoot, pools: make(map[netip.Addr]PoolInfo)}
 	if err := loadMupObjects(&runtime.objects, options); err != nil {
 		return nil, fmt.Errorf("load MUP BPF objects: %w", err)
 	}
@@ -210,6 +214,114 @@ func (r *Runtime) RevokeRegistration(client ClientKey) error {
 		return fmt.Errorf("revoke registration: MUP dataplane is closed")
 	}
 	return revokeRegistration(r.objects.RegistrationByKey, client)
+}
+
+// ObservePool records a return pool from a registration. On the first sight of
+// a pool it seeds the health map with every address healthy, so the server can
+// reflect through the pool at once. The prober refines the health later.
+func (r *Runtime) ObservePool(base netip.Addr, prefix uint8, transport protocol.TransportID) error {
+	addresses, err := poolAddresses(base, prefix)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return fmt.Errorf("observe pool: MUP dataplane is closed")
+	}
+	if _, exists := r.pools[base]; exists {
+		return nil
+	}
+	pool, err := encodeReflectorPool(addresses, nil)
+	if err != nil {
+		return err
+	}
+	baseWord, err := requiredIPv4Word(base, "pool base")
+	if err != nil {
+		return err
+	}
+	if err := r.objects.ReflectorHealth.Update(baseWord, pool, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("seed reflector pool %s: %w", base, err)
+	}
+	r.pools[base] = PoolInfo{Base: base, Prefix: prefix, Transport: transport, Addresses: addresses}
+	return nil
+}
+
+// Reflectors returns every pool address with its current health, sorted by
+// pool base and address.
+func (r *Runtime) Reflectors() ([]Reflector, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return nil, fmt.Errorf("list reflectors: MUP dataplane is closed")
+	}
+	var reflectors []Reflector
+	for base, info := range r.pools {
+		baseWord, err := requiredIPv4Word(base, "pool base")
+		if err != nil {
+			return nil, err
+		}
+		var pool mupReflectorPoolV1
+		if err := r.objects.ReflectorHealth.Lookup(baseWord, &pool); err != nil {
+			if errors.Is(err, ebpf.ErrKeyNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("read reflector pool %s: %w", base, err)
+		}
+		for index, address := range info.Addresses {
+			reflectors = append(reflectors, Reflector{
+				Base:      base,
+				Prefix:    info.Prefix,
+				Transport: info.Transport,
+				Address:   address,
+				Healthy:   pool.HealthyMask&(uint64(1)<<uint(index)) != 0,
+			})
+		}
+	}
+	slices.SortFunc(reflectors, func(a, b Reflector) int {
+		if c := a.Base.Compare(b.Base); c != 0 {
+			return c
+		}
+		return a.Address.Compare(b.Address)
+	})
+	return reflectors, nil
+}
+
+// Pools returns the observed pools, for the prober to probe.
+func (r *Runtime) Pools() []PoolInfo {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	pools := make([]PoolInfo, 0, len(r.pools))
+	for _, pool := range r.pools {
+		pools = append(pools, pool)
+	}
+	return pools
+}
+
+// SetPoolHealth writes the health of a pool. The healthy slice has one entry
+// for each address, in the order of PoolInfo.Addresses.
+func (r *Runtime) SetPoolHealth(base netip.Addr, healthy []bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return fmt.Errorf("set pool health: MUP dataplane is closed")
+	}
+	info, exists := r.pools[base]
+	if !exists {
+		return fmt.Errorf("set pool health: pool %s is not observed", base)
+	}
+	if len(healthy) != len(info.Addresses) {
+		return fmt.Errorf("set pool health: got %d health bits, want %d", len(healthy), len(info.Addresses))
+	}
+	pool, err := encodeReflectorPool(info.Addresses, healthy)
+	if err != nil {
+		return err
+	}
+	baseWord, err := requiredIPv4Word(base, "pool base")
+	if err != nil {
+		return err
+	}
+	return r.objects.ReflectorHealth.Update(baseWord, pool, ebpf.UpdateAny)
 }
 
 func (r *Runtime) UpdatePathState(healthyMask uint8, generation uint32) error {

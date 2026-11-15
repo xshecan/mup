@@ -35,6 +35,8 @@ type PathSettings struct {
 	Transport     protocol.TransportID
 	Priority      uint8
 	ReturnIP      netip.Addr
+	ReturnPrefix  uint8
+	Balance       config.Balance
 }
 
 type ServerSettings struct {
@@ -122,9 +124,20 @@ func encodeGroupSettings(group GroupSettings) (mupPathGroupV1, error) {
 	return mupPathGroupV1{Mode: uint8(group.Mode), PathMask: group.PathMask}, nil
 }
 
-// encodePathReturn encodes the return IP of a path slot. A path without a
-// return IP has an empty entry.
+// encodePathReturn encodes the return IP or return pool of a path slot. A path
+// without a return IP has an empty entry.
 func encodePathReturn(index int, path PathSettings) (mupPathReturnV1, error) {
+	if path.ReturnPrefix != 0 {
+		base, err := requiredIPv4Word(path.ReturnIP, fmt.Sprintf("path %d return pool base", index))
+		if err != nil {
+			return mupPathReturnV1{}, err
+		}
+		flags := protocol.ControlFlagReturnPool
+		if path.Balance == config.BalancePerPacket {
+			flags |= protocol.ControlFlagBalancePerPacket
+		}
+		return mupPathReturnV1{ReturnIp: base, Flags: flags, Prefix: path.ReturnPrefix}, nil
+	}
 	if !path.ReturnIP.IsValid() {
 		return mupPathReturnV1{}, nil
 	}

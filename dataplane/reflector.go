@@ -1,0 +1,76 @@
+package dataplane
+
+import (
+	"fmt"
+	"net/netip"
+
+	"github.com/xshecan/mup/protocol"
+)
+
+// MaxPool is the largest number of addresses in a return pool. It mirrors
+// MUP_MAX_POOL in bpf/include/mup_abi.h.
+const MaxPool = 16
+
+// PoolInfo describes a return pool that the server observed from a
+// registration. The prober uses it to ping the members of an ICMP pool.
+type PoolInfo struct {
+	Base      netip.Addr
+	Prefix    uint8
+	Transport protocol.TransportID
+	Addresses []netip.Addr
+}
+
+// Reflector is one address of a return pool, with its current health. The
+// reflector view of mupctl shows these.
+type Reflector struct {
+	Base      netip.Addr
+	Prefix    uint8
+	Transport protocol.TransportID
+	Address   netip.Addr
+	Healthy   bool
+}
+
+// poolAddresses returns the first addresses of the pool, after the network
+// base. It returns at most MaxPool addresses.
+func poolAddresses(base netip.Addr, prefix uint8) ([]netip.Addr, error) {
+	if !base.Is4() {
+		return nil, fmt.Errorf("pool base %s must be IPv4", base)
+	}
+	if prefix < 1 || prefix > 31 {
+		return nil, fmt.Errorf("pool prefix %d must be between 1 and 31", prefix)
+	}
+	block := uint64(1) << (32 - prefix)
+	count := block - 1
+	if count > MaxPool {
+		count = MaxPool
+	}
+	addresses := make([]netip.Addr, 0, count)
+	address := base.Next()
+	for index := uint64(0); index < count; index++ {
+		addresses = append(addresses, address)
+		address = address.Next()
+	}
+	return addresses, nil
+}
+
+// encodeReflectorPool builds the map value of a pool. A nil healthy slice marks
+// every address healthy. Bit index of the healthy mask matches the address at
+// the same index.
+func encodeReflectorPool(addresses []netip.Addr, healthy []bool) (mupReflectorPoolV1, error) {
+	var pool mupReflectorPoolV1
+	if len(addresses) == 0 || len(addresses) > MaxPool {
+		return pool, fmt.Errorf("pool needs between 1 and %d addresses, got %d", MaxPool, len(addresses))
+	}
+	pool.Count = uint32(len(addresses))
+	for index, address := range addresses {
+		word, err := requiredIPv4Word(address, "pool address")
+		if err != nil {
+			return pool, err
+		}
+		pool.Addresses[index] = word
+		if healthy == nil || healthy[index] {
+			pool.HealthyMask |= uint64(1) << uint(index)
+		}
+	}
+	return pool, nil
+}

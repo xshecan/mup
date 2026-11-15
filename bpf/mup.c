@@ -134,6 +134,22 @@ struct {
 } path_state SEC(".maps");
 
 struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 256);
+	MUP_PINNED;
+	__type(key, __be32);
+	__type(value, struct reflector_pool_v1);
+} reflector_health SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	MUP_PINNED;
+	__type(key, __u32);
+	__type(value, __u32);
+} reflector_cursor SEC(".maps");
+
+struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 16384);
 	MUP_PINNED;
@@ -313,6 +329,14 @@ static __always_inline __u32 mup_mask_has(__u32 mask, __u32 index)
 	return bit;
 }
 
+static __always_inline __u32 mup_mask64_has(__u64 mask, __u32 index)
+{
+	__u64 bit = (mask >> (index & 63)) & 1;
+
+	asm volatile("" : "+r"(bit));
+	return bit;
+}
+
 static __always_inline struct path_config_v1 *select_client_path(
 	const struct path_group_v1 *group, __u32 peer_token)
 {
@@ -382,16 +406,29 @@ static __always_inline struct path_config_v1 *select_client_path(
 	return bpf_map_lookup_elem(&path_config, &selected_index);
 }
 
+/* A prefix mask in network byte order. The BPF target is little-endian. */
+static __always_inline __be32 mup_prefix_netmask(__u8 prefix)
+{
+	if (prefix == 0)
+		return 0;
+	if (prefix >= 32)
+		return 0xffffffff;
+	return __builtin_bswap32(0xffffffffU << (32 - prefix));
+}
+
 /*
  * A downstream packet must come from a path of the group of its peer: from
- * the server of the path, or from the return IP of the path if it has one.
+ * the server of the path, from the return IP of the path if it has one, or
+ * from any address in the return pool of the path if it has a pool.
  */
 static __always_inline int is_client_downstream_source(
 	const struct mup_packet *packet, __u32 path_mask)
 {
 	struct path_config_v1 *path;
 	struct path_return_v1 *path_return;
+	__be32 source = packet->ipv4->source;
 	__be32 expected_ip;
+	int matched;
 	__u16 observed_port = packet->transport == MUP_TRANSPORT_UDP ?
 				  packet->source_port : packet->server_port;
 
@@ -404,11 +441,17 @@ static __always_inline int is_client_downstream_source(
 		path_return = bpf_map_lookup_elem(&path_returns, &key);
 		if (!path || !path_return)
 			continue;
-		expected_ip = (path_return->flags & MUP_FLAG_RETURN_IP) ?
-				      path_return->return_ip :
-				      path->destination_ip;
-		if (expected_ip == packet->ipv4->source &&
-		    path->server_port == observed_port &&
+		if (path_return->flags & MUP_FLAG_RETURN_POOL) {
+			__be32 mask = mup_prefix_netmask(path_return->prefix);
+			matched = (source & mask) ==
+				  (path_return->return_ip & mask);
+		} else {
+			expected_ip = (path_return->flags & MUP_FLAG_RETURN_IP) ?
+					      path_return->return_ip :
+					      path->destination_ip;
+			matched = expected_ip == source;
+		}
+		if (matched && path->server_port == observed_port &&
 		    path->transport == packet->transport)
 			return 1;
 	}
@@ -849,6 +892,63 @@ int mup_client_ingress(struct __sk_buff *skb)
 	return redirect_packet(path->ifindex);
 }
 
+/*
+ * pick_reflector chooses one healthy address from the pool with base base.
+ * The per-peer mode hashes the peer token to a slot, and the per-packet mode
+ * steps a per-CPU cursor. Both start at a slot and walk to the next healthy
+ * slot. It returns 0 when the pool is missing or has no healthy address.
+ */
+__attribute__((noinline)) __be32 pick_reflector(__be32 base, __u8 flags,
+						__u32 peer_token)
+{
+	struct reflector_pool_v1 *pool;
+	__u32 cursor_key = 0;
+	__u32 count;
+	__u32 slot;
+	__u32 min_dist;
+
+	pool = bpf_map_lookup_elem(&reflector_health, &base);
+	if (!pool)
+		return 0;
+	count = pool->count;
+	if (count == 0 || count > MUP_MAX_POOL)
+		return 0;
+	if (flags & MUP_FLAG_BALANCE_PER_PACKET) {
+		__u32 *cursor = bpf_map_lookup_elem(&reflector_cursor,
+						    &cursor_key);
+		if (!cursor)
+			return 0;
+		slot = (*cursor)++ % count;
+	} else {
+		__u32 hash = peer_token * 0x9e3779b1U;
+		hash ^= hash >> 16;
+		slot = hash % count;
+	}
+	/*
+	 * Pick the healthy reflector at slot, or the next healthy one after it.
+	 * The loop is unrolled so the array index is a compile-time constant, and
+	 * mup_mask64_has hides the healthy bit from the verifier. Both keep the
+	 * verifier cost low. The distance from slot avoids a modulo by a runtime
+	 * count.
+	 */
+	min_dist = count;
+	__be32 chosen = 0;
+#pragma clang loop unroll(full)
+	for (int index = 0; index < MUP_MAX_POOL; index++) {
+		__u32 dist;
+
+		if ((__u32)index >= count || !mup_mask64_has(pool->healthy_mask, index))
+			continue;
+		dist = (__u32)index >= slot ? (__u32)index - slot :
+					      (__u32)index + count - slot;
+		if (dist < min_dist) {
+			min_dist = dist;
+			chosen = pool->addresses[index];
+		}
+	}
+	return chosen;
+}
+
 SEC("tc")
 int mup_server_ingress(struct __sk_buff *skb)
 {
@@ -913,8 +1013,19 @@ int mup_server_ingress(struct __sk_buff *skb)
 		if (!local &&
 		    mup_set_peer_token(&packet, reverse->route_key.peer_token))
 			return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
+		__be32 pool_addr = 0;
+		if (reverse->route_value.flags & MUP_FLAG_RETURN_POOL) {
+			pool_addr = pick_reflector(
+				reverse->route_value.return_ip,
+				reverse->route_value.flags,
+				reverse->route_key.peer_token);
+			if (!pool_addr)
+				return count_and_drop(skb, MUP_DROP_NO_PATH);
+		}
 		if (reverse->route_value.transport == MUP_TRANSPORT_UDP) {
 			__be32 source_ip =
+				(reverse->route_value.flags & MUP_FLAG_RETURN_POOL) ?
+				pool_addr :
 				(reverse->route_value.flags & MUP_FLAG_RETURN_IP) ?
 				reverse->route_value.return_ip :
 				reverse->route_value.server_local_ip;
@@ -938,9 +1049,12 @@ int mup_server_ingress(struct __sk_buff *skb)
 			__be32 destination_ip;
 			__u8 type;
 
-			if (reverse->route_value.flags & MUP_FLAG_RETURN_IP) {
+			if (reverse->route_value.flags &
+			    (MUP_FLAG_RETURN_IP | MUP_FLAG_RETURN_POOL)) {
 				source_ip = reverse->route_key.client.advertised_ip;
-				destination_ip = reverse->route_value.return_ip;
+				destination_ip =
+					(reverse->route_value.flags & MUP_FLAG_RETURN_POOL) ?
+					pool_addr : reverse->route_value.return_ip;
 				type = MUP_ICMP_ECHO_REQUEST;
 			} else {
 				source_ip = reverse->route_value.server_local_ip;

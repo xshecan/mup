@@ -15,6 +15,8 @@ type RegistrationSettings struct {
 	AdvertisedIP  netip.Addr
 	InstanceNonce uint64
 	ReturnIP      netip.Addr
+	ReturnPrefix  uint8
+	Balance       config.Balance
 	ListenPort    uint16
 	PathCount     uint8
 	ExpiresAtNS   uint64
@@ -74,7 +76,18 @@ func encodeRegistrationSettings(settings RegistrationSettings) (
 
 	var returnIP uint32
 	var flags uint8
-	if settings.ReturnIP.IsValid() {
+	var prefix uint8
+	if settings.ReturnPrefix != 0 {
+		returnIP, err = requiredIPv4Word(settings.ReturnIP, "registration return pool base")
+		if err != nil {
+			return key, value, pathKey, pathValue, err
+		}
+		flags = protocol.ControlFlagReturnPool
+		if settings.Balance == config.BalancePerPacket {
+			flags |= protocol.ControlFlagBalancePerPacket
+		}
+		prefix = settings.ReturnPrefix
+	} else if settings.ReturnIP.IsValid() {
 		returnIP, err = requiredIPv4Word(settings.ReturnIP, "registration return IP")
 		if err != nil {
 			return key, value, pathKey, pathValue, err
@@ -103,6 +116,7 @@ func encodeRegistrationSettings(settings RegistrationSettings) (
 		ExpiresAtNs: settings.ExpiresAtNS,
 		PathId:      settings.Path.PathID,
 		Flags:       flags,
+		Prefix:      prefix,
 		ReturnIp:    returnIP,
 	}
 	return key, value, pathKey, pathValue, nil

@@ -66,7 +66,8 @@ type mupPathReturnV1 struct {
 	_        structs.HostLayout
 	ReturnIp uint32
 	Flags    uint8
-	Padding  [3]uint8
+	Prefix   uint8
+	Padding  [2]uint8
 }
 
 type mupPathStateV1 struct {
@@ -97,6 +98,14 @@ type mupPeerTokenValueV1 struct {
 	LastSeenNs uint64
 }
 
+type mupReflectorPoolV1 struct {
+	_           structs.HostLayout
+	Count       uint32
+	_           [4]byte
+	HealthyMask uint64
+	Addresses   [16]uint32
+}
+
 type mupRegisteredPathKeyV1 struct {
 	_          structs.HostLayout
 	SourceIp   uint32
@@ -112,7 +121,7 @@ type mupRegisteredPathValueV1 struct {
 	ExpiresAtNs uint64
 	PathId      uint16
 	Flags       uint8
-	Padding     uint8
+	Prefix      uint8
 	ReturnIp    uint32
 }
 
@@ -185,6 +194,8 @@ const (
 	mupMapPathGroups               = "path_groups"
 	mupMapPathReturns              = "path_returns"
 	mupMapPathState                = "path_state"
+	mupMapReflectorCursor          = "reflector_cursor"
+	mupMapReflectorHealth          = "reflector_health"
 	mupMapRegisteredPaths          = "registered_paths"
 	mupMapRegistrationByKey        = "registration_by_key"
 	mupMapServerConfig             = "server_config"
@@ -268,6 +279,8 @@ type mupMapSpecs struct {
 	PathGroups            *ebpf.MapSpec `ebpf:"path_groups"`
 	PathReturns           *ebpf.MapSpec `ebpf:"path_returns"`
 	PathState             *ebpf.MapSpec `ebpf:"path_state"`
+	ReflectorCursor       *ebpf.MapSpec `ebpf:"reflector_cursor"`
+	ReflectorHealth       *ebpf.MapSpec `ebpf:"reflector_health"`
 	RegisteredPaths       *ebpf.MapSpec `ebpf:"registered_paths"`
 	RegistrationByKey     *ebpf.MapSpec `ebpf:"registration_by_key"`
 	ServerConfig          *ebpf.MapSpec `ebpf:"server_config"`
@@ -317,6 +330,8 @@ type mupMaps struct {
 	PathGroups            *ebpf.Map `ebpf:"path_groups"`
 	PathReturns           *ebpf.Map `ebpf:"path_returns"`
 	PathState             *ebpf.Map `ebpf:"path_state"`
+	ReflectorCursor       *ebpf.Map `ebpf:"reflector_cursor"`
+	ReflectorHealth       *ebpf.Map `ebpf:"reflector_health"`
 	RegisteredPaths       *ebpf.Map `ebpf:"registered_paths"`
 	RegistrationByKey     *ebpf.Map `ebpf:"registration_by_key"`
 	ServerConfig          *ebpf.Map `ebpf:"server_config"`
@@ -342,6 +357,8 @@ func (m *mupMaps) Close() error {
 		m.PathGroups,
 		m.PathReturns,
 		m.PathState,
+		m.ReflectorCursor,
+		m.ReflectorHealth,
 		m.RegisteredPaths,
 		m.RegistrationByKey,
 		m.ServerConfig,

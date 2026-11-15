@@ -2,7 +2,12 @@
 
 package dataplane
 
-import "context"
+import (
+	"context"
+	"net/netip"
+
+	"github.com/xshecan/mup/protocol"
+)
 
 type Runtime struct{}
 
@@ -23,6 +28,22 @@ func (*Runtime) RegisterPath(RegistrationSettings) error {
 }
 
 func (*Runtime) RevokeRegistration(ClientKey) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Runtime) ObservePool(netip.Addr, uint8, protocol.TransportID) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Runtime) Pools() []PoolInfo {
+	return nil
+}
+
+func (*Runtime) Reflectors() ([]Reflector, error) {
+	return nil, ErrUnsupportedPlatform
+}
+
+func (*Runtime) SetPoolHealth(netip.Addr, []bool) error {
 	return ErrUnsupportedPlatform
 }
 

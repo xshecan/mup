@@ -52,7 +52,16 @@ const (
 	ControlStatusCapacityExhausted
 )
 
-const ControlFlagReturnIP uint8 = 1 << 0
+const (
+	// ControlFlagReturnIP marks a route with one return IP.
+	ControlFlagReturnIP uint8 = 1 << 0
+	// ControlFlagReturnPool marks a route with a return pool. The return IP
+	// is the pool base, and ReturnPrefix is its prefix length.
+	ControlFlagReturnPool uint8 = 1 << 1
+	// ControlFlagBalancePerPacket picks the per-packet balance mode of a
+	// return pool. A pool without it uses the per-peer mode.
+	ControlFlagBalancePerPacket uint8 = 1 << 2
+)
 
 type DropReason uint32
 
