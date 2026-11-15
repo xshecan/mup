@@ -132,6 +132,8 @@ Every 2 seconds, the server sends one Echo Request to each host address of each 
 - An ICMP member must reply to ping, because it sends the Echo Reply to the client. The members are the live hosts. A member that misses 3 sweeps in a row is unhealthy, and a member that misses 15 sweeps leaves the pool.
 - A UDP member is only a spoofed source, so it does not have to reply to ping. The members are the live hosts first, then the other hosts of the range in order. Every 2 seconds, the server sends a control probe to the client from each member as a spoofed source. The client sends a probe reply to the real server for each probe that arrives. A UDP member is healthy for 6 seconds after its latest probe reply.
 
+If no member of a pool is healthy, the server answers each REGISTER of a path with that pool with the status NO_REFLECTOR. It still registers the path, so the path comes back when a reflector does. A new pool is ready for 6 seconds after its first registration, before the first sweep and the first probe replies. The client counts a NO_REFLECTOR answer as a missed ACK, so the path becomes unhealthy after 3 of them. `mupctl get paths` then shows the path as `unhealthy (no reflector)`. A client before this status cannot decode the answer, so it also counts it as missed.
+
 If a probe reply names the client, the instance nonce, and the path of a live registration, the server accepts it. The member must also be in the pool of that path. When the number of live hosts of a pool changes, the server logs a line. `mupctl get reflectors` shows each member and its health.
 
 ## Packet flow
@@ -265,17 +267,18 @@ The control frame is 48 bytes long, and all integers are big-endian.
 | ---: | ---: | --- | --- |
 | 0 | 4 | magic | 0x4d555043, which is "MUPC" in ASCII. |
 | 4 | 1 | version | 1. |
-| 5 | 1 | type | 1 is REGISTER and 2 is REGISTER_ACK. Types 3 to 6 are reserved. |
+| 5 | 1 | type | 1 is REGISTER, 2 is REGISTER_ACK, 3 is PROBE, and 4 is PROBE_REPLY. Types 5 and 6 are reserved. |
 | 6 | 1 | transport | 0 is UDP and 1 is ICMP. |
-| 7 | 1 | flags | Bit 0 means that the return IP field is set. The other bits must be zero. |
+| 7 | 1 | flags | Bit 0 means that the return IP field holds one return IP. Bit 1 means that it holds the base of a return pool. Bit 2 selects the per-packet balance mode of a pool. The other bits must be zero. |
 | 8 | 2 | length | 48. |
-| 10 | 2 | status | 0 is OK. Values 1 to 6 name errors, but the v1 server does not send them. |
+| 10 | 2 | status | 0 is OK. 7 is NO_REFLECTOR: the return pool of the path has no healthy reflector. Values 1 to 6 name errors, but the server does not send them. |
 | 12 | 2 | path ID | 0 to 7, the slot of the path in the client. |
 | 14 | 2 | listen port | The listen port of the group of the path. |
 | 16 | 2 | server port | The server port. |
-| 18 | 2 | reserved | Zero. |
+| 18 | 1 | reserved | Zero. |
+| 19 | 1 | pool prefix | The prefix length of the return pool, 1 to 31, with flag bit 1. Zero otherwise. |
 | 20 | 4 | advertised IP | The client `-s` address. |
-| 24 | 4 | return IP | The return IP of the path, or zero. |
+| 24 | 4 | return IP | The return IP or the pool base of the path, or zero. In a PROBE_REPLY, the reflector that reached the client. |
 | 28 | 8 | instance nonce | The nonzero random number of the client process. |
 | 36 | 4 | sequence | A counter that goes up by one with each REGISTER on the path. |
 | 40 | 4 | lease seconds | 30. |
