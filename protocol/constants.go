@@ -50,6 +50,11 @@ const (
 	ControlStatusTransportMismatch
 	ControlStatusPathIDInvalid
 	ControlStatusCapacityExhausted
+	// ControlStatusNoReflector answers a REGISTER of a path with a return
+	// pool that has no healthy reflector. The server keeps the registration,
+	// but it cannot return replies on the path, so the client counts the
+	// path as missed.
+	ControlStatusNoReflector
 )
 
 const (

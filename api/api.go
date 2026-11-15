@@ -67,6 +67,7 @@ type Path struct {
 	Interface  string    `json:"interface,omitempty"`
 	Priority   uint8     `json:"priority"`
 	Healthy    bool      `json:"healthy"`
+	Reason     string    `json:"reason,omitempty"`
 	InUse      bool      `json:"in_use"`
 	Misses     int       `json:"misses"`
 	LastACK    time.Time `json:"last_ack,omitzero"`

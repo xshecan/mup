@@ -31,6 +31,10 @@ func (*Runtime) RevokeRegistration(ClientKey) error {
 	return ErrUnsupportedPlatform
 }
 
+func (*Runtime) PoolReady(netip.Addr, protocol.TransportID) (bool, error) {
+	return false, ErrUnsupportedPlatform
+}
+
 func (*Runtime) ObservePool(netip.Addr, uint8, protocol.TransportID) error {
 	return ErrUnsupportedPlatform
 }

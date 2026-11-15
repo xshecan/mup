@@ -35,14 +35,16 @@ type udpControlReply struct {
 	ifindex int
 }
 
-func (r udpControlReply) matches(registration pathRegistration, ifindex int, sequence uint32) bool {
+// answer reads the result of a reply that answers the REGISTER with this
+// sequence. ok is false for a reply that does not answer it.
+func (r udpControlReply) answer(registration pathRegistration, ifindex int, sequence uint32) (registerResult, bool) {
 	if r.source != registration.path.Endpoint() {
-		return false
+		return registerMissed, false
 	}
 	if ifindex > 0 && r.ifindex != ifindex {
-		return false
+		return registerMissed, false
 	}
-	return validateRegistrationACK(r.frame[:], registration.nonce, registration.pathID, sequence) == nil
+	return registrationACKResult(r.frame[:], registration.nonce, registration.pathID, sequence)
 }
 
 type udpControlSockets struct {
@@ -268,42 +270,42 @@ func (s *udpPathConn) Run(ctx context.Context, report probeReporter) error {
 		if err != nil {
 			return err
 		}
-		success, err := s.register(ctx, frame, sentAt, sequence)
+		result, err := s.register(ctx, frame, sentAt, sequence)
 		if err != nil {
 			return err
 		}
-		if err := report(ctx, sequence, sentAt, success); err != nil {
+		if err := report(ctx, sequence, sentAt, result); err != nil {
 			return err
 		}
-		if err := sleepContext(ctx, registrationDelay(success)); err != nil {
+		if err := sleepContext(ctx, registrationDelay(result == registerAcked)); err != nil {
 			return err
 		}
 	}
 }
 
-func (s *udpPathConn) register(ctx context.Context, frame []byte, sentAt time.Time, sequence uint32) (bool, error) {
+func (s *udpPathConn) register(ctx context.Context, frame []byte, sentAt time.Time, sequence uint32) (registerResult, error) {
 	select {
 	case <-s.closed:
-		return false, net.ErrClosed
+		return registerMissed, net.ErrClosed
 	default:
 	}
 	s.drain()
 	if err := s.socket.conn.writeControl(frame, s.destination, s.ifindex); err != nil {
-		return false, nil
+		return registerMissed, nil
 	}
 	timer := time.NewTimer(time.Until(sentAt.Add(controlReplyTimeout)))
 	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return false, nil
+			return registerMissed, nil
 		case <-s.closed:
-			return false, net.ErrClosed
+			return registerMissed, net.ErrClosed
 		case <-timer.C:
-			return false, nil
+			return registerMissed, nil
 		case reply := <-s.waiter.replies:
-			if reply.matches(s.registration, s.ifindex, sequence) {
-				return true, nil
+			if result, ok := reply.answer(s.registration, s.ifindex, sequence); ok {
+				return result, nil
 			}
 		}
 	}

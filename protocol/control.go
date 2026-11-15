@@ -153,7 +153,7 @@ func validateControlFrame(frame ControlFrame) error {
 	if frame.Flags&ControlFlagBalancePerPacket != 0 && frame.Flags&ControlFlagReturnPool == 0 {
 		return ErrControlFlags
 	}
-	if frame.Status > ControlStatusCapacityExhausted {
+	if frame.Status > ControlStatusNoReflector {
 		return ErrControlStatus
 	}
 	if frame.PathID > MaxPathID {

@@ -125,11 +125,11 @@ func (s *icmpPathConn) Run(ctx context.Context, report probeReporter) error {
 		if err != nil {
 			return err
 		}
-		success := s.register(frame, sentAt, sequence)
-		if err := report(ctx, sequence, sentAt, success); err != nil {
+		result := s.register(frame, sentAt, sequence)
+		if err := report(ctx, sequence, sentAt, result); err != nil {
 			return err
 		}
-		if err := sleepContext(ctx, registrationDelay(success)); err != nil {
+		if err := sleepContext(ctx, registrationDelay(result == registerAcked)); err != nil {
 			return err
 		}
 	}
@@ -137,18 +137,18 @@ func (s *icmpPathConn) Run(ctx context.Context, report probeReporter) error {
 
 // register sends one REGISTER in an Echo Request and waits for the matching
 // ACK in an Echo Reply.
-func (s *icmpPathConn) register(frame []byte, sentAt time.Time, sequence uint32) bool {
+func (s *icmpPathConn) register(frame []byte, sentAt time.Time, sequence uint32) registerResult {
 	path := s.registration.path
 	echo := marshalICMPEcho(icmpEchoRequest, path.ServerPort, uint16(sequence), frame)
 	_ = s.connection.SetDeadline(sentAt.Add(controlReplyTimeout))
 	if _, err := s.connection.WriteToIP(echo, s.destination); err != nil {
-		return false
+		return registerMissed
 	}
 	for {
 		// ReadMsgIP keeps the IPv4 header, unlike ReadFromIP.
 		count, _, _, source, err := s.connection.ReadMsgIP(s.buffer, nil)
 		if err != nil {
-			return false
+			return registerMissed
 		}
 		if ipAddress(source.IP) != path.Server {
 			continue
@@ -157,8 +157,8 @@ func (s *icmpPathConn) register(frame []byte, sentAt time.Time, sequence uint32)
 		if parseErr != nil || parsed.echoType != icmpEchoReply || parsed.identifier != path.ServerPort {
 			continue
 		}
-		if validateRegistrationACK(parsed.payload, s.registration.nonce, s.registration.pathID, sequence) == nil {
-			return true
+		if result, ok := registrationACKResult(parsed.payload, s.registration.nonce, s.registration.pathID, sequence); ok {
+			return result
 		}
 	}
 }
@@ -411,9 +411,21 @@ func acceptRegistration(
 	if err := sink.RegisterPath(settings); err != nil {
 		return nil, err
 	}
+	status := protocol.ControlStatusOK
 	if frame.Flags&protocol.ControlFlagReturnPool != 0 {
 		if err := sink.ObservePool(frame.ReturnIP, frame.ReturnPrefix, transport); err != nil {
 			return nil, err
+		}
+		// Without a healthy reflector, the server drops every reply of the
+		// path, so it tells the client, and the client counts the path as
+		// missed. The registration stays, so the path comes back when a
+		// reflector does.
+		ready, err := sink.PoolReady(frame.ReturnIP, transport)
+		if err != nil {
+			return nil, err
+		}
+		if !ready {
+			status = protocol.ControlStatusNoReflector
 		}
 		// A UDP reflector is a spoofed source, so the server probes it toward
 		// the client and the client confirms it. Record the client as a target.
@@ -431,7 +443,7 @@ func acceptRegistration(
 	}
 	ackFrame := frame
 	ackFrame.Type = protocol.ControlRegisterACK
-	ackFrame.Status = protocol.ControlStatusOK
+	ackFrame.Status = status
 	ackFrame.LeaseSeconds = registrationLeaseSeconds
 	ack := make([]byte, protocol.ControlFrameLength)
 	if err := protocol.EncodeControlFrame(ack, ackFrame); err != nil {

@@ -24,6 +24,7 @@ type controlSocket string
 
 type registrationSink interface {
 	ObservePool(base netip.Addr, prefix uint8, transport protocol.TransportID) error
+	PoolReady(base netip.Addr, transport protocol.TransportID) (bool, error)
 	ConfirmReflector(source netip.Addr) error
 	RegisterPath(dataplane.RegistrationSettings) error
 	RevokeRegistration(dataplane.ClientKey) error

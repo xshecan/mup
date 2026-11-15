@@ -112,7 +112,7 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 			path.Transport,
 			orDash(path.ReturnIP),
 			orDash(path.Interface),
-			healthText(path.Healthy),
+			pathStatusText(path),
 			yesNo(path.InUse),
 			lastACK,
 			formatRTT(path.RTTSeconds),
@@ -317,4 +317,14 @@ func orDash(value string) string {
 		return "-"
 	}
 	return value
+}
+
+// pathStatusText shows the health of a path, and the reason of an unhealthy
+// path when the daemon knows it.
+func pathStatusText(path api.Path) string {
+	text := healthText(path.Healthy)
+	if !path.Healthy && path.Reason != "" {
+		text += " (" + path.Reason + ")"
+	}
+	return text
 }

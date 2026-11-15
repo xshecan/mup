@@ -30,6 +30,9 @@ type Runtime struct {
 	peerQuarantine resourceQuarantine[uint32]
 	portQuarantine resourceQuarantine[uint16]
 	pools          map[PoolKey]PoolInfo
+	// poolSeen holds the monotonic time of the first registration of each
+	// pool, for the grace time of PoolReady.
+	poolSeen map[PoolKey]uint64
 	// confirmations holds, for each UDP reflector source the client reported
 	// receiving, the monotonic time of that report. A UDP pool member is healthy
 	// while its confirmation is fresh.
@@ -61,6 +64,7 @@ func Load(cfg Config) (runtime *Runtime, err error) {
 	runtime = &Runtime{
 		pinRoot:       cfg.PinRoot,
 		pools:         make(map[PoolKey]PoolInfo),
+		poolSeen:      make(map[PoolKey]uint64),
 		confirmations: make(map[netip.Addr]uint64),
 	}
 	if err := loadMupObjects(&runtime.objects, options); err != nil {
@@ -270,7 +274,42 @@ func (r *Runtime) ObservePool(base netip.Addr, prefix uint8, transport protocol.
 		return fmt.Errorf("seed reflector pool %s %s: %w", base, transport, err)
 	}
 	r.pools[key] = PoolInfo{Base: base, Prefix: prefix, Transport: transport, Addresses: addresses}
+	if now, err := monotonicDuration(); err == nil {
+		r.poolSeen[key] = uint64(now)
+	}
 	return nil
+}
+
+// PoolReady reports whether a pool can return a reply: one of its members is
+// healthy. A pool is also ready for reflectorConfirmTTL after its first
+// registration, because the first sweep and the first client confirmations
+// mark its members only after that.
+func (r *Runtime) PoolReady(base netip.Addr, transport protocol.TransportID) (bool, error) {
+	key := PoolKey{Base: base, Transport: transport}
+	now, err := monotonicDuration()
+	if err != nil {
+		return false, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return false, fmt.Errorf("check pool: MUP dataplane is closed")
+	}
+	if seen, ok := r.poolSeen[key]; ok && uint64(now) >= seen && uint64(now)-seen < uint64(reflectorConfirmTTL) {
+		return true, nil
+	}
+	mapKey, err := reflectorKey(key)
+	if err != nil {
+		return false, err
+	}
+	var pool mupReflectorPoolV1
+	if err := r.objects.ReflectorPools.Lookup(mapKey, &pool); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read reflector pool %s %s: %w", base, transport, err)
+	}
+	return poolHasHealthy(pool), nil
 }
 
 // Reflectors returns every pool address with its current health, sorted by

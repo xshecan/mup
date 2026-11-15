@@ -102,6 +102,15 @@ func encodeReflectorPool(addresses []netip.Addr, healthy []bool) (mupReflectorPo
 	return pool, nil
 }
 
+// poolHasHealthy reports whether a pool value has a healthy member among its
+// first count addresses, as the server program reads it.
+func poolHasHealthy(pool mupReflectorPoolV1) bool {
+	if pool.Count == 0 || pool.Count > MaxPool {
+		return false
+	}
+	return pool.HealthyMask&(uint64(1)<<pool.Count-1) != 0
+}
+
 // reflectorKey builds the map key of a pool.
 func reflectorKey(key PoolKey) (mupReflectorKeyV1, error) {
 	base, err := requiredIPv4Word(key.Base, "pool base")

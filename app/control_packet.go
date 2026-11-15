@@ -61,13 +61,43 @@ func internetChecksum(data []byte) uint16 {
 	return ^uint16(sum)
 }
 
-func validateRegistrationACK(packet []byte, nonce uint64, pathID uint16, sequence uint32) error {
+// registerResult is the result of one REGISTER.
+type registerResult uint8
+
+const (
+	// registerMissed means that no answer came before the timeout.
+	registerMissed registerResult = iota
+	// registerAcked means that the server accepted the path.
+	registerAcked
+	// registerNoReflector means that the server has no healthy reflector in
+	// the return pool of the path, so it cannot return replies on it.
+	registerNoReflector
+)
+
+// registrationACKResult reads the REGISTER_ACK that answers this request. ok
+// is false for a frame that does not answer it, or that has a status the
+// client does not act on.
+func registrationACKResult(packet []byte, nonce uint64, pathID uint16, sequence uint32) (registerResult, bool) {
 	frame, err := protocol.DecodeControlFrame(packet)
 	if err != nil {
-		return err
+		return registerMissed, false
 	}
-	if frame.Type != protocol.ControlRegisterACK || frame.Status != protocol.ControlStatusOK ||
+	if frame.Type != protocol.ControlRegisterACK ||
 		frame.InstanceNonce != nonce || frame.PathID != pathID || frame.Sequence != sequence {
+		return registerMissed, false
+	}
+	switch frame.Status {
+	case protocol.ControlStatusOK:
+		return registerAcked, true
+	case protocol.ControlStatusNoReflector:
+		return registerNoReflector, true
+	default:
+		return registerMissed, false
+	}
+}
+
+func validateRegistrationACK(packet []byte, nonce uint64, pathID uint16, sequence uint32) error {
+	if result, ok := registrationACKResult(packet, nonce, pathID, sequence); !ok || result != registerAcked {
 		return errors.New("registration ACK does not match request")
 	}
 	return nil

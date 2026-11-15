@@ -26,7 +26,7 @@ const (
 )
 
 // probeReporter passes the result of one REGISTER to the controller.
-type probeReporter func(ctx context.Context, sequence uint32, sentAt time.Time, success bool) error
+type probeReporter func(ctx context.Context, sequence uint32, sentAt time.Time, result registerResult) error
 
 // pathConn owns the control socket of one path.
 type pathConn interface {
@@ -64,7 +64,7 @@ type pathProbeResult struct {
 	epoch    uint64
 	sequence uint32
 	sentAt   time.Time
-	success  bool
+	result   registerResult
 }
 
 type clientPath struct {
@@ -74,6 +74,8 @@ type clientPath struct {
 	priority uint8
 	epoch    uint64
 	cancel   context.CancelFunc
+	// last is the result of the latest REGISTER of the path.
+	last registerResult
 }
 
 // pathGroup is the runtime state of one configured group.
@@ -193,11 +195,11 @@ func (c *clientController) launchLocked(slot int, path config.Path, group *pathG
 	epoch := c.nextEpoch
 	pathContext, cancel := context.WithCancel(c.ctx)
 	c.slots[slot] = &clientPath{path: path, group: group, ifindex: ifindex, priority: priority, epoch: epoch, cancel: cancel}
-	report := func(ctx context.Context, sequence uint32, sentAt time.Time, success bool) error {
+	report := func(ctx context.Context, sequence uint32, sentAt time.Time, result registerResult) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case c.probes <- pathProbeResult{slot: slot, epoch: epoch, sequence: sequence, sentAt: sentAt, success: success}:
+		case c.probes <- pathProbeResult{slot: slot, epoch: epoch, sequence: sequence, sentAt: sentAt, result: result}:
 			return nil
 		}
 	}
@@ -228,8 +230,11 @@ func (c *clientController) handleProbe(probe pathProbeResult) error {
 	if err := c.health.Sent(probe.slot, probe.sequence, probe.sentAt); err != nil {
 		return err
 	}
+	current.last = probe.result
 	changed := false
-	if probe.success {
+	// A path without a healthy reflector counts as missed, because the
+	// server cannot return replies on it.
+	if probe.result == registerAcked {
 		transition, _, err := c.health.Reply(probe.slot, probe.sequence, time.Now())
 		if err != nil {
 			return err
@@ -495,6 +500,10 @@ func (c *clientController) pathLocked(slot int, inUse [config.MaxPaths]bool) api
 	if name == "" {
 		name = c.interfaceName(current.ifindex)
 	}
+	var reason string
+	if !health.Healthy && current.last == registerNoReflector {
+		reason = "no reflector"
+	}
 	var returnIP string
 	switch {
 	case current.path.IsPool():
@@ -512,6 +521,7 @@ func (c *clientController) pathLocked(slot int, inUse [config.MaxPaths]bool) api
 		Interface:  name,
 		Priority:   current.priority,
 		Healthy:    health.Healthy,
+		Reason:     reason,
 		InUse:      inUse[slot],
 		Misses:     health.Misses,
 		LastACK:    health.LastReply,
