@@ -33,7 +33,7 @@ Commands:
   get clients                            List the clients that are registered on a server
   get reflectors                         List the return-pool reflectors of a server and their health
   get drops                              List the drop counters
-  add path SERVER[%IFACE]:PORT/udp|icmp [via RETURN_IP]
+  add path SERVER[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP]
                                          Add a path to a group
   delete path ID                         Remove a path from a client
   set mode fallback|balancer|burst       Change the path mode of a group
@@ -213,7 +213,7 @@ func parseCommand(opts options) (command, error) {
 	case "add":
 		if len(args) != 3 && !(len(args) == 5 && args[3] == "via") &&
 			!(len(args) == 7 && args[3] == "via" && args[5] == "balance") {
-			return nil, fmt.Errorf("add path takes SERVER[%%IFACE]:PORT/udp|icmp [via RETURN_IP | via POOL_CIDR balance MODE]")
+			return nil, fmt.Errorf("add path takes SERVER[%%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP | via POOL_CIDR balance MODE]")
 		}
 		if !isPathResource(args[1]) {
 			return nil, fmt.Errorf("add supports only paths")

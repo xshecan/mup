@@ -58,10 +58,14 @@ type ServerStatus struct {
 // Path is one client path. ListenPort names its group. InUse reports whether
 // the mode of the group sends traffic on the path.
 type Path struct {
-	ID         int       `json:"id"`
-	ListenPort uint16    `json:"listen_port"`
-	Server     string    `json:"server"`
-	Port       uint16    `json:"port"`
+	ID         int    `json:"id"`
+	ListenPort uint16 `json:"listen_port"`
+	Server     string `json:"server"`
+	Port       uint16 `json:"port"`
+	// FirstPort and LastPort are the server port range of a path that can
+	// move between server ports. Port is the server port that it uses now.
+	FirstPort  uint16    `json:"first_port,omitempty"`
+	LastPort   uint16    `json:"last_port,omitempty"`
 	Transport  string    `json:"transport"`
 	ReturnIP   string    `json:"return_ip,omitempty"`
 	Interface  string    `json:"interface,omitempty"`

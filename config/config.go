@@ -199,8 +199,11 @@ func (c Client) Validate() error {
 		return errors.New("client requires at least one server")
 	}
 	listenPorts := make(map[uint16]struct{}, len(c.Groups))
-	owners := make(map[netip.AddrPort]uint16, MaxPaths)
-	seen := make(map[Path]struct{}, MaxPaths)
+	type groupPath struct {
+		path       Path
+		listenPort uint16
+	}
+	var seen []groupPath
 	for _, group := range c.Groups {
 		if err := group.validate(); err != nil {
 			return err
@@ -210,15 +213,15 @@ func (c Client) Validate() error {
 		}
 		listenPorts[group.ListenPort] = struct{}{}
 		for _, path := range group.Paths {
-			if _, exists := seen[path.Route()]; exists {
-				return fmt.Errorf("duplicate client route %s", path.Route())
+			for _, earlier := range seen {
+				if earlier.path.SameRoute(path) {
+					return fmt.Errorf("client routes %s and %s share a server port", earlier.path, path)
+				}
+				if earlier.listenPort != group.ListenPort && earlier.path.SharesServerPort(path) {
+					return fmt.Errorf("%s and %s are in the servers of listen ports %d and %d, but an address and port can serve one listen port", earlier.path, path, earlier.listenPort, group.ListenPort)
+				}
 			}
-			seen[path.Route()] = struct{}{}
-			owner, exists := owners[path.Endpoint()]
-			if exists && owner != group.ListenPort {
-				return fmt.Errorf("%s is in the servers of listen ports %d and %d, but an address and port can serve one listen port", path.Endpoint(), owner, group.ListenPort)
-			}
-			owners[path.Endpoint()] = group.ListenPort
+			seen = append(seen, groupPath{path: path, listenPort: group.ListenPort})
 		}
 	}
 	if len(seen) > MaxPaths {
@@ -250,9 +253,14 @@ func (g Group) validate() error {
 // and an ICMP reply goes to the return IP as an Echo Request. If ReturnPrefix
 // is nonzero, ReturnIP is a pool base and the server spreads the replies over
 // the pool by Balance.
+//
+// If LastPort is nonzero, the path has the server ports from ServerPort to
+// LastPort. It starts on ServerPort, and the client moves it to another port
+// of the range when the server stops answering it.
 type Path struct {
 	Server       netip.Addr
 	ServerPort   uint16
+	LastPort     uint16
 	Transport    protocol.TransportID
 	Interface    string
 	ReturnIP     netip.Addr
@@ -265,14 +273,50 @@ func (p Path) IsPool() bool {
 	return p.ReturnPrefix != 0
 }
 
-// String formats the path as SERVER[%IFACE]:PORT/TRANSPORT [via RETURN_IP],
-// the form that ParsePath accepts.
+// HasPortRange reports whether the path has more than one server port.
+func (p Path) HasPortRange() bool {
+	return p.LastPort > p.ServerPort
+}
+
+// Ports returns the server ports of the path.
+func (p Path) Ports() PortRange {
+	if p.HasPortRange() {
+		return PortRange{First: p.ServerPort, Last: p.LastPort}
+	}
+	return SinglePort(p.ServerPort)
+}
+
+// AtPort returns the path on one server port of its range.
+func (p Path) AtPort(port uint16) Path {
+	p.ServerPort = port
+	p.LastPort = 0
+	return p
+}
+
+// SameRoute reports whether two paths go to the same server with the same
+// transport and interface, on server port ranges that share a port. Two such
+// paths can register as one path on the server.
+func (p Path) SameRoute(other Path) bool {
+	return p.Server == other.Server && p.Transport == other.Transport &&
+		p.Interface == other.Interface && p.SharesServerPort(other)
+}
+
+// SharesServerPort reports whether two paths go to the same server on server
+// port ranges that share a port.
+func (p Path) SharesServerPort(other Path) bool {
+	ports, otherPorts := p.Ports(), other.Ports()
+	return p.Server == other.Server &&
+		ports.First <= otherPorts.Last && otherPorts.First <= ports.Last
+}
+
+// String formats the path as SERVER[%IFACE]:PORT[-LAST]/TRANSPORT
+// [via RETURN_IP], the form that ParsePath accepts.
 func (p Path) String() string {
 	host := p.Server.String()
 	if p.Interface != "" {
 		host += "%" + p.Interface
 	}
-	text := fmt.Sprintf("%s:%d/%s", host, p.ServerPort, p.Transport)
+	text := fmt.Sprintf("%s:%s/%s", host, p.Ports(), p.Transport)
 	if p.IsPool() {
 		text += fmt.Sprintf(" via %s/%d balance %s", p.ReturnIP, p.ReturnPrefix, p.Balance)
 	} else if p.ReturnIP.IsValid() {
@@ -281,16 +325,7 @@ func (p Path) String() string {
 	return text
 }
 
-// Route returns the path without its return IP or pool. Two paths with the
-// same route are the same path.
-func (p Path) Route() Path {
-	p.ReturnIP = netip.Addr{}
-	p.ReturnPrefix = 0
-	p.Balance = BalancePerPeer
-	return p
-}
-
-// Endpoint returns the address and port of the server of the path.
+// Endpoint returns the address and the first server port of the path.
 func (p Path) Endpoint() netip.AddrPort {
 	return netip.AddrPortFrom(p.Server, p.ServerPort)
 }
@@ -312,6 +347,9 @@ func (p Path) validate() error {
 	}
 	if p.ServerPort == 0 {
 		return errors.New("server path port must be nonzero")
+	}
+	if p.LastPort != 0 && p.LastPort <= p.ServerPort {
+		return errors.New("the last server port of a path must be above the first")
 	}
 	if p.Transport > protocol.TransportICMP {
 		return fmt.Errorf("invalid transport %d", uint8(p.Transport))
@@ -375,9 +413,10 @@ func (s Server) Validate() error {
 	return nil
 }
 
-// ParsePath parses SERVER[%IFACE]:PORT/udp or SERVER[%IFACE]:PORT/icmp. It
-// accepts an optional "via RETURN_IP", or "via POOL_CIDR" with an optional
-// "balance per-peer" or "balance per-packet" after the pool.
+// ParsePath parses SERVER[%IFACE]:PORT/udp or SERVER[%IFACE]:PORT/icmp, where
+// PORT can be a range FIRST-LAST. It accepts an optional "via RETURN_IP", or
+// "via POOL_CIDR" with an optional "balance per-peer" or "balance per-packet"
+// after the pool.
 func ParsePath(raw string) (Path, error) {
 	fields := strings.Fields(raw)
 	var returnIP netip.Addr
@@ -431,9 +470,17 @@ func ParsePath(raw string) (Path, error) {
 	if err != nil {
 		return Path{}, fmt.Errorf("invalid server endpoint: %w", err)
 	}
-	serverPort, transportID, err := transport.ParsePortSpec(portText + "/" + transportName)
+	ports, err := ParsePortRange(portText)
 	if err != nil {
 		return Path{}, err
+	}
+	serverPort, transportID, err := transport.ParsePortSpec(strconv.Itoa(int(ports.First)) + "/" + transportName)
+	if err != nil {
+		return Path{}, err
+	}
+	var lastPort uint16
+	if ports.Last > ports.First {
+		lastPort = ports.Last
 	}
 	addressText, interfaceName, hasInterface := strings.Cut(host, "%")
 	if hasInterface && (interfaceName == "" || strings.Contains(interfaceName, "%")) {
@@ -443,7 +490,7 @@ func ParsePath(raw string) (Path, error) {
 	if err != nil {
 		return Path{}, errors.New("server path address must be a nonzero IPv4")
 	}
-	path := Path{Server: address, ServerPort: serverPort, Transport: transportID, Interface: interfaceName, ReturnIP: returnIP, ReturnPrefix: returnPrefix, Balance: balance}
+	path := Path{Server: address, ServerPort: serverPort, LastPort: lastPort, Transport: transportID, Interface: interfaceName, ReturnIP: returnIP, ReturnPrefix: returnPrefix, Balance: balance}
 	if err := path.validate(); err != nil {
 		return Path{}, err
 	}

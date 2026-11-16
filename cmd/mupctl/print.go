@@ -97,7 +97,7 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 	table := newTable(w)
 	header := []string{"ID", "GROUP", "SERVER", "TRANSPORT", "VIA", "INTERFACE", "STATUS", "IN USE", "LAST ACK", "RTT"}
 	if wide {
-		header = append(header, "PRIORITY", "MISSES")
+		header = append(header, "PORTS", "PRIORITY", "MISSES")
 	}
 	row(table, header...)
 	for _, path := range paths {
@@ -118,7 +118,11 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 			formatRTT(path.RTTSeconds),
 		}
 		if wide {
-			cells = append(cells, strconv.Itoa(int(path.Priority)), strconv.Itoa(path.Misses))
+			ports := "-"
+			if path.LastPort > path.FirstPort {
+				ports = fmt.Sprintf("%d-%d", path.FirstPort, path.LastPort)
+			}
+			cells = append(cells, ports, strconv.Itoa(int(path.Priority)), strconv.Itoa(path.Misses))
 		}
 		row(table, cells...)
 	}

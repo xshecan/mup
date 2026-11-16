@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"math/bits"
+	"math/rand/v2"
 	"net"
 	"net/netip"
 	"strconv"
@@ -23,6 +25,13 @@ const (
 	missLimit           = 3
 	registrationRefresh = 10 * time.Second
 	registrationRetry   = time.Second
+
+	// portMoveMisses is the number of REGISTER frames in a row without an
+	// answer that moves a path with a port range to another server port.
+	portMoveMisses = 10
+	// portMoveMaxDoublings limits the wait between two moves without an
+	// answer to 16 times the first wait.
+	portMoveMaxDoublings = 4
 )
 
 // probeReporter passes the result of one REGISTER to the controller.
@@ -68,14 +77,27 @@ type pathProbeResult struct {
 }
 
 type clientPath struct {
+	// path is the configured path. Its port range can have more than one
+	// server port.
 	path     config.Path
 	group    *pathGroup
 	ifindex  int
 	priority uint8
-	epoch    uint64
-	cancel   context.CancelFunc
+	// port is the server port that the path uses now.
+	port   uint16
+	epoch  uint64
+	cancel context.CancelFunc
 	// last is the result of the latest REGISTER of the path.
 	last registerResult
+	// missed counts the REGISTER frames in a row without an answer.
+	missed int
+	// moves counts the port moves since the last answer.
+	moves int
+}
+
+// runtimePath is the path on the server port that it uses now.
+func (p *clientPath) runtimePath() config.Path {
+	return p.path.AtPort(p.port)
 }
 
 // pathGroup is the runtime state of one configured group.
@@ -96,14 +118,17 @@ type clientController struct {
 	resolver      routeResolver
 	open          pathOpener
 	interfaceName func(int) string
-	health        *control.HealthEngine
-	slots         [config.MaxPaths]*clientPath
-	nextPriority  int
-	nextEpoch     uint64
-	probes        chan pathProbeResult
-	failures      chan error
-	ctx           context.Context
-	startedAt     time.Time
+	// pickPort chooses the next server port of a path in its range.
+	pickPort     func(ports config.PortRange, current uint16) uint16
+	logger       *log.Logger
+	health       *control.HealthEngine
+	slots        [config.MaxPaths]*clientPath
+	nextPriority int
+	nextEpoch    uint64
+	probes       chan pathProbeResult
+	failures     chan error
+	ctx          context.Context
+	startedAt    time.Time
 }
 
 func newClientController(
@@ -113,6 +138,7 @@ func newClientController(
 	resolver routeResolver,
 	open pathOpener,
 	startedAt time.Time,
+	logger *log.Logger,
 ) *clientController {
 	groups := make([]*pathGroup, 0, len(settings.Groups))
 	for _, group := range settings.Groups {
@@ -127,6 +153,8 @@ func newClientController(
 		resolver:      resolver,
 		open:          open,
 		interfaceName: interfaceName,
+		pickPort:      randomOtherPort,
+		logger:        logger,
 		health:        control.NewHealthEngine(config.MaxPaths, controlReplyTimeout, missLimit),
 		probes:        make(chan pathProbeResult, 2*config.MaxPaths),
 		failures:      make(chan error, config.MaxPaths),
@@ -162,7 +190,9 @@ func (c *clientController) start(ctx context.Context) error {
 	slot := 0
 	for index, group := range c.groups {
 		for _, path := range c.client.Groups[index].Paths {
-			conn, err := c.open(c.registrationLocked(group, path, slot))
+			settings := c.initial[slot]
+			current := &clientPath{path: path, group: group, ifindex: settings.Ifindex, priority: settings.Priority, port: path.ServerPort}
+			conn, err := c.open(c.registrationLocked(group, current.runtimePath(), slot))
 			if err != nil {
 				return err
 			}
@@ -170,8 +200,7 @@ func (c *clientController) start(ctx context.Context) error {
 				_ = conn.Close()
 				return err
 			}
-			settings := c.initial[slot]
-			c.launchLocked(slot, path, group, settings.Ifindex, settings.Priority, conn)
+			c.launchLocked(slot, current, conn)
 			slot++
 		}
 	}
@@ -179,6 +208,7 @@ func (c *clientController) start(ctx context.Context) error {
 	return c.publishHealthLocked()
 }
 
+// registrationLocked takes the path on the server port that it uses now.
 func (c *clientController) registrationLocked(group *pathGroup, path config.Path, slot int) pathRegistration {
 	return pathRegistration{
 		advertisedIP: c.client.AdvertisedIP,
@@ -190,11 +220,13 @@ func (c *clientController) registrationLocked(group *pathGroup, path config.Path
 	}
 }
 
-func (c *clientController) launchLocked(slot int, path config.Path, group *pathGroup, ifindex int, priority uint8, conn pathConn) {
+func (c *clientController) launchLocked(slot int, current *clientPath, conn pathConn) {
 	c.nextEpoch++
 	epoch := c.nextEpoch
 	pathContext, cancel := context.WithCancel(c.ctx)
-	c.slots[slot] = &clientPath{path: path, group: group, ifindex: ifindex, priority: priority, epoch: epoch, cancel: cancel}
+	current.epoch = epoch
+	current.cancel = cancel
+	c.slots[slot] = current
 	report := func(ctx context.Context, sequence uint32, sentAt time.Time, result registerResult) error {
 		select {
 		case <-ctx.Done():
@@ -231,6 +263,12 @@ func (c *clientController) handleProbe(probe pathProbeResult) error {
 		return err
 	}
 	current.last = probe.result
+	if probe.result == registerMissed {
+		current.missed++
+	} else {
+		current.missed = 0
+		current.moves = 0
+	}
 	changed := false
 	// A path without a healthy reflector counts as missed, because the
 	// server cannot return replies on it.
@@ -246,9 +284,66 @@ func (c *clientController) handleProbe(probe pathProbeResult) error {
 		}
 	}
 	if changed {
-		return c.publishHealthLocked()
+		if err := c.publishHealthLocked(); err != nil {
+			return err
+		}
+	}
+	if current.path.HasPortRange() && current.missed >= portMoveThreshold(current.moves) {
+		return c.movePortLocked(probe.slot)
 	}
 	return nil
+}
+
+// portMoveThreshold is the number of REGISTER frames in a row without an
+// answer that moves a path. It doubles with each move without an answer.
+func portMoveThreshold(moves int) int {
+	return portMoveMisses << min(moves, portMoveMaxDoublings)
+}
+
+// movePortLocked moves a path that the server stopped answering to another
+// server port of its range. A filter on the way can drop the packets of one
+// flow and pass the others, so a new server port can get through. The new
+// control loop starts before the old one stops, so that the two loops of a
+// UDP path share the control socket of the group.
+func (c *clientController) movePortLocked(slot int) error {
+	current := c.slots[slot]
+	port := c.pickPort(current.path.Ports(), current.port)
+	moved := &clientPath{
+		path:     current.path,
+		group:    current.group,
+		ifindex:  current.ifindex,
+		priority: current.priority,
+		port:     port,
+		last:     current.last,
+		moves:    current.moves + 1,
+	}
+	conn, err := c.open(c.registrationLocked(current.group, moved.runtimePath(), slot))
+	if err != nil {
+		// The path stays on its port, and the next misses try again.
+		c.logger.Printf("client path %d: cannot move to server port %d: %v", slot, port, err)
+		current.missed = 0
+		return nil
+	}
+	settings := clientPathSettings(moved.runtimePath(), c.client.AdvertisedIP, current.ifindex, current.priority)
+	if err := c.dataplane.SetPath(slot, settings); err != nil {
+		_ = conn.Close()
+		return err
+	}
+	c.logger.Printf("client path %d: no answer to %d registrations on server port %d, so it moved to port %d",
+		slot, current.missed, current.port, port)
+	current.cancel()
+	c.launchLocked(slot, moved, conn)
+	return nil
+}
+
+// randomOtherPort chooses a port of the range other than the current port. The
+// range has at least two ports.
+func randomOtherPort(ports config.PortRange, current uint16) uint16 {
+	port := ports.First + uint16(rand.IntN(ports.Len()-1))
+	if port >= current {
+		port++
+	}
+	return port
 }
 
 func (c *clientController) publishHealthLocked() error {
@@ -297,11 +392,11 @@ func (c *clientController) AddPath(raw string, listenPort uint16) (api.Path, err
 			}
 			continue
 		}
-		if current.path.Route() == path.Route() {
-			return api.Path{}, conflict("path %s already exists as path %d", path, index)
+		if current.path.SameRoute(path) {
+			return api.Path{}, conflict("path %s shares a server port with path %d", path, index)
 		}
-		if current.group != group && current.path.Endpoint() == path.Endpoint() {
-			return api.Path{}, conflict("server %s is in the group of listen port %d, and a server can serve one group", path.Endpoint(), current.group.settings.ListenPort)
+		if current.group != group && current.path.SharesServerPort(path) {
+			return api.Path{}, conflict("server %s:%s is in the group of listen port %d, and a server port can serve one group", path.Server, path.Ports(), current.group.settings.ListenPort)
 		}
 	}
 	if slot < 0 {
@@ -317,7 +412,7 @@ func (c *clientController) AddPath(raw string, listenPort uint16) (api.Path, err
 	if ifindex <= 0 {
 		return api.Path{}, badRequest(fmt.Errorf("resolve path: invalid interface index %d", ifindex))
 	}
-	conn, err := c.open(c.registrationLocked(group, path, slot))
+	conn, err := c.open(c.registrationLocked(group, path.AtPort(path.ServerPort), slot))
 	if err != nil {
 		return api.Path{}, err
 	}
@@ -326,7 +421,7 @@ func (c *clientController) AddPath(raw string, listenPort uint16) (api.Path, err
 		return api.Path{}, err
 	}
 	priority := uint8(c.nextPriority)
-	settings := clientPathSettings(path, c.client.AdvertisedIP, ifindex, priority)
+	settings := clientPathSettings(path.AtPort(path.ServerPort), c.client.AdvertisedIP, ifindex, priority)
 	if err := c.dataplane.SetPath(slot, settings); err != nil {
 		_ = conn.Close()
 		return api.Path{}, err
@@ -343,7 +438,7 @@ func (c *clientController) AddPath(raw string, listenPort uint16) (api.Path, err
 		return api.Path{}, err
 	}
 	c.nextPriority++
-	c.launchLocked(slot, path, group, ifindex, priority, conn)
+	c.launchLocked(slot, &clientPath{path: path, group: group, ifindex: ifindex, priority: priority, port: path.ServerPort}, conn)
 	return c.pathLocked(slot, c.inUseSlotsLocked()), nil
 }
 
@@ -503,11 +598,17 @@ func (c *clientController) pathLocked(slot int, inUse [config.MaxPaths]bool) api
 	case current.path.ReturnIP.IsValid():
 		returnIP = current.path.ReturnIP.String()
 	}
+	var firstPort, lastPort uint16
+	if current.path.HasPortRange() {
+		firstPort, lastPort = current.path.ServerPort, current.path.LastPort
+	}
 	return api.Path{
 		ID:         slot,
 		ListenPort: current.group.settings.ListenPort,
 		Server:     current.path.Server.String(),
-		Port:       current.path.ServerPort,
+		Port:       current.port,
+		FirstPort:  firstPort,
+		LastPort:   lastPort,
 		Transport:  current.path.Transport.String(),
 		ReturnIP:   returnIP,
 		Interface:  name,

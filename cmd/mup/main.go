@@ -20,7 +20,7 @@ import (
 const usage = `usage:
   mup --config FILE
   mup server -p PORT[-LAST] -r TARGET_IP:PORT [--target-ingress] [--control-socket PATH]
-  mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT/udp|icmp [via RETURN_IP]" [-u ...] -s CLIENT_IP
+  mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP]" [-u ...] -s CLIENT_IP
              [-r RETURN_IP] [--mode fallback|balancer|burst] [--control-socket PATH]
 `
 
@@ -127,7 +127,7 @@ func parseClientArgs(args []string) (*config.Client, error) {
 	var port int
 	var advertisedText, returnIPText, modeName, controlSocket string
 	fs.IntVar(&port, "p", 0, "local WireGuard UDP listen port")
-	fs.Var(&rawPaths, "u", "server path as IPv4:PORT/udp or /icmp")
+	fs.Var(&rawPaths, "u", "server path as IPv4:PORT/udp or /icmp, where PORT can be a range FIRST-LAST")
 	fs.StringVar(&advertisedText, "s", "", "advertised client IPv4")
 	fs.StringVar(&returnIPText, "r", "", "return IPv4 of each -u path without its own via")
 	fs.StringVar(&modeName, "mode", "fallback", "fallback, balancer, or burst")
