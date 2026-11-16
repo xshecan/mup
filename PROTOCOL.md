@@ -292,6 +292,18 @@ The client measures the health of each path with the ACKs to its REGISTER frames
 
 A dead path becomes unhealthy about 5 to 15 seconds after it fails. The delay depends on the time that remains until the next REGISTER. If no path of a group is healthy, the client drops the upstream packets of that group and counts reason 15.
 
+### Port moves
+
+A path can have a range of server ports. A filter on the way can drop the packets of one flow and pass the others, so a path that gets no ACK on one server port can get through on another. The path starts on the first port of its range. If 10 REGISTER frames in a row get no answer, the client moves the path to a random other port of the range. With the ACK timeout and the retry of 1 second, the first move comes about 19 seconds after the last answer. Each move without an answer doubles the number of frames before the next move, up to 160. An ACK or a NO_REFLECTOR answer resets the count to 10, and a NO_REFLECTOR answer never moves a path, because the server received the frame.
+
+The client moves a path in this order:
+
+1. It opens the control socket of the path on the new port. A UDP path joins the control socket of its group again, so the socket stays open.
+2. It writes the new port to `path_config`.
+3. It stops the REGISTER loop of the old port and starts the loop of the new port.
+
+The path stays unhealthy until the first ACK on the new port. A result from the loop of the old port has no effect on the moved path. The server needs no change, because it learns the new port from the REGISTER frames. Each server route takes the new port with the next upstream packet of its peer. The registration of the old port ends with its lease after 30 seconds. The client does not save a move, so the path starts on the first port again at the next start.
+
 ## Dataplane state
 
 Pinned BPF maps hold all dataplane state. Go writes the configuration and the registrations. The programs create routes, and Go expires them.
@@ -347,6 +359,7 @@ The sweep copies each map before it deletes entries, because a deletion restarts
 | Registration retry | 1 s | Time before the next REGISTER after a missed ACK. |
 | ACK timeout | 900 ms | Time that the client waits for a REGISTER_ACK. |
 | Missed ACKs | 3 | Missed ACKs in a row that make a path unhealthy. |
+| Port move | 10 to 160 | REGISTER frames in a row without an answer that move a path with a port range. |
 | Registration lease | 30 s | Life of a registration without a new REGISTER. |
 | Route idle timeout | 180 s | Life of a route without traffic. |
 | Quarantine | 120 s | Wait before a token or port goes back into use. |

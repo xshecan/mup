@@ -140,13 +140,33 @@ server:
 | `client.control_socket` | `--control-socket` | Optional. The socket for `mupctl`. An empty value turns the socket off. |
 | `client.servers[].port` | `-p` | The port where the group receives packets from its peers. |
 | `client.servers[].mode` | `--mode` | Optional. The path mode of the group. The default is `fallback`. |
-| `client.servers[].routes` | `-u` | The paths of the group, in the form of the `-u` flag. A path can end with `via RETURN_IP`. |
+| `client.servers[].routes` | `-u` | The paths of the group, in the form of the `-u` flag. A path can end with `via RETURN_IP`. The server port of a path can be a range, `FIRST-LAST`. See [Server port ranges](#server-port-ranges). |
 | `server.port` | `-p` | The UDP ports and the ICMP Echo identifiers that the server accepts, as `PORT` or `FIRST-LAST`, for example `5000-6000`. |
 | `server.target` | `-r` | The WireGuard target that receives all traffic. |
 | `server.control_socket` | `--control-socket` | Optional. The socket for `mupctl`. An empty value turns the socket off. |
 | `server.target_ingress` | `--target-ingress` | Optional. Delivers each packet into the ingress hook of the interface that holds the target address, from the advertised IP of the client. Use it for a target on the server host with its own TC program on that interface, for example a WireGuard router with an eBPF fast path. |
 
 The daemon does not start with an unknown key in the file. A value can use `${VARIABLE}`, or `${VARIABLE:default}` with a default value.
+
+## Server port ranges
+
+A filter on the network can drop the packets of one flow and pass the packets of the other flows. A path then gets no ACK on its server port, but another server port of the same server gets through. To let the client move such a path, give its route a range of server ports:
+
+```yaml
+routes:
+  - 203.0.113.5:5000-5499/udp via 94.184.45.48/28
+  - 203.0.113.5:5500-5999/udp via 194.225.72.0/28
+  - 203.0.113.5:5000-5999/icmp via 94.184.45.48/28
+```
+
+The path starts on the first port of its range. If 10 REGISTER frames in a row get no answer, the client moves the path to a random other port of the range, and the log shows the move. Each move without an answer doubles the wait for the next move, up to 16 times the first wait. An answer resets the wait. A server answer without a healthy reflector is an answer, so it does not move the path.
+
+These rules apply to port ranges:
+
+- The range must be inside the server ports, `server.port`, because the server ignores the other ports.
+- The ranges of two routes to the same server with the same transport and interface must not share a port.
+- The routes of two groups must not share a port of the same server.
+- The client does not save a move. At the next start, each path starts on the first port of its range again.
 
 ## Several WireGuard targets
 
@@ -197,14 +217,14 @@ The command `mup --config FILE` reads a [configuration file](#configuration-file
 ### Client
 
 ```text
-mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT/udp|icmp [via RETURN_IP]" [-u ...] -s CLIENT_IP
+mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP]" [-u ...] -s CLIENT_IP
            [-r RETURN_IP] [--mode fallback|balancer|burst] [--control-socket PATH]
 ```
 
 | Flag | Value | Meaning |
 | --- | --- | --- |
 | `-p` | port | The UDP port where the client receives WireGuard packets from the peers. |
-| `-u` | `SERVER_IP[%IFACE]:PORT/udp` or `/icmp`, then optionally `via RETURN_IP` | One path to a server. Repeat the flag for up to 8 paths. The optional `%IFACE` binds the path to one interface. The optional `via RETURN_IP` sets the return IP of the path. |
+| `-u` | `SERVER_IP[%IFACE]:PORT/udp` or `/icmp`, then optionally `via RETURN_IP` | One path to a server. Repeat the flag for up to 8 paths. The optional `%IFACE` binds the path to one interface. The optional `via RETURN_IP` sets the return IP of the path. `PORT` can be a range `FIRST-LAST`, see [Server port ranges](#server-port-ranges). |
 | `-s` | IPv4 | The advertised IP. It must be an address of the client host, and no other active client of the server can use it. |
 | `-r` | IPv4 | Optional. The return IP of each `-u` path without its own `via`. On UDP paths, it is the spoofed source of replies. On ICMP paths, it is the reflector host. |
 | `--mode` | `fallback`, `balancer`, `burst` | The path mode. The default is `fallback`. |
@@ -233,11 +253,11 @@ There are no authentication keys. WireGuard authenticates the payload end to end
 | --- | --- | --- |
 | `mupctl status` | both | Shows an overview. A client lists its groups and paths, and a server lists its clients. |
 | `mupctl get groups` | client | Lists the groups with their mode, healthy paths, and peers. |
-| `mupctl get paths` | client | Lists the paths with their return IP, health, last ACK, and round-trip time. |
+| `mupctl get paths` | client | Lists the paths with their server port, return IP, health, last ACK, and round-trip time. With `-o wide`, it also shows the port range, the priority, and the missed ACKs. |
 | `mupctl get peers` | both | Lists the WireGuard peers of a client, or the peer routes of a server. |
 | `mupctl get clients` | server | Lists the registered clients with their paths, peers, and lease. |
 | `mupctl get drops` | both | Lists the nonzero drop counters. |
-| `mupctl add path SERVER[%IFACE]:PORT/udp [via RETURN_IP]` | client | Adds a path to a group. The value uses the form of the `-u` flag. |
+| `mupctl add path SERVER[%IFACE]:PORT[-LAST]/udp [via RETURN_IP]` | client | Adds a path to a group. The value uses the form of the `-u` flag. |
 | `mupctl delete path ID` | client | Removes a path. |
 | `mupctl set mode burst` | client | Changes the path mode of a group to `fallback`, `balancer`, or `burst`. |
 
