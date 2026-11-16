@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"io"
+	"log"
 	"net/http"
 	"net/netip"
 	"slices"
@@ -15,6 +17,8 @@ import (
 	"github.com/xshecan/mup/dataplane"
 	"github.com/xshecan/mup/protocol"
 )
+
+var discardLogger = log.New(io.Discard, "", 0)
 
 type fakeClientDataplane struct {
 	mu         sync.Mutex
@@ -153,7 +157,7 @@ func newGroupsFixture(t *testing.T, groups ...config.Group) controllerFixture {
 		fixture.registrations[int(registration.pathID)] = registration
 		return conn, nil
 	}
-	fixture.controller = newClientController(client, *plan.client, fake, resolver, open, time.Unix(100, 0))
+	fixture.controller = newClientController(client, *plan.client, fake, resolver, open, time.Unix(100, 0), discardLogger)
 	fixture.controller.interfaceName = func(ifindex int) string { return "if" + string(rune('0'+ifindex)) }
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -548,7 +552,7 @@ func TestControllerRunStopsWhenAPathLoopFails(t *testing.T) {
 	open := func(pathRegistration) (pathConn, error) {
 		return failingPathConn{err: want}, nil
 	}
-	controller := newClientController(client, settings, newFake(), fakeResolver{}, open, time.Now())
+	controller := newClientController(client, settings, newFake(), fakeResolver{}, open, time.Now(), discardLogger)
 	done := make(chan error, 1)
 	go func() { done <- controller.run(context.Background()) }()
 	select {
@@ -562,7 +566,7 @@ func TestControllerRunStopsWhenAPathLoopFails(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	open = func(pathRegistration) (pathConn, error) { return newFakePathConn(), nil }
-	controller = newClientController(client, settings, newFake(), fakeResolver{}, open, time.Now())
+	controller = newClientController(client, settings, newFake(), fakeResolver{}, open, time.Now(), discardLogger)
 	go func() { done <- controller.run(ctx) }()
 	cancel()
 	select {
@@ -605,5 +609,209 @@ func TestControllerMarksAPathWithoutReflectorUnhealthy(t *testing.T) {
 	paths, _ = fixture.controller.Paths()
 	if !paths[1].Healthy || paths[1].Reason != "" {
 		t.Fatalf("path 1 after an ACK = healthy %v, reason %q", paths[1].Healthy, paths[1].Reason)
+	}
+}
+
+// miss reports REGISTER frames of a slot that got no answer.
+func (f controllerFixture) miss(t *testing.T, slot, count int) {
+	t.Helper()
+	f.result(t, slot, count, registerMissed)
+}
+
+func (f controllerFixture) result(t *testing.T, slot, count int, result registerResult) {
+	t.Helper()
+	for range count {
+		f.controller.mu.Lock()
+		epoch := f.controller.slots[slot].epoch
+		f.controller.mu.Unlock()
+		probe := pathProbeResult{slot: slot, epoch: epoch, sequence: 1, sentAt: time.Now().Add(-time.Minute), result: result}
+		if err := f.controller.handleProbe(probe); err != nil {
+			t.Fatalf("handleProbe: %v", err)
+		}
+	}
+}
+
+// countPortPicks makes the fixture choose ports from a list, and counts the
+// choices.
+func (f controllerFixture) countPortPicks(ports ...uint16) *int {
+	picks := new(int)
+	f.controller.mu.Lock()
+	defer f.controller.mu.Unlock()
+	f.controller.pickPort = func(config.PortRange, uint16) uint16 {
+		port := ports[*picks%len(ports)]
+		*picks++
+		return port
+	}
+	return picks
+}
+
+func TestControllerMovesAStuckPathToAnotherPort(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t, "198.51.100.1:5000/udp", "198.51.100.3:7000-7009/udp via 203.0.113.16/28")
+	picks := fixture.countPortPicks(7004, 7008)
+	oldPath, _ := config.ParsePath("198.51.100.3:7000/udp via 203.0.113.16/28")
+	fixture.controller.mu.Lock()
+	oldEpoch := fixture.controller.slots[1].epoch
+	fixture.controller.mu.Unlock()
+
+	fixture.miss(t, 1, portMoveMisses-1)
+	if _, set := fixture.dataplane.paths[1]; *picks != 0 || set {
+		t.Fatalf("the path moved after %d misses", portMoveMisses-1)
+	}
+	fixture.miss(t, 1, 1)
+	if *picks != 1 {
+		t.Fatalf("port picks = %d, want 1", *picks)
+	}
+	settings := fixture.dataplane.paths[1]
+	if settings.ServerPort != 7004 || settings.ReturnPrefix != 28 || settings.Priority != 1 {
+		t.Fatalf("path settings after the move = %#v", settings)
+	}
+	if got := fixture.registrations[1].path; got.ServerPort != 7004 || got.HasPortRange() {
+		t.Fatalf("registration path = %s, want port 7004 alone", got)
+	}
+	select {
+	case <-fixture.conns[oldPath].closed:
+	case <-time.After(time.Second):
+		t.Fatal("the old control loop kept running")
+	}
+	paths, _ := fixture.controller.Paths()
+	if paths[1].Port != 7004 || paths[1].FirstPort != 7000 || paths[1].LastPort != 7009 || paths[1].Healthy {
+		t.Fatalf("path 1 = %#v, want unhealthy on port 7004 of 7000-7009", paths[1])
+	}
+	stale := pathProbeResult{slot: 1, epoch: oldEpoch, sequence: 1, sentAt: time.Now(), result: registerAcked}
+	if err := fixture.controller.handleProbe(stale); err != nil {
+		t.Fatalf("handleProbe: %v", err)
+	}
+	if fixture.dataplane.mask&0b10 != 0 {
+		t.Fatal("an answer on the old port made the moved path healthy")
+	}
+
+	// The next move without an answer waits twice as long.
+	fixture.miss(t, 1, 2*portMoveMisses-1)
+	if *picks != 1 {
+		t.Fatalf("the path moved again after %d misses", 2*portMoveMisses-1)
+	}
+	fixture.miss(t, 1, 1)
+	if *picks != 2 || fixture.dataplane.paths[1].ServerPort != 7008 {
+		t.Fatalf("after the second wait: picks %d, port %d, want 2 and 7008", *picks, fixture.dataplane.paths[1].ServerPort)
+	}
+
+	// An answer makes the path healthy and resets the wait.
+	fixture.reply(t, 1, 1)
+	paths, _ = fixture.controller.Paths()
+	if !paths[1].Healthy || paths[1].Port != 7008 {
+		t.Fatalf("path 1 after an ACK = %#v, want healthy on port 7008", paths[1])
+	}
+	fixture.miss(t, 1, portMoveMisses)
+	if *picks != 3 {
+		t.Fatalf("port picks after an ACK and %d misses = %d, want 3", portMoveMisses, *picks)
+	}
+}
+
+func TestControllerKeepsTheServerPortWithoutARange(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t, "198.51.100.1:5000/udp", "198.51.100.3:7000/udp")
+	picks := fixture.countPortPicks(7001)
+	fixture.miss(t, 1, 4*portMoveMisses)
+	if _, set := fixture.dataplane.paths[1]; *picks != 0 || set {
+		t.Fatalf("a path with one server port moved %d times", *picks)
+	}
+}
+
+func TestControllerKeepsTheServerPortWhenTheServerAnswers(t *testing.T) {
+	t.Parallel()
+
+	// A path without a reflector reaches the server, so a new port does not
+	// help it.
+	fixture := newControllerFixture(t, "198.51.100.1:5000/udp", "198.51.100.3:7000-7009/udp via 203.0.113.16/28")
+	picks := fixture.countPortPicks(7001)
+	fixture.result(t, 1, 4*portMoveMisses, registerNoReflector)
+	if *picks != 0 {
+		t.Fatalf("a path that the server answers moved %d times", *picks)
+	}
+}
+
+func TestControllerStaysOnItsPortWhenAMoveFails(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t, "198.51.100.1:5000/udp", "198.51.100.3:7000-7009/icmp")
+	picks := fixture.countPortPicks(7005)
+	fixture.controller.mu.Lock()
+	fixture.controller.open = func(pathRegistration) (pathConn, error) { return nil, errors.New("no socket") }
+	epoch := fixture.controller.slots[1].epoch
+	fixture.controller.mu.Unlock()
+	fixture.miss(t, 1, portMoveMisses)
+	fixture.controller.mu.Lock()
+	current := fixture.controller.slots[1]
+	fixture.controller.mu.Unlock()
+	if _, set := fixture.dataplane.paths[1]; *picks != 1 || current.epoch != epoch || current.port != 7000 || set {
+		t.Fatalf("after a failed move: picks %d, port %d, dataplane written %v", *picks, current.port, set)
+	}
+	// The next misses try again.
+	fixture.miss(t, 1, portMoveMisses)
+	if *picks != 2 {
+		t.Fatalf("port picks = %d, want a second try", *picks)
+	}
+}
+
+func TestAddPathRejectsAPortRangeThatOverlaps(t *testing.T) {
+	t.Parallel()
+
+	fixture := twoGroupsFixture(t)
+	if _, err := fixture.controller.AddPath("198.51.100.1:4990-5000/udp", 51820); statusOf(err) != http.StatusConflict {
+		t.Fatalf("AddPath of an overlapping range error = %v, want status 409", err)
+	}
+	if _, err := fixture.controller.AddPath("203.0.113.1:5990-6010/icmp", 51820); statusOf(err) != http.StatusConflict {
+		t.Fatalf("AddPath of a range in a server port of another group error = %v, want status 409", err)
+	}
+	added, err := fixture.controller.AddPath("198.51.100.3:5001-5099/udp", 51820)
+	if err != nil {
+		t.Fatalf("AddPath: %v", err)
+	}
+	if added.Port != 5001 || added.FirstPort != 5001 || added.LastPort != 5099 {
+		t.Fatalf("added path = %#v, want port 5001 of 5001-5099", added)
+	}
+	if got := fixture.dataplane.paths[added.ID].ServerPort; got != 5001 {
+		t.Fatalf("dataplane server port = %d, want 5001", got)
+	}
+	if got := fixture.registrations[added.ID].path; got.ServerPort != 5001 || got.HasPortRange() {
+		t.Fatalf("registration path = %s", got)
+	}
+}
+
+func TestRandomOtherPortSkipsTheCurrentPort(t *testing.T) {
+	t.Parallel()
+
+	ports := config.PortRange{First: 7000, Last: 7002}
+	seen := map[uint16]int{}
+	for range 300 {
+		port := randomOtherPort(ports, 7001)
+		if port == 7001 || !ports.Contains(port) {
+			t.Fatalf("randomOtherPort = %d, want 7000 or 7002", port)
+		}
+		seen[port]++
+	}
+	if seen[7000] == 0 || seen[7002] == 0 {
+		t.Fatalf("ports chosen = %v, want both 7000 and 7002", seen)
+	}
+	two := config.PortRange{First: 9000, Last: 9001}
+	if got := randomOtherPort(two, 9000); got != 9001 {
+		t.Fatalf("randomOtherPort(9000-9001, 9000) = %d", got)
+	}
+	if got := randomOtherPort(two, 9001); got != 9000 {
+		t.Fatalf("randomOtherPort(9000-9001, 9001) = %d", got)
+	}
+}
+
+func TestPortMoveThresholdDoublesUpToALimit(t *testing.T) {
+	t.Parallel()
+
+	want := []int{10, 20, 40, 80, 160, 160}
+	for moves, threshold := range want {
+		if got := portMoveThreshold(moves); got != threshold {
+			t.Fatalf("portMoveThreshold(%d) = %d, want %d", moves, got, threshold)
+		}
 	}
 }

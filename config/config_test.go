@@ -11,7 +11,10 @@ import (
 func TestParsePathRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	for _, raw := range []string{"198.51.100.1:5000/udp", "198.51.100.2%eth1:5000/icmp"} {
+	for _, raw := range []string{
+		"198.51.100.1:5000/udp", "198.51.100.2%eth1:5000/icmp", "198.51.100.1:9000-9099/udp",
+		"198.51.100.1:9000-9001/icmp via 194.225.72.0/28 balance per-peer",
+	} {
 		path, err := ParsePath(raw)
 		if err != nil {
 			t.Fatalf("ParsePath(%q): %v", raw, err)
@@ -33,10 +36,38 @@ func TestParsePathRejectsInvalidInput(t *testing.T) {
 	for _, raw := range []string{
 		"", "198.51.100.1:5000", "198.51.100.1:5000/tcp", "198.51.100.1:0/udp",
 		"0.0.0.0:5000/udp", "2001:db8::1:5000/udp", "198.51.100.1%:5000/udp", "host:5000/udp",
+		"198.51.100.1:9099-9000/udp", "198.51.100.1:0-10/udp", "198.51.100.1:9000-/udp",
+		"198.51.100.1:-9000/udp", "198.51.100.1:9000-x/udp", "198.51.100.1:9000-70000/udp",
 	} {
 		if _, err := ParsePath(raw); err == nil {
 			t.Fatalf("ParsePath(%q) unexpectedly succeeded", raw)
 		}
+	}
+}
+
+func TestParsePathPortRange(t *testing.T) {
+	t.Parallel()
+
+	path, err := ParsePath("198.51.100.1:9000-9099/udp")
+	if err != nil {
+		t.Fatalf("ParsePath: %v", err)
+	}
+	if path.ServerPort != 9000 || path.LastPort != 9099 || !path.HasPortRange() {
+		t.Fatalf("path = %#v, want ports 9000-9099", path)
+	}
+	if got := path.Ports(); got != (PortRange{First: 9000, Last: 9099}) {
+		t.Fatalf("Ports = %v", got)
+	}
+	moved := path.AtPort(9042)
+	if moved.ServerPort != 9042 || moved.HasPortRange() || moved.String() != "198.51.100.1:9042/udp" {
+		t.Fatalf("AtPort(9042) = %#v", moved)
+	}
+	single, err := ParsePath("198.51.100.1:9000-9000/udp")
+	if err != nil {
+		t.Fatalf("ParsePath of a range of one port: %v", err)
+	}
+	if single.HasPortRange() || single.String() != "198.51.100.1:9000/udp" {
+		t.Fatalf("a range of one port = %#v, want a single port", single)
 	}
 }
 
@@ -87,6 +118,21 @@ func TestClientValidateAcceptsGroupsOfDifferentServers(t *testing.T) {
 	}
 }
 
+func TestClientValidateAcceptsPortRangesThatDoNotOverlap(t *testing.T) {
+	t.Parallel()
+
+	client := testClient(t,
+		Group{ListenPort: 51820, Paths: testPaths(t,
+			"198.51.100.1:9000-9499/udp via 194.225.72.0/28",
+			"198.51.100.1:9500-9999/udp via 94.184.45.48/28",
+			"198.51.100.1:9000-9999/icmp")},
+		Group{ListenPort: 51821, Paths: testPaths(t, "198.51.100.1:10000-10099/udp")},
+	)
+	if err := client.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
 func TestClientValidateRejectsInvalidGroups(t *testing.T) {
 	t.Parallel()
 
@@ -109,6 +155,12 @@ func TestClientValidateRejectsInvalidGroups(t *testing.T) {
 		"server in two groups": testClient(t,
 			Group{ListenPort: 51820, Paths: testPaths(t, "198.51.100.1:5000/udp")},
 			Group{ListenPort: 51821, Paths: testPaths(t, "198.51.100.1:5000/icmp")}),
+		"overlapping port ranges": testClient(t, Group{ListenPort: 51820, Paths: testPaths(t,
+			"198.51.100.1:9000-9499/udp", "198.51.100.1:9499/udp via 192.0.2.77")}),
+		"port range in two groups": testClient(t,
+			Group{ListenPort: 51820, Paths: testPaths(t, "198.51.100.1:9000-9499/udp")},
+			Group{ListenPort: 51821, Paths: testPaths(t, "198.51.100.1:9400/icmp")}),
+		"bad last port": testClient(t, Group{ListenPort: 51820, Paths: []Path{{Server: netip.MustParseAddr("198.51.100.1"), ServerPort: 5000, LastPort: 5000}}}),
 		"nine paths in all": testClient(t,
 			Group{ListenPort: 51820, Paths: nine},
 			Group{ListenPort: 51821, Paths: more}),

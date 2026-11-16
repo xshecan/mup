@@ -314,3 +314,23 @@ func TestPathStatusTextShowsTheReason(t *testing.T) {
 		}
 	}
 }
+
+func TestWidePathsShowThePortRange(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	printPaths(&out, []api.Path{
+		{ID: 0, ListenPort: 51820, Server: "203.0.113.5", Port: 9417, FirstPort: 9000, LastPort: 9999, Transport: "udp"},
+		{ID: 1, ListenPort: 51820, Server: "203.0.113.6", Port: 5000, Transport: "icmp", Priority: 1},
+	}, true, testNow)
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 3 || !strings.Contains(lines[0], "PORTS") {
+		t.Fatalf("output = %q", out.String())
+	}
+	if !strings.Contains(lines[1], "203.0.113.5:9417") || !strings.Contains(lines[1], "9000-9999") {
+		t.Fatalf("path 0 row = %q, want the current port and the range", lines[1])
+	}
+	if fields := strings.Fields(lines[2]); fields[len(fields)-3] != "-" {
+		t.Fatalf("path 1 row = %q, want no range", lines[2])
+	}
+}

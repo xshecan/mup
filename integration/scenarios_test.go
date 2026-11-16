@@ -258,6 +258,62 @@ func TestPrivilegedSourceLimit(t *testing.T) {
 	exchangeFrom(t, peerNS, "10.210.3.3:0", "10.210.3.1:51820", 1, logs)
 }
 
+func TestPrivilegedPortMove(t *testing.T) {
+	requirePrivilegedLinux(t)
+	if _, err := exec.LookPath("nft"); err != nil {
+		t.Skip("the port move test needs nft")
+	}
+	binaryPath := buildDaemon(t)
+
+	suffix := strconv.FormatInt(time.Now().UnixNano()%1_000_000, 10)
+	clientNS, peerNS, serverNS, targetNS := "mup-client-"+suffix, "mup-peer-"+suffix, "mup-server-"+suffix, "mup-target-"+suffix
+	for _, namespace := range []string{clientNS, peerNS, serverNS, targetNS} {
+		addNamespace(t, namespace)
+	}
+	linkPair(t, "cp"+suffix, clientNS, "pc"+suffix, peerNS)
+	addressLink(t, clientNS, "cp"+suffix, "10.210.3.1/24")
+	addressLink(t, peerNS, "pc"+suffix, "10.210.3.2/24")
+	linkPair(t, "mc"+suffix, clientNS, "ms"+suffix, serverNS)
+	addressLink(t, clientNS, "mc"+suffix, "10.210.1.1/24")
+	addressLink(t, serverNS, "ms"+suffix, "10.210.1.2/24")
+	linkPair(t, "st"+suffix, serverNS, "ts"+suffix, targetNS)
+	addressLink(t, serverNS, "st"+suffix, "10.210.2.1/24")
+	addressLink(t, targetNS, "ts"+suffix, "10.210.2.2/24")
+
+	// The filter drops the flow to server port 5000, as a filter on the
+	// network can drop one flow and pass the others.
+	runInNamespace(t, clientNS, "nft", "add", "table", "inet", "mupblock")
+	runInNamespace(t, clientNS, "nft", "add", "chain", "inet", "mupblock", "out",
+		"{", "type", "filter", "hook", "output", "priority", "0", ";", "}")
+	runInNamespace(t, clientNS, "nft", "add", "rule", "inet", "mupblock", "out", "udp", "dport", "5000", "drop")
+
+	target := startEchoTarget(t, targetNS, "10.210.2.2:51820")
+	defer target.stop(t)
+	directory := t.TempDir()
+	serverSocket := filepath.Join(directory, "server.sock")
+	clientSocket := filepath.Join(directory, "client.sock")
+	server := startNamespaced(t, serverNS, binaryPath, "server", "-p", "5000-5001", "-r", "10.210.2.2:51820", "--control-socket", serverSocket)
+	defer server.stop(t)
+	client := startNamespaced(t, clientNS, binaryPath, "client", "-p", "51820", "-u", "10.210.1.2:5000-5001/udp", "-s", "10.210.1.1", "--control-socket", clientSocket)
+	defer client.stop(t)
+	logs := func() string {
+		return fmt.Sprintf("client log:\n%s\nserver log:\n%s", client.log(t), server.log(t))
+	}
+
+	clientAPI := api.NewDaemonClient(clientSocket)
+	waitFor(t, 60*time.Second, "the path to move to server port 5001 and become healthy", logs, func() (bool, error) {
+		paths, err := clientAPI.Paths(context.Background())
+		if err != nil || len(paths) != 1 {
+			return false, err
+		}
+		return paths[0].Port == 5001 && paths[0].Healthy, nil
+	})
+	exchange(t, peerNS, "10.210.3.1:51820", 2, logs)
+	if !bytes.Contains([]byte(client.log(t)), []byte("server port 5000, so it moved to port 5001")) {
+		t.Fatalf("the client log does not show the move\n%s", logs())
+	}
+}
+
 func TestPrivilegedPingPassesThePrograms(t *testing.T) {
 	requirePrivilegedLinux(t)
 	binaryPath := buildDaemon(t)

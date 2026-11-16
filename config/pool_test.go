@@ -70,14 +70,17 @@ func TestParsePathErrors(t *testing.T) {
 	}
 }
 
-func TestPathRouteClearsPool(t *testing.T) {
+func TestSameRouteIgnoresThePool(t *testing.T) {
 	t.Parallel()
 	path, err := ParsePath("203.0.113.5:5300/icmp via 194.225.72.0/24 balance per-packet")
 	if err != nil {
 		t.Fatal(err)
 	}
-	route := path.Route()
-	if route.IsPool() || route.ReturnIP.IsValid() || route.Balance != BalancePerPeer {
-		t.Fatalf("Route kept pool data: %+v", route)
+	plain, err := ParsePath("203.0.113.5:5300/icmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !path.SameRoute(plain) {
+		t.Fatalf("%s and %s are not the same route", path, plain)
 	}
 }
