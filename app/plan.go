@@ -58,17 +58,7 @@ func buildPlan(appConfig config.App, nonce uint64, resolver routeResolver) (runt
 					return runtimePlan{}, fmt.Errorf("resolve client path %d: invalid interface index %d", slot, ifindex)
 				}
 				attachIfindexes = append(attachIfindexes, ifindex)
-				settings.Paths = append(settings.Paths, dataplane.PathSettings{
-					DestinationIP: path.Server,
-					SourceIP:      client.AdvertisedIP,
-					Ifindex:       ifindex,
-					ServerPort:    path.ServerPort,
-					Transport:     path.Transport,
-					Priority:      uint8(slot),
-					ReturnIP:      path.ReturnIP,
-					ReturnPrefix:  path.ReturnPrefix,
-					Balance:       path.Balance,
-				})
+				settings.Paths = append(settings.Paths, clientPathSettings(path, client.AdvertisedIP, ifindex, uint8(slot)))
 				pathMask |= 1 << slot
 			}
 			settings.Groups = append(settings.Groups, dataplane.GroupSettings{
@@ -142,4 +132,19 @@ func uniqueSortedPositive(values []int) []int {
 		}
 	}
 	return slices.Sorted(maps.Keys(set))
+}
+
+// clientPathSettings is the dataplane form of a client path.
+func clientPathSettings(path config.Path, advertisedIP netip.Addr, ifindex int, priority uint8) dataplane.PathSettings {
+	return dataplane.PathSettings{
+		DestinationIP: path.Server,
+		SourceIP:      advertisedIP,
+		Ifindex:       ifindex,
+		ServerPort:    path.ServerPort,
+		Transport:     path.Transport,
+		Priority:      priority,
+		ReturnIP:      path.ReturnIP,
+		ReturnPrefix:  path.ReturnPrefix,
+		Balance:       path.Balance,
+	}
 }

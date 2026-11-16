@@ -442,6 +442,23 @@ func TestAddPathGoesToTheNamedGroup(t *testing.T) {
 	}
 }
 
+func TestAddPathKeepsTheReturnPool(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t, "198.51.100.1:5000/udp")
+	added, err := fixture.controller.AddPath("198.51.100.3:5000/udp via 203.0.113.16/28 balance per-packet", 0)
+	if err != nil {
+		t.Fatalf("AddPath: %v", err)
+	}
+	if added.ReturnIP != "203.0.113.16/28" {
+		t.Fatalf("added path return = %q, want the pool", added.ReturnIP)
+	}
+	got := fixture.dataplane.paths[added.ID]
+	if got.ReturnIP != netip.MustParseAddr("203.0.113.16") || got.ReturnPrefix != 28 || got.Balance != config.BalancePerPacket {
+		t.Fatalf("path settings = %#v, want the pool 203.0.113.16/28 with per-packet balance", got)
+	}
+}
+
 func TestRemovePathKeepsTheLastPathOfEachGroup(t *testing.T) {
 	t.Parallel()
 

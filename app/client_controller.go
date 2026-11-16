@@ -326,15 +326,7 @@ func (c *clientController) AddPath(raw string, listenPort uint16) (api.Path, err
 		return api.Path{}, err
 	}
 	priority := uint8(c.nextPriority)
-	settings := dataplane.PathSettings{
-		DestinationIP: path.Server,
-		SourceIP:      c.client.AdvertisedIP,
-		Ifindex:       ifindex,
-		ServerPort:    path.ServerPort,
-		Transport:     path.Transport,
-		Priority:      priority,
-		ReturnIP:      path.ReturnIP,
-	}
+	settings := clientPathSettings(path, c.client.AdvertisedIP, ifindex, priority)
 	if err := c.dataplane.SetPath(slot, settings); err != nil {
 		_ = conn.Close()
 		return api.Path{}, err
