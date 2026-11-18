@@ -247,13 +247,15 @@ static __always_inline int mup_rewrite_udp_partial(struct mup_packet *packet,
 }
 
 /*
- * The device of a CHECKSUM_PARTIAL packet writes the checksum at the UDP
- * checksum offset, which is the ICMP sequence field. A one's complement
- * checksum is valid when the sum of all words is 0xffff, and the position of
- * the checksum word does not change that sum. So this rewrite clears the
- * sequence field, which takes the place of the checksum, and the device then
- * makes the ICMP checksum valid. The client does not read the sequence,
- * because the peer token is in the WireGuard bytes.
+ * A device that completes a CHECKSUM_PARTIAL packet writes the checksum at
+ * the UDP checksum offset, which is the ICMP sequence field. A one's
+ * complement checksum is valid when the sum of all words is 0xffff, and the
+ * position of the checksum word does not change that sum. So this rewrite
+ * clears the checksum and the sequence fields, and the caller then writes the
+ * ICMP checksum from a payload sum (rewrite_icmp_partial in mup.c). Some
+ * devices do not complete the checksum of an ICMP packet. A device that does
+ * then adds a word that keeps the sum valid. The client does not read the
+ * sequence, because the peer token is in the WireGuard bytes.
  */
 static __always_inline int mup_rewrite_icmp_partial(struct mup_packet *packet,
 						    __be32 source_ip,

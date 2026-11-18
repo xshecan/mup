@@ -85,9 +85,10 @@ func RewriteUDPPartial(packet []byte, source, destination netip.Addr, sourcePort
 }
 
 // RewriteICMPPartial rewrites a UDP packet with CHECKSUM_PARTIAL in place into
-// an ICMP Echo packet. The device writes the checksum at the UDP checksum
-// offset, which is the ICMP sequence field, so the rewrite clears the sequence
-// and the checksum. The device then makes the sum of all ICMP words valid.
+// an ICMP Echo packet with a zero sequence and a valid checksum. Some devices
+// do not complete the partial checksum of an ICMP packet. A device that does
+// writes it at the UDP checksum offset, which is the ICMP sequence field, and
+// the word that it writes keeps the sum of all ICMP words valid.
 func RewriteICMPPartial(packet []byte, source, destination netip.Addr, icmpType uint8, identifier uint16, token uint32) error {
 	if !source.Is4() || !destination.Is4() {
 		return ErrRewriteAddress
@@ -119,6 +120,7 @@ func RewriteICMPPartial(packet []byte, source, destination netip.Addr, icmpType 
 	binary.BigEndian.PutUint16(l4[2:4], 0)
 	binary.BigEndian.PutUint16(l4[4:6], identifier)
 	binary.BigEndian.PutUint16(l4[6:8], 0)
+	binary.BigEndian.PutUint16(l4[2:4], internetChecksum(l4))
 	packet[10] = 0
 	packet[11] = 0
 	binary.BigEndian.PutUint16(packet[10:12], internetChecksum(packet[:20]))

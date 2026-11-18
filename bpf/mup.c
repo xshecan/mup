@@ -195,6 +195,25 @@ struct {
 	__type(value, struct event_limit_v1);
 } event_limits SEC(".maps");
 
+/*
+ * One chunk is the largest size that bpf_csum_diff takes in one call. The
+ * chunks cover a payload of 9216 bytes, more than a jumbo frame.
+ */
+#define MUP_CSUM_CHUNK 512
+#define MUP_CSUM_CHUNKS 18
+
+struct csum_scratch {
+	__u8 bytes[MUP_CSUM_CHUNK];
+};
+
+/* The scratch buffer holds no state, so it is not pinned. */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct csum_scratch);
+} csum_scratch SEC(".maps");
+
 #define MUP_DUPLICATE_WINDOW_NS 2000000000ULL
 #define MUP_EVENT_WINDOW_NS 60000000000ULL
 #define MUP_EVENT_LIMIT 10U
@@ -490,11 +509,116 @@ static __always_inline int redirect_packet(__u32 ifindex)
 	return bpf_redirect_neigh(ifindex, 0, 0, 0);
 }
 
+/* MUP accepts no IPv4 options, so the payload offset is fixed. */
+#define MUP_PAYLOAD_OFFSET \
+	(sizeof(struct ethhdr) + sizeof(struct mup_iphdr) + 8)
+
+/* A csum_partial sum in memory order, as big-endian 16-bit words. */
+static __always_inline __u32 mup_wsum_be16(__u32 wsum)
+{
+	__u16 folded = mup_csum_fold(wsum);
+
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+	return (__u16)((folded >> 8) | (folded << 8));
+#else
+	return folded;
+#endif
+}
+
 /*
- * A partial packet came from a local socket and still has CHECKSUM_PARTIAL,
- * so the rewrite leaves the checksum to the device.
+ * mup_payload_sum_of returns the one's complement sum of the transport
+ * payload of a packet without IPv4 options, as big-endian 16-bit words, or a
+ * negative value. The payload can be in page fragments, so the function
+ * copies it to a scratch buffer, chunk by chunk, and bpf_csum_diff sums each
+ * chunk. The verifier checks this global function once for all callers.
+ */
+__attribute__((noinline)) int mup_payload_sum_of(struct __sk_buff *skb,
+						  __u32 length)
+{
+	struct csum_scratch *scratch;
+	__u32 offset = MUP_PAYLOAD_OFFSET;
+	__u32 key = 0;
+	__u32 tail = 0;
+	__s64 wsum = 0;
+
+	scratch = bpf_map_lookup_elem(&csum_scratch, &key);
+	if (!scratch || length > MUP_CSUM_CHUNK * MUP_CSUM_CHUNKS)
+		return -1;
+	/* A bounded loop: the verifier walks each of its iterations. */
+	for (int index = 0; index < MUP_CSUM_CHUNKS; index++) {
+		if (length < MUP_CSUM_CHUNK)
+			break;
+		if (bpf_skb_load_bytes(skb, offset, scratch->bytes,
+				       MUP_CSUM_CHUNK))
+			return -1;
+		wsum = bpf_csum_diff(0, 0, (__be32 *)scratch->bytes,
+				     MUP_CSUM_CHUNK, (__u32)wsum);
+		if (wsum < 0)
+			return -1;
+		offset += MUP_CSUM_CHUNK;
+		length -= MUP_CSUM_CHUNK;
+	}
+	/* The rest is shorter than a chunk, so its bits give the parts. */
+#pragma clang loop unroll(full)
+	for (__u32 size = MUP_CSUM_CHUNK / 2; size >= 4; size /= 2) {
+		if (!(length & size))
+			continue;
+		if (bpf_skb_load_bytes(skb, offset, scratch->bytes, size))
+			return -1;
+		wsum = bpf_csum_diff(0, 0, (__be32 *)scratch->bytes, size,
+				     (__u32)wsum);
+		if (wsum < 0)
+			return -1;
+		offset += size;
+	}
+	if (length & 2) {
+		if (bpf_skb_load_bytes(skb, offset, scratch->bytes, 2))
+			return -1;
+		tail += mup_read_be16(scratch->bytes);
+		offset += 2;
+	}
+	if (length & 1) {
+		if (bpf_skb_load_bytes(skb, offset, scratch->bytes, 1))
+			return -1;
+		tail += (__u32)scratch->bytes[0] << 8;
+	}
+	return mup_wsum_be16((__u32)wsum) + tail;
+}
+
+/*
+ * rewrite_icmp_partial rewrites a packet that still has CHECKSUM_PARTIAL
+ * into ICMP, and computes the ICMP checksum itself. Some devices, for
+ * example vmxnet3, do not complete the partial checksum of an ICMP packet,
+ * and the packet then leaves with a checksum of zero. The sequence stays
+ * zero. A device that completes the checksum writes the sum of a valid
+ * message, 0 or 0xffff, into the sequence, and the checksum stays valid.
+ */
+static __always_inline int rewrite_icmp_partial(struct __sk_buff *skb,
+						struct mup_packet *packet,
+						__be32 source_ip,
+						__be32 destination_ip,
+						__u8 type, __u16 identifier,
+						__u32 peer_token)
+{
+	int payload_sum;
+
+	if (mup_rewrite_icmp_partial(packet, source_ip, destination_ip, type,
+				     identifier, peer_token))
+		return -1;
+	payload_sum = mup_payload_sum_of(skb, packet->payload_length);
+	if (payload_sum < 0)
+		return -1;
+	mup_finish_rewrite(packet, (__u32)payload_sum);
+	return 0;
+}
+
+/*
+ * A partial packet came from a local socket and still has CHECKSUM_PARTIAL.
+ * A UDP rewrite leaves the checksum to the device, and an ICMP rewrite
+ * computes it.
  */
 static __always_inline int rewrite_for_path(
+	struct __sk_buff *skb,
 	struct mup_packet *packet,
 	__u16 listen_port,
 	const struct path_config_v1 *path,
@@ -513,11 +637,10 @@ static __always_inline int rewrite_for_path(
 				       listen_port,
 				       path->server_port);
 	if (path->transport == MUP_TRANSPORT_ICMP && partial)
-		return mup_rewrite_icmp_partial(packet, path->source_ip,
-						path->destination_ip,
-						MUP_ICMP_ECHO_REQUEST,
-						path->server_port,
-						peer_token);
+		return rewrite_icmp_partial(skb, packet, path->source_ip,
+					    path->destination_ip,
+					    MUP_ICMP_ECHO_REQUEST,
+					    path->server_port, peer_token);
 	if (path->transport == MUP_TRANSPORT_ICMP)
 		return mup_rewrite_icmp(packet, path->source_ip,
 					path->destination_ip,
@@ -583,8 +706,8 @@ __attribute__((noinline)) int mup_burst_clone(struct __sk_buff *skb, __u32 index
 	    !mapped_path->ifindex || mapped_path->transport > MUP_TRANSPORT_ICMP)
 		return MUP_BURST_SKIPPED;
 	path = *mapped_path;
-	result = rewrite_for_path(&packet, (__u16)listen_port, &path, peer_token,
-				  partial);
+	result = rewrite_for_path(skb, &packet, (__u16)listen_port, &path,
+				  peer_token, partial);
 	if (result) {
 		count_reason(result == -2 ? MUP_DROP_TRANSPORT : MUP_DROP_CHECKSUM);
 		return MUP_BURST_FAILED;
@@ -663,7 +786,7 @@ static __always_inline int burst_client_packet(
 	    !mapped_path->ifindex || mapped_path->transport > MUP_TRANSPORT_ICMP)
 		return cloned ? TC_ACT_SHOT : count_and_drop(skb, MUP_DROP_NO_PATH);
 	path = *mapped_path;
-	result = rewrite_for_path(packet, listen_port, &path, peer_token,
+	result = rewrite_for_path(skb, packet, listen_port, &path, peer_token,
 				  partial);
 	if (result == -2)
 		return count_and_drop(skb, MUP_DROP_TRANSPORT);
@@ -918,8 +1041,8 @@ int mup_client_ingress(struct __sk_buff *skb)
 		return count_and_drop(skb, MUP_DROP_NO_PATH);
 	if (mup_set_peer_token(&packet, peer_token))
 		return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
-	result = rewrite_for_path(&packet, endpoint.listen_port, path, peer_token,
-				  partial);
+	result = rewrite_for_path(skb, &packet, endpoint.listen_port, path,
+				  peer_token, partial);
 	if (result == -2)
 		return count_and_drop(skb, MUP_DROP_TRANSPORT);
 	if (result)
@@ -1074,8 +1197,8 @@ static __always_inline int server_target_reply(
 			type = MUP_ICMP_ECHO_REPLY;
 		}
 		if (partial)
-			result = mup_rewrite_icmp_partial(
-				packet, source_ip, destination_ip, type,
+			result = rewrite_icmp_partial(
+				skb, packet, source_ip, destination_ip, type,
 				reverse->route_value.server_port,
 				reverse->route_key.peer_token);
 		else

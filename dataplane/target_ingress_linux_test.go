@@ -166,6 +166,89 @@ func TestServerEgressCatchesTheTargetReply(t *testing.T) {
 	}
 }
 
+// A reply from a local socket has CHECKSUM_PARTIAL. On an ICMP route, the
+// server must write a valid ICMP checksum itself, because some devices, such
+// as vmxnet3, do not complete the partial checksum of an ICMP packet.
+func TestServerEgressWritesTheChecksumOfAPartialICMPReply(t *testing.T) {
+	// 92 bytes take only the short parts of the sum, and 1440 bytes also
+	// take two full chunks.
+	for _, length := range []int{protocol.HandshakeResponseLength, 1440} {
+		collection, client := targetIngressCollection(t)
+		routeKey := mupServerRouteKeyV1{Client: client, PeerToken: 9}
+		routeValue := mupServerRouteValueV1{
+			TargetPort: 20000, ServerPort: 5000, Transport: uint8(protocol.TransportICMP),
+			ClientSourceIp: client.AdvertisedIp, ServerLocalIp: mustTestWord(t, ingressTarget), Ifindex: 1,
+		}
+		if err := collection.Maps["server_route_by_key"].Update(routeKey, routeValue, ebpf.UpdateAny); err != nil {
+			t.Fatalf("update forward route: %v", err)
+		}
+		reverse := mupServerReverseValueV1{RouteKey: routeKey, RouteValue: routeValue}
+		if err := collection.Maps["server_route_by_port"].Update(uint16(20000), reverse, ebpf.UpdateAny); err != nil {
+			t.Fatalf("update reverse route: %v", err)
+		}
+
+		reply := udpPartialWireGuardFrame(t, ingressTarget, ingressClient, ingressTargetPort, 20000, length)
+		result, output, err := collection.Programs["mup_server_egress"].Test(reply)
+		collection.Close()
+		if err != nil {
+			t.Fatalf("length %d: program test: %v", length, err)
+		}
+		if result != tcActOK && result != tcActRedirect {
+			t.Fatalf("length %d: return value = %d, want pass or redirect", length, int32(result))
+		}
+		ip := output[14:]
+		if ip[9] != protocol.IPProtocolICMP {
+			t.Fatalf("length %d: IPv4 protocol = %d, want ICMP", length, ip[9])
+		}
+		icmp := ip[20:binary.BigEndian.Uint16(ip[2:4])]
+		if len(icmp) != 8+length {
+			t.Fatalf("length %d: ICMP length = %d, want %d", length, len(icmp), 8+length)
+		}
+		if onesComplement(ip[:20], 0) != 0 {
+			t.Fatalf("length %d: IPv4 header checksum is invalid", length)
+		}
+		if onesComplement(icmp, 0) != 0 {
+			t.Fatalf("length %d: ICMP checksum is invalid", length)
+		}
+		if got := binary.BigEndian.Uint16(icmp[4:6]); icmp[0] != 0 || got != 5000 {
+			t.Fatalf("length %d: ICMP type %d identifier %d, want an Echo Reply with identifier 5000", length, icmp[0], got)
+		}
+		if got := binary.BigEndian.Uint16(icmp[6:8]); got != 0 {
+			t.Fatalf("length %d: ICMP sequence = %#x, want 0", length, got)
+		}
+		if token := icmp[9:12]; token[0] != 0 || token[1] != 0 || token[2] != 9 {
+			t.Fatalf("length %d: peer token bytes = %x, want 000009", length, token)
+		}
+	}
+}
+
+// udpPartialWireGuardFrame builds the frame of a WireGuard message from a
+// local socket. Its UDP checksum field holds only the pseudo-header sum, as
+// the kernel writes it for CHECKSUM_PARTIAL.
+func udpPartialWireGuardFrame(t *testing.T, source, destination netip.Addr, sourcePort, destinationPort uint16, length int) []byte {
+	t.Helper()
+	frame := udpWireGuardFrame(t, source, destination, sourcePort, destinationPort, 0)
+	frame = frame[:14+20+8]
+	payload := make([]byte, length)
+	payload[0] = 4
+	if length == protocol.HandshakeResponseLength {
+		payload[0] = 2
+	}
+	for index := 4; index < len(payload); index++ {
+		payload[index] = byte(index*7 + 3)
+	}
+	frame = append(frame, payload...)
+	ip := frame[14:]
+	binary.BigEndian.PutUint16(ip[2:4], uint16(len(ip)))
+	ip[10], ip[11] = 0, 0
+	binary.BigEndian.PutUint16(ip[10:12], onesComplement(ip[:20], 0))
+	udp := ip[20:]
+	binary.BigEndian.PutUint16(udp[4:6], uint16(len(udp)))
+	// pseudoHeaderSum already holds the UDP length.
+	binary.BigEndian.PutUint16(udp[6:8], ^onesComplement(nil, pseudoHeaderSum(ip)))
+	return frame
+}
+
 // udpWireGuardFrame builds an Ethernet IPv4 UDP frame with a WireGuard data
 // message, the peer token in the reserved bytes, and a full UDP checksum.
 func udpWireGuardFrame(t *testing.T, source, destination netip.Addr, sourcePort, destinationPort uint16, token uint32) []byte {

@@ -389,7 +389,7 @@ MUP has no authentication of its own. A host can spoof the source address of a r
 - Up to 41000 routes per server, and up to 4096 registered clients.
 - Up to 4096 server ports in one range. The server opens one UDP socket for each port, so no other program can use a port of the range. A packet to a port of the range from a registered path must be valid MUP traffic, or the server drops it. Every other UDP packet to these ports goes on to the kernel, for example the replies of a NAT flow on such a port.
 - A UDP packet without a checksum is dropped. WireGuard always sends UDP checksums.
-- The target can be on the server host, on `127.0.0.1` or on another address of the host. The network device then completes the checksum of each reply. On an ICMP path, the device writes it into the Echo sequence field, so these replies have no fixed sequence.
+- The target can be on the server host, on `127.0.0.1` or on another address of the host. On a UDP path, the network device then completes the checksum of each reply. On an ICMP path, MUP computes the checksum itself, because some devices, for example vmxnet3, do not complete it for ICMP. A device that completes it can still change the Echo sequence field, so these replies have no fixed sequence.
 - On an ICMP route with `via`, the server reaches the `via` host only through the interface that faces the client.
 - A client binds a UDP control socket to its advertised IP and each listen port. If another program holds that port, the client does not start.
 - MUP attaches only to the interfaces that are up at start. After you add an interface, restart MUP.

@@ -161,6 +161,10 @@ static long (*bpf_clone_redirect)(struct __sk_buff *skb, __u32 ifindex,
 static long (*bpf_fib_lookup)(void *ctx, struct bpf_fib_lookup *params,
 			      int plen, __u32 flags) = (void *)69;
 static long (*bpf_skb_pull_data)(struct __sk_buff *skb, __u32 len) = (void *)39;
+static long (*bpf_skb_load_bytes)(const void *skb, __u32 offset, void *to,
+				  __u32 len) = (void *)26;
+static __s64 (*bpf_csum_diff)(__be32 *from, __u32 from_size, __be32 *to,
+			      __u32 to_size, __u32 seed) = (void *)28;
 static long (*bpf_map_push_elem)(const void *map, const void *value,
 				 __u64 flags) = (void *)87;
 static long (*bpf_map_pop_elem)(const void *map, void *value) = (void *)88;

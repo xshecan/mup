@@ -94,7 +94,7 @@ func TestRewriteUDPPartialLetsTheDeviceCompleteTheChecksum(t *testing.T) {
 	}
 }
 
-func TestRewriteICMPPartialLetsTheDeviceCompleteTheChecksum(t *testing.T) {
+func TestRewriteICMPPartialWritesAValidChecksum(t *testing.T) {
 	t.Parallel()
 
 	for _, length := range []int{HandshakeResponseLength, 1424} {
@@ -110,9 +110,17 @@ func TestRewriteICMPPartialLetsTheDeviceCompleteTheChecksum(t *testing.T) {
 		if err := RewriteICMPPartial(packet, testClientIP, reflector, 8, 9000, 2); err != nil {
 			t.Fatalf("RewriteICMPPartial: %v", err)
 		}
-		// The device writes the checksum at the UDP checksum offset.
-		binary.BigEndian.PutUint16(l4[6:8], internetChecksum(l4))
+		// A device that does not complete partial checksums sends this.
 		assertChecksumsValid(t, packet)
+		if sequence := binary.BigEndian.Uint16(l4[6:8]); sequence != 0 {
+			t.Fatalf("sequence = %#x, want 0", sequence)
+		}
+		// A device that completes them writes 0 or, as Linux does, 0xffff at
+		// the UDP checksum offset.
+		for _, word := range []uint16{internetChecksum(l4), 0xffff} {
+			binary.BigEndian.PutUint16(l4[6:8], word)
+			assertChecksumsValid(t, packet)
+		}
 
 		parsed, err := ParseIPv4L4(packet)
 		if err != nil {

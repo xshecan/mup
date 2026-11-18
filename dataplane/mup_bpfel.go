@@ -27,6 +27,11 @@ type mupClientKeyV1 struct {
 	InstanceNonce uint64
 }
 
+type mupCsumScratch struct {
+	_     structs.HostLayout
+	Bytes [512]uint8
+}
+
 type mupDuplicateKeyV1 struct {
 	_        structs.HostLayout
 	Route    mupServerRouteKeyV1
@@ -198,6 +203,7 @@ const (
 	mupMapClientEndpointByToken    = "client_endpoint_by_token"
 	mupMapClientPeerByEndpoint     = "client_peer_by_endpoint"
 	mupMapClientRoutesBySource     = "client_routes_by_source"
+	mupMapCsumScratch              = "csum_scratch"
 	mupMapDuplicateCache           = "duplicate_cache"
 	mupMapEncapPrograms            = "encap_programs"
 	mupMapEventLimits              = "event_limits"
@@ -286,6 +292,7 @@ type mupMapSpecs struct {
 	ClientEndpointByToken *ebpf.MapSpec `ebpf:"client_endpoint_by_token"`
 	ClientPeerByEndpoint  *ebpf.MapSpec `ebpf:"client_peer_by_endpoint"`
 	ClientRoutesBySource  *ebpf.MapSpec `ebpf:"client_routes_by_source"`
+	CsumScratch           *ebpf.MapSpec `ebpf:"csum_scratch"`
 	DuplicateCache        *ebpf.MapSpec `ebpf:"duplicate_cache"`
 	EncapPrograms         *ebpf.MapSpec `ebpf:"encap_programs"`
 	EventLimits           *ebpf.MapSpec `ebpf:"event_limits"`
@@ -338,6 +345,7 @@ type mupMaps struct {
 	ClientEndpointByToken *ebpf.Map `ebpf:"client_endpoint_by_token"`
 	ClientPeerByEndpoint  *ebpf.Map `ebpf:"client_peer_by_endpoint"`
 	ClientRoutesBySource  *ebpf.Map `ebpf:"client_routes_by_source"`
+	CsumScratch           *ebpf.Map `ebpf:"csum_scratch"`
 	DuplicateCache        *ebpf.Map `ebpf:"duplicate_cache"`
 	EncapPrograms         *ebpf.Map `ebpf:"encap_programs"`
 	EventLimits           *ebpf.Map `ebpf:"event_limits"`
@@ -366,6 +374,7 @@ func (m *mupMaps) Close() error {
 		m.ClientEndpointByToken,
 		m.ClientPeerByEndpoint,
 		m.ClientRoutesBySource,
+		m.CsumScratch,
 		m.DuplicateCache,
 		m.EncapPrograms,
 		m.EventLimits,
