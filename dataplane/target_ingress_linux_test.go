@@ -15,6 +15,7 @@ import (
 
 const (
 	tcActOK       = 0
+	tcActShot     = 2
 	tcActRedirect = 7
 	tcxNext       = math.MaxUint32 // TCX_NEXT is -1.
 )
@@ -76,6 +77,52 @@ func TestServerIngressInjectsIntoTheTargetInterface(t *testing.T) {
 	if token := output[14+20+8+1 : 14+20+8+4]; token[0]|token[1]|token[2] != 0 {
 		t.Fatalf("WireGuard reserved bytes = %x, want zero", token)
 	}
+}
+
+// A NAT can masquerade a flow to a pod with a port of the server range. The
+// replies of the pod then reach the server program before conntrack restores
+// their address. The program must leave them to the network stack.
+func TestServerIngressPassesAPacketWithoutARegisteredPath(t *testing.T) {
+	collection, _ := targetIngressCollection(t)
+	defer collection.Close()
+	program := collection.Programs["mup_server_ingress"]
+
+	// A WireGuard reply of a pod has zero reserved bytes, so it has no token.
+	pod := netip.MustParseAddr("10.1.0.55")
+	nat := netip.MustParseAddr("10.1.0.1")
+	reply := udpWireGuardFrame(t, pod, nat, 51820, 5000, 0)
+	result, output, err := program.Test(reply)
+	if err != nil {
+		t.Fatalf("program test: %v", err)
+	}
+	if result != tcxNext || string(output) != string(reply) {
+		t.Fatalf("pod reply: return value = %d, changed = %v, want TCX_NEXT and no change", int32(result), string(output) != string(reply))
+	}
+	if got := dropCount(t, collection, protocol.DropWireGuardReserved); got != 0 {
+		t.Fatalf("WG_RESERVED drops after the pod reply = %d, want 0", got)
+	}
+
+	// A packet of a registered path without a token is still a MUP error.
+	invalid := udpWireGuardFrame(t, ingressClient, ingressTarget, 51821, 5000, 0)
+	result, _, err = program.Test(invalid)
+	if err != nil {
+		t.Fatalf("program test: %v", err)
+	}
+	if result != tcActShot {
+		t.Fatalf("client packet without a token: return value = %d, want the drop %d", int32(result), tcActShot)
+	}
+	if got := dropCount(t, collection, protocol.DropWireGuardReserved); got != 1 {
+		t.Fatalf("WG_RESERVED drops after the client packet = %d, want 1", got)
+	}
+}
+
+func dropCount(t *testing.T, collection *ebpf.Collection, reason protocol.DropReason) uint64 {
+	t.Helper()
+	var values []uint64
+	if err := collection.Maps["stats"].Lookup(uint32(reason), &values); err != nil {
+		t.Fatalf("read drop count %d: %v", reason, err)
+	}
+	return aggregatePerCPU(values)
 }
 
 func TestServerEgressCatchesTheTargetReply(t *testing.T) {

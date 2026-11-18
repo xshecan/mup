@@ -1166,20 +1166,35 @@ int mup_server_ingress(struct __sk_buff *skb)
 		if (icmp->type != MUP_ICMP_ECHO_REQUEST || icmp->code != 0)
 			return MUP_TCX_NEXT;
 	}
+	path_key.source_ip = packet.ipv4->source;
+	path_key.local_ip = packet.ipv4->destination;
+	path_key.server_port = packet.server_port;
+	path_key.transport = packet.transport;
+	path = bpf_map_lookup_elem(&registered_paths, &path_key);
+	/*
+	 * A UDP server port is only a port number, so other traffic of the host
+	 * can use it too. For example, a NAT that masquerades a flow to a pod
+	 * can pick a port of the server range, and the replies of the pod then
+	 * come here before conntrack restores their address. A UDP packet
+	 * without a registered path thus goes on unchanged.
+	 */
+	if (!path && packet.transport == MUP_TRANSPORT_UDP)
+		return MUP_TCX_NEXT;
 	result = validate_wg(&packet, 1, &peer_token);
 	if (result != MUP_DROP_NONE) {
 		if (packet.transport == MUP_TRANSPORT_ICMP)
 			return MUP_TCX_NEXT;
 		return count_and_drop(skb, result);
 	}
-
-	path_key.source_ip = packet.ipv4->source;
-	path_key.local_ip = packet.ipv4->destination;
-	path_key.server_port = packet.server_port;
-	path_key.transport = packet.transport;
-	path = bpf_map_lookup_elem(&registered_paths, &path_key);
+	/*
+	 * An Echo Request with a WireGuard message is not a normal ping. Without
+	 * a registered path, for example before the ACK of a new client, the
+	 * kernel would echo the message back, and the client would take the
+	 * reply as a downstream packet.
+	 */
 	if (!path)
 		return count_and_drop(skb, MUP_DROP_NOT_REGISTERED);
+
 	now = bpf_ktime_get_ns();
 	if (path->expires_at_ns < now)
 		return count_and_drop(skb, MUP_DROP_NOT_REGISTERED);

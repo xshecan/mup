@@ -161,14 +161,16 @@ In burst mode, the program sends a clone on each healthy path of the group excep
 
 A UDP packet arrives at a server port, or an ICMP Echo Request arrives with a server port as identifier. The server ports are one port or a range, for example 5000-6000. The server program then does these steps:
 
-1. It makes sure that the packet is a valid WireGuard message with a token from 1 to 4095.
-2. It looks up the registered path by source IP, local IP, port, and transport. The path gives the client key.
-3. It makes sure that the registration of the client exists and did not expire.
+1. It looks up the registered path by source IP, local IP, port, and transport. The path gives the client key. If no path matches a UDP packet, the packet is not MUP traffic, and the program returns `TCX_NEXT`.
+2. It makes sure that the packet is a valid WireGuard message with a token from 1 to 4095.
+3. It makes sure that the path and the registration of the client exist and did not expire. An Echo Request without a registered path stops here. If the program passed it, the kernel echoes the WireGuard message back to the client, for example before the ACK of a new client.
 4. If the duplicate cache holds the same route and first 24 WireGuard bytes, it drops the packet.
 5. It finds the route of the client key and token. For a new route, it takes a port from `free_target_ports`. For a target on the server host, it never takes the port of the target.
 6. It records the path of this packet as the return path of the route.
 7. It clears the token and rewrites the packet to UDP, from the target port to the WireGuard target.
 8. It sends the packet out of the interface that leads to the target.
+
+Other traffic of the server host can use a port of the server range. For example, a NAT that masquerades a flow to a container can pick that port. The replies of the container then reach the server program on the container interface before conntrack restores their address. Step 1 leaves these packets to the kernel.
 
 The duplicate cache keeps each entry for 2 seconds. The first 24 WireGuard bytes hold the message type, the token, the receiver index, and the counter for data messages. Two different packets of one peer thus never share an entry.
 
@@ -392,7 +394,7 @@ A program returns `TCX_NEXT` for traffic that it does not own. This traffic incl
 | 5 | `WG_TYPE` | The WireGuard type is not 1 to 4. |
 | 6 | `WG_LENGTH` | The WireGuard length does not match the type. |
 | 7 | `WG_RESERVED` | The reserved bytes are not zero from WireGuard, or not a token from 1 to 4095 between MUP endpoints. |
-| 8 | `NOT_REGISTERED` | The server has no live registration for the path or the client. |
+| 8 | `NOT_REGISTERED` | The server has no live registration for the path or the client. A UDP packet without a registered path goes on to the kernel and counts no drop. |
 | 9 | `PATH_MISMATCH` | Reserved. Version 1 does not count it. |
 | 10 | `TRANSPORT` | A path or a route has an unknown transport. |
 | 11 | `PEER_TOKEN_POOL` | The client has no free token. |
