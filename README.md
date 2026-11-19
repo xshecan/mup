@@ -265,13 +265,13 @@ On a client, `mupctl status` prints this overview:
 
 ```text
 $ sudo mupctl status
-Role:            client
-Advertised IP:   192.0.2.10
-Uptime:          3h12m
-Paths:           2/3 healthy, generation 7
-Peers:           3
-Peer tokens:     4092 free, 0 quarantined
-Drops:           37 (NO_PATH 30, WG_LENGTH 7)
+Role:     client
+IP:       192.0.2.10
+Uptime:   3h12m
+Paths:    2/3 healthy, generation 7
+Peers:    3
+Tokens:   3/4095
+Drops:    37 (NO_PATH 30, WG_LENGTH 7)
 
 GROUP   MODE       PATHS         PEERS
 51820   fallback   2/2 healthy   2

@@ -115,10 +115,12 @@ func TestStatusShowsTheClientOverview(t *testing.T) {
 		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
 	}
 	for _, want := range []string{
-		"Role:            client",
-		"Uptime:          3h12m",
-		"Paths:           2/3 healthy, generation 7",
-		"Drops:           37 (NO_PATH 30, WG_LENGTH 7)",
+		"Role:     client",
+		"IP:       192.0.2.10",
+		"Uptime:   3h12m",
+		"Paths:    2/3 healthy, generation 7",
+		"Tokens:   14/4095",
+		"Drops:    37 (NO_PATH 30, WG_LENGTH 7)",
 		"GROUP   MODE       PATHS         PEERS",
 		"51820   fallback   2/2 healthy   12",
 		"51821   burst      0/1 healthy   2",
@@ -129,6 +131,22 @@ func TestStatusShowsTheClientOverview(t *testing.T) {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("status output misses %q:\n%s", want, stdout)
 		}
+	}
+}
+
+func TestStatusCountsQuarantinedTokensAsUsed(t *testing.T) {
+	t.Parallel()
+
+	status := clientStatus()
+	status.Client.TokensFree = 4000
+	status.Client.TokensQuarantined = 6
+	status.Client.TokensQuota = 4095
+	code, stdout, stderr := runCommand(t, fakeDaemon(t, status), "status")
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "Tokens:   95/4095") {
+		t.Fatalf("status output misses the token usage:\n%s", stdout)
 	}
 }
 

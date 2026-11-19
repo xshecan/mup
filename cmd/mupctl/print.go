@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/xshecan/mup/api"
+	"github.com/xshecan/mup/protocol"
 )
 
 func newTable(w io.Writer) *tabwriter.Writer {
@@ -34,11 +35,11 @@ func printStatus(w io.Writer, status api.Status, clients []api.RegisteredClient,
 				healthy++
 			}
 		}
-		field("Advertised IP", client.AdvertisedIP)
+		field("IP", client.AdvertisedIP)
 		field("Uptime", humanDuration(now.Sub(status.StartedAt)))
 		field("Paths", fmt.Sprintf("%d/%d healthy, generation %d", healthy, len(client.Paths), client.Generation))
 		field("Peers", strconv.FormatUint(client.Peers, 10))
-		field("Peer tokens", fmt.Sprintf("%d free, %d quarantined", client.TokensFree, client.TokensQuarantined))
+		field("Tokens", tokenUsage(client))
 		field("Drops", dropSummary(status.Drops))
 		_ = fields.Flush()
 		_, _ = fmt.Fprintln(w)
@@ -69,6 +70,17 @@ func printStatus(w io.Writer, status api.Status, clients []api.RegisteredClient,
 	default:
 		_ = fields.Flush()
 	}
+}
+
+// tokenUsage shows the peer tokens in use against the quota. A quarantined
+// token waits before its next use, so it counts as used.
+func tokenUsage(client *api.ClientStatus) string {
+	quota := client.TokensQuota
+	if quota == 0 {
+		quota = uint64(protocol.MaxPeerToken)
+	}
+	used := quota - min(client.TokensFree, quota)
+	return fmt.Sprintf("%d/%d", used, quota)
 }
 
 func printGroups(w io.Writer, groups []api.Group) {

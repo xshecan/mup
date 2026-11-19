@@ -29,6 +29,9 @@ type ClientStatus struct {
 	Peers             uint64  `json:"peers"`
 	TokensFree        uint64  `json:"tokens_free"`
 	TokensQuarantined uint64  `json:"tokens_quarantined"`
+	// TokensQuota is the number of peer tokens. A daemon before v0.3.4 does
+	// not send it.
+	TokensQuota uint64 `json:"tokens_quota,omitempty"`
 }
 
 // Group is the set of servers for the peers of one listen port.

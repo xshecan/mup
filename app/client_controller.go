@@ -18,6 +18,7 @@ import (
 	"github.com/xshecan/mup/config"
 	"github.com/xshecan/mup/control"
 	"github.com/xshecan/mup/dataplane"
+	"github.com/xshecan/mup/protocol"
 )
 
 const (
@@ -518,6 +519,7 @@ func (c *clientController) Status() (api.Status, error) {
 		Peers:             snapshot.ClientRoutes,
 		TokensFree:        snapshot.PeerTokensAvailable,
 		TokensQuarantined: snapshot.PeerQuarantined,
+		TokensQuota:       uint64(protocol.MaxPeerToken),
 	}
 	return api.Status{Role: api.RoleClient, StartedAt: c.startedAt, Client: status, Drops: apiDrops(snapshot)}, nil
 }

@@ -441,7 +441,7 @@ The daemon does not log counters. The control socket reports them on demand, and
 | Drops | Both | The `stats` map, summed over all CPUs. |
 | Paths | Client | The healthy mask and the generation in `path_state`. |
 | Peers | Client | The entries in `client_peer_by_endpoint`. The local port of an entry gives its group. |
-| Peer tokens | Client | 4095, minus the routes, minus the tokens in quarantine. |
+| Tokens | Client | The used tokens and the quota of 4095. The used tokens are the routes and the tokens in quarantine. |
 | Clients | Server | The entries in `registration_by_key` and `registered_paths`. |
 | Peers | Server | The entries in `server_route_by_key`. |
 | Target ports | Server | 41000, minus the routes, minus the ports in quarantine. |
