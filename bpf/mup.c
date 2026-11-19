@@ -613,6 +613,31 @@ static __always_inline int rewrite_icmp_partial(struct __sk_buff *skb,
 }
 
 /*
+ * complete_udp_checksum gives a UDP packet with a checksum of zero its
+ * computed checksum, so that the rewrites can update it. IPv4 lets a sender
+ * send zero for no checksum. Some NAT devices also write zero for a computed
+ * checksum of zero, where RFC 768 says 0xffff, so about 1 packet in 65536
+ * of their flows has it. MUP cannot derive a payload sum from zero, so it
+ * computes the sum from the payload. A packet with another checksum, or an
+ * ICMP packet, stays as it is.
+ */
+static __always_inline int complete_udp_checksum(struct __sk_buff *skb,
+						 struct mup_packet *packet)
+{
+	int payload_sum;
+
+	if (packet->transport != MUP_TRANSPORT_UDP || mup_l4_checksum(packet))
+		return 0;
+	payload_sum = mup_payload_sum_of(skb, packet->payload_length);
+	if (payload_sum < 0)
+		return -1;
+	mup_write_l4_checksum(packet,
+			      ~mup_csum_fold((__u32)payload_sum +
+					     mup_l4_header_sum(packet)));
+	return 0;
+}
+
+/*
  * A partial packet came from a local socket and still has CHECKSUM_PARTIAL.
  * A UDP rewrite leaves the checksum to the device, and an ICMP rewrite
  * computes it.
@@ -996,7 +1021,8 @@ int mup_client_ingress(struct __sk_buff *skb)
 		if (!forward || forward->peer_token != peer_token)
 			return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
 		forward->last_seen_ns = reverse->last_seen_ns;
-		if (mup_clear_peer_token(&packet) ||
+		if (complete_udp_checksum(skb, &packet) ||
+		    mup_clear_peer_token(&packet) ||
 		    mup_rewrite_udp(&packet, reverse->endpoint.local_ip,
 				    reverse->endpoint.source_ip,
 				    reverse->endpoint.listen_port,
@@ -1016,6 +1042,9 @@ int mup_client_ingress(struct __sk_buff *skb)
 	/* Only a packet on loopback can still have CHECKSUM_PARTIAL here. */
 	partial = skb->ifindex == MUP_LOOPBACK_IFINDEX &&
 		  mup_udp_is_partial(&packet);
+	/* A partial checksum is never zero, so this keeps a partial packet. */
+	if (complete_udp_checksum(skb, &packet))
+		return count_and_drop(skb, MUP_DROP_CHECKSUM);
 
 	endpoint.source_ip = packet.ipv4->source;
 	endpoint.local_ip = packet.ipv4->destination;
@@ -1146,6 +1175,8 @@ static __always_inline int server_target_reply(
 	if (!forward || forward->target_port != packet->destination_port)
 		return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
 	forward->last_seen_ns = now;
+	if (!partial && complete_udp_checksum(skb, packet))
+		return count_and_drop(skb, MUP_DROP_CHECKSUM);
 	if (!partial &&
 	    mup_set_peer_token(packet, reverse->route_key.peer_token))
 		return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
@@ -1350,7 +1381,8 @@ int mup_server_ingress(struct __sk_buff *skb)
 	 * client, so the target answers it there, and the answer leaves through
 	 * the egress hook of the target interface.
 	 */
-	if (mup_clear_peer_token(&packet) ||
+	if (complete_udp_checksum(skb, &packet) ||
+	    mup_clear_peer_token(&packet) ||
 	    mup_rewrite_udp(&packet,
 			    inject ? route_key.client.advertised_ip :
 				     configuration->source_ip,

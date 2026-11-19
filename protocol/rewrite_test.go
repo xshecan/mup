@@ -182,20 +182,20 @@ func TestRewriteHandlesUDPChecksumSentAsAllOnes(t *testing.T) {
 	assertChecksumsValid(t, packet)
 }
 
-func TestRewriteRejectsUDPWithoutChecksum(t *testing.T) {
+func TestRewriteComputesTheChecksumOfUDPWithoutChecksum(t *testing.T) {
 	t.Parallel()
 
-	packet := buildPacket(t, IPProtocolUDP, makeWireGuardPacket(MessageCookieReply, CookieReplyLength))
-	binary.BigEndian.PutUint16(packet[26:28], 0)
-	if err := RewritePeerToken(packet, 5); err != nil {
-		t.Fatalf("RewritePeerToken: %v", err)
-	}
-	if checksum := binary.BigEndian.Uint16(packet[26:28]); checksum != 0 {
-		t.Fatalf("absent UDP checksum became %#04x", checksum)
-	}
-	err := RewriteICMP(packet, testClientIP, testServerIP, 8, 5000, 5)
-	if !errors.Is(err, ErrRewriteChecksum) {
-		t.Fatalf("RewriteICMP error = %v, want %v", err, ErrRewriteChecksum)
+	for _, output := range []uint8{IPProtocolUDP, IPProtocolICMP} {
+		packet := buildPacket(t, IPProtocolUDP, makeWireGuardPacket(MessageCookieReply, CookieReplyLength))
+		binary.BigEndian.PutUint16(packet[26:28], 0)
+		if err := RewritePeerToken(packet, 5); err != nil {
+			t.Fatalf("RewritePeerToken: %v", err)
+		}
+		if checksum := binary.BigEndian.Uint16(packet[26:28]); checksum != 0 {
+			t.Fatalf("absent UDP checksum became %#04x", checksum)
+		}
+		rewriteTo(t, packet, output, 5)
+		assertChecksumsValid(t, packet)
 	}
 }
 

@@ -88,7 +88,8 @@ static __always_inline void mup_write_l4_checksum(struct mup_packet *packet,
 /*
  * mup_write_peer_token stores a peer token in WireGuard bytes 1 to 3, or
  * zero to clear them, and updates the transport checksum. A UDP packet
- * without a checksum keeps it at zero, and the next rewrite drops it.
+ * without a checksum keeps it at zero. The callers in mup.c first give such a
+ * packet a computed checksum (complete_udp_checksum).
  */
 static __always_inline int mup_write_peer_token(struct mup_packet *packet,
 						__u32 peer_token)
@@ -139,7 +140,8 @@ static __always_inline __u32 mup_read_peer_token(
 /*
  * mup_payload_sum derives the one's complement sum of the transport payload
  * from the current checksum. A UDP packet without a checksum has no sum to
- * derive, so MUP drops it.
+ * derive, so the callers in mup.c first compute its checksum
+ * (complete_udp_checksum).
  */
 static __always_inline int mup_payload_sum(const struct mup_packet *packet,
 					   __u32 *sum)

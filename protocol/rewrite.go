@@ -10,6 +10,8 @@ import (
 // the IPv4 addresses and protocol, the 8-byte UDP or ICMP header, and the peer
 // token in WireGuard bytes 1 to 3. Each change updates the transport checksum
 // incrementally (RFC 1624), so the cost does not depend on the payload length.
+// A UDP packet with a checksum of zero is the exception: the rewrite computes
+// its payload sum from the payload.
 
 var (
 	ErrRewriteAddress  = errors.New("rewrite requires IPv4 addresses")
@@ -173,7 +175,10 @@ func RewritePeerToken(packet []byte, token uint32) error {
 }
 
 // beginRewrite derives the payload sum from the current transport checksum
-// and writes the new IPv4 addresses. It returns the transport segment.
+// and writes the new IPv4 addresses. It returns the transport segment. A UDP
+// checksum of zero has no sum to derive. IPv4 senders can send it for no
+// checksum, and some NAT devices write it for a computed checksum of zero,
+// where RFC 768 says 0xffff. So beginRewrite then sums the payload.
 func beginRewrite(packet []byte, source, destination netip.Addr) ([]byte, uint32, error) {
 	if !source.Is4() || !destination.Is4() {
 		return nil, 0, ErrRewriteAddress
@@ -184,11 +189,13 @@ func beginRewrite(packet []byte, source, destination netip.Addr) ([]byte, uint32
 	}
 	l4 := packet[20 : 28+len(parsed.Payload)]
 	checksum := transportChecksum(parsed.Protocol, l4)
+	var payloadSum uint32
 	if parsed.Protocol == IPProtocolUDP && checksum == 0 {
-		return nil, 0, ErrRewriteChecksum
+		payloadSum = sumWords(parsed.Payload, 0)
+	} else {
+		payloadSum = uint32(^checksum)
+		payloadSum += uint32(^checksumFold(transportHeaderSum(packet, l4)))
 	}
-	payloadSum := uint32(^checksum)
-	payloadSum += uint32(^checksumFold(transportHeaderSum(packet, l4)))
 	sourceBytes := source.As4()
 	destinationBytes := destination.As4()
 	copy(packet[12:16], sourceBytes[:])

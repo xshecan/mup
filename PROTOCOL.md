@@ -85,11 +85,11 @@ MUP rewrites every packet in place, as the hexdump in the previous section shows
 
 ### Checksums
 
-MUP computes the IPv4 header checksum again over the 20 header bytes. It updates the UDP or ICMP checksum incrementally, as RFC 1624 describes. The formula is `HC' = ~(~HC + ~m + m')`, where `m` holds the old words and `m'` holds the new words. First, it derives the sum of the payload from the old checksum and the old header words. Then it adds the new header words and writes the new checksum. The cost is the same for every packet size, and MUP never reads the payload bytes.
+MUP computes the IPv4 header checksum again over the 20 header bytes. It updates the UDP or ICMP checksum incrementally, as RFC 1624 describes. The formula is `HC' = ~(~HC + ~m + m')`, where `m` holds the old words and `m'` holds the new words. First, it derives the sum of the payload from the old checksum and the old header words. Then it adds the new header words and writes the new checksum. The cost is the same for every packet size. MUP reads the payload bytes in only two cases, which the next paragraphs describe: a UDP checksum of zero and a partial checksum on an ICMP path.
 
 A valid checksum stays valid after a rewrite, and a corrupt checksum stays corrupt. The receiver then drops the corrupt packet as usual. The UDP checksum covers the UDP pseudo-header, and the ICMP checksum does not. A computed UDP checksum of zero goes on the wire as 0xffff, as RFC 768 requires.
 
-If a UDP packet arrives without a checksum, MUP drops it and counts reason 20. A zero checksum field gives no payload sum to update. WireGuard implementations always send UDP checksums.
+A UDP checksum field of zero gives no payload sum to update. IPv4 lets a sender send zero when it computes no checksum. Some NAT devices also write zero when the computed checksum is zero, where RFC 768 requires 0xffff. About 1 packet in 65536 of their flows then arrives with zero, and plain WireGuard accepts it as a packet without a checksum. So MUP sums the payload of such a packet, up to 9216 bytes, writes its checksum, and then rewrites it as usual. If the payload is longer, MUP drops the packet and counts reason 20.
 
 A target on the server host, for example `127.0.0.1`, answers from a local socket. Its replies have a partial checksum (`CHECKSUM_PARTIAL`): the UDP checksum field holds only the pseudo-header sum, and the network device adds the UDP header and the payload at send time. If the target IP equals the source IP of the target route, the server handles the target as local. The target can use any address of the server host, and the server reaches it through the loopback interface. On a UDP path, the server writes the new pseudo-header sum and leaves the rest to the device. On an ICMP path, the server computes the ICMP checksum from the payload and keeps the sequence at zero. It does not leave this checksum to the device, because some devices, for example vmxnet3, do not complete the partial checksum of an ICMP packet. A device that completes it writes a word at the UDP checksum offset, which is the Echo sequence field. If all words add up to 0xffff, a one's complement checksum is valid, so this word keeps the checksum valid. The client does not read the sequence, because the peer token is in the WireGuard bytes. The client does the same for a packet from WireGuard on the client host. That packet also comes through loopback with a partial checksum.
 
@@ -370,7 +370,7 @@ The sweep copies each map before it deletes entries, because a deletion restarts
 
 ## Input rules
 
-A network device can keep only the first bytes of a large packet in the buffer that a program can read. The programs need only the first 90 bytes of a packet: the headers, the start of the WireGuard message, and a control frame. If fewer bytes are readable, the program pulls them into the buffer. It never reads the rest of the payload.
+A network device can keep only the first bytes of a large packet in the buffer that a program can read. The programs need only the first 90 bytes of a packet: the headers, the start of the WireGuard message, and a control frame. If fewer bytes are readable, the program pulls them into the buffer. Only a checksum that MUP must compute makes it read the rest of the payload, and it copies those bytes chunk by chunk without a pull.
 
 The programs forward only IPv4 packets with a 20-byte header, no fragments, and a UDP or ICMP header. The UDP length must match the IPv4 total length. The WireGuard message must have a valid length for its type.
 
@@ -406,7 +406,7 @@ A program returns `TCX_NEXT` for traffic that it does not own. This traffic incl
 | 17 | `FIB` | A burst clone got no FIB result for its path. MUP skips the clone, not the packet. |
 | 18 | `NEIGHBOR` | A burst clone failed to redirect. MUP skips the clone, not the packet. |
 | 19 | `TAIL_CALL` | Reserved. Version 1 does not count it. |
-| 20 | `CHECKSUM` | A rewrite failed, for example on a UDP packet without a checksum. |
+| 20 | `CHECKSUM` | A rewrite failed, for example on a UDP packet without a checksum and with a payload longer than 9216 bytes. |
 | 21 | `SOURCE_LIMIT` | The source IP of a new peer already has 1024 routes on the client. |
 | 22 | `DOWNSTREAM_SOURCE` | A downstream packet came from a source that the group of the peer does not expect. |
 
