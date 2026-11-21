@@ -312,6 +312,10 @@ A DOWN_REGISTER with flag bit 4 declares a down bridge, and its down server fiel
 
 The server sends each REGISTER_ACK directly, and also on every down path of the client, with the next member of a pool each time. One ACK makes the up path healthy, on any of these ways. So an up path stays healthy, even with no packet back on its own flow.
 
+### Up reflect registration
+
+An up reflect path sends its REGISTER reflected through each member. The frame has flag bit 5 and the member as the return IP. On an ICMP path, the client sends an Echo Request to the member, with the server as the source. The member then answers the server with an Echo Reply. On a UDP path, the client sends to the server with the member as the source. The server reads the reflected source as the path source, not the advertised IP. It registers one path for each member, and skips the reflector setup of a reply pool. The ACK of each member names the member in its return IP. So the client keeps the members that answer, and drops the rest. The members that answer carry the upstream, as `up_reflect_members` on the client and one registered path for each member on the server.
+
 ### Client restarts
 
 A client picks a new instance nonce at each start. The server keeps one registration for each advertised IP. A REGISTER with a new nonce replaces the registration of the old nonce. The next sweep then deletes the paths and routes of the old nonce.
@@ -331,7 +335,7 @@ The control frame is 48 bytes long, and all integers are big-endian.
 | 4 | 1 | version | 1. |
 | 5 | 1 | type | 1 is REGISTER, 2 is REGISTER_ACK, 3 is PROBE, 4 is PROBE_REPLY, and 7 is DOWN_REGISTER. Types 5 and 6 are reserved. |
 | 6 | 1 | transport | 0 is UDP and 1 is ICMP. |
-| 7 | 1 | flags | Bit 0 means that the return IP field holds one return IP. Bit 1 means that it holds the base of a return pool. Bit 2 selects the per-packet balance mode of a pool. Bit 3 marks a PROBE or a PROBE_REPLY of a down path, and its path ID is then a down path ID. Bit 4 marks a DOWN_REGISTER of a down bridge. The other bits must be zero. |
+| 7 | 1 | flags | Bit 0 means that the return IP field holds one return IP. Bit 1 means that it holds the base of a return pool. Bit 2 selects the per-packet balance mode of a pool. Bit 3 marks a PROBE or a PROBE_REPLY of a down path, and its path ID is then a down path ID. Bit 4 marks a DOWN_REGISTER of a down bridge. Bit 5 marks a REGISTER whose return IP is the via of an up reflect path. The other bits must be zero. |
 | 8 | 2 | length | 48. |
 | 10 | 2 | status | 0 is OK. 7 is NO_REFLECTOR: the return pool of the path has no healthy reflector. Values 1 to 6 name errors, but the server does not send them. |
 | 12 | 2 | path ID | 0 to 7, the slot of the path in the client. |

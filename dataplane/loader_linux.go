@@ -191,12 +191,13 @@ func (r *Runtime) ConfigureClient(settings ClientSettings) error {
 		return err
 	}
 	return applyClientSettings(configurationMaps{
-		client:  r.objects.ClientConfig,
-		groups:  r.objects.PathGroups,
-		paths:   r.objects.PathConfig,
-		returns: r.objects.PathReturns,
-		state:   r.objects.PathState,
-		downs:   r.objects.ClientDownPaths,
+		client:    r.objects.ClientConfig,
+		groups:    r.objects.PathGroups,
+		paths:     r.objects.PathConfig,
+		returns:   r.objects.PathReturns,
+		upReflect: r.objects.UpReflectMembers,
+		state:     r.objects.PathState,
+		downs:     r.objects.ClientDownPaths,
 	}, settings)
 }
 

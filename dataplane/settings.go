@@ -190,6 +190,29 @@ func encodePathReturn(index int, path PathSettings) (mupPathReturnV1, error) {
 	return mupPathReturnV1{ReturnIp: returnIP, Flags: protocol.ControlFlagReturnIP}, nil
 }
 
+// encodeUpReflect encodes the reflect members of an up reflect path slot. The
+// client reflects the upstream through these members. An empty list is an empty
+// entry, so the client egress leaves the slot as a direct path. perPacket picks
+// the per-packet balance mode, and false picks the per-peer mode.
+func encodeUpReflect(members []netip.Addr, perPacket bool) (mupUpReflectV1, error) {
+	var reflect mupUpReflectV1
+	if len(members) > len(reflect.Members) {
+		return reflect, fmt.Errorf("up reflect path has %d members, at most %d", len(members), len(reflect.Members))
+	}
+	for position, member := range members {
+		word, err := requiredIPv4Word(member, fmt.Sprintf("up reflect member %d", position))
+		if err != nil {
+			return reflect, err
+		}
+		reflect.Members[position] = word
+	}
+	reflect.Count = uint32(len(members))
+	if perPacket {
+		reflect.Flags = protocol.ControlFlagBalancePerPacket
+	}
+	return reflect, nil
+}
+
 func encodePathSettings(index int, path PathSettings) (mupPathConfigV1, error) {
 	if index < 0 || index >= config.MaxPaths {
 		return mupPathConfigV1{}, fmt.Errorf("path slot %d is outside 0 to %d", index, config.MaxPaths-1)

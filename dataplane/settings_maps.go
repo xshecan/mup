@@ -2,6 +2,7 @@ package dataplane
 
 import (
 	"fmt"
+	"net/netip"
 
 	"github.com/cilium/ebpf"
 
@@ -13,15 +14,16 @@ type configurationMap interface {
 }
 
 type configurationMaps struct {
-	client  configurationMap
-	server  configurationMap
-	ports   configurationMap
-	ingress configurationMap
-	groups  configurationMap
-	paths   configurationMap
-	returns configurationMap
-	state   configurationMap
-	downs   configurationMap
+	client    configurationMap
+	server    configurationMap
+	ports     configurationMap
+	ingress   configurationMap
+	groups    configurationMap
+	paths     configurationMap
+	returns   configurationMap
+	upReflect configurationMap
+	state     configurationMap
+	downs     configurationMap
 }
 
 func applyClientSettings(maps configurationMaps, settings ClientSettings) error {
@@ -47,6 +49,14 @@ func applyClientSettings(maps configurationMaps, settings ClientSettings) error 
 		}
 		if err := maps.paths.Update(uint32(index), path, ebpf.UpdateAny); err != nil {
 			return fmt.Errorf("update client path %d: %w", index, err)
+		}
+		// The control plane owns the reflect members of an up reflect slot, and
+		// writes the healthy members as the registrations come up. A full apply
+		// clears them, so a reused slot does not keep the members of an old path.
+		if maps.upReflect != nil {
+			if err := maps.upReflect.Update(uint32(index), mupUpReflectV1{}, ebpf.UpdateAny); err != nil {
+				return fmt.Errorf("clear up reflect members of client path %d: %w", index, err)
+			}
 		}
 	}
 	if maps.downs != nil {
@@ -121,7 +131,7 @@ func applyGroup(groups configurationMap, group GroupSettings) error {
 	return nil
 }
 
-func applyPath(paths, returns configurationMap, slot int, path PathSettings) error {
+func applyPath(paths, returns, upReflect configurationMap, slot int, path PathSettings) error {
 	encoded, err := encodePathSettings(slot, path)
 	if err != nil {
 		return err
@@ -133,8 +143,31 @@ func applyPath(paths, returns configurationMap, slot int, path PathSettings) err
 	if err := returns.Update(uint32(slot), pathReturn, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("update return IP of client path %d: %w", slot, err)
 	}
+	// A new path has no healthy reflect members yet. The control plane fills
+	// them for an up reflect path, so clear any members of an old path.
+	if upReflect != nil {
+		if err := upReflect.Update(uint32(slot), mupUpReflectV1{}, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("clear up reflect members of client path %d: %w", slot, err)
+		}
+	}
 	if err := paths.Update(uint32(slot), encoded, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("update client path %d: %w", slot, err)
+	}
+	return nil
+}
+
+// applyUpReflectMembers writes the reflect members of an up reflect path slot.
+// An empty list clears the slot, so the egress leaves it a direct path.
+func applyUpReflectMembers(upReflect configurationMap, slot int, members []netip.Addr, perPacket bool) error {
+	if slot < 0 || slot >= config.MaxPaths {
+		return fmt.Errorf("path slot %d is outside 0 to %d", slot, config.MaxPaths-1)
+	}
+	encoded, err := encodeUpReflect(members, perPacket)
+	if err != nil {
+		return err
+	}
+	if err := upReflect.Update(uint32(slot), encoded, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("update up reflect members of client path %d: %w", slot, err)
 	}
 	return nil
 }
@@ -159,7 +192,7 @@ func applyDownPath(downs configurationMap, slot int, path *DownPathSettings) err
 
 // clearPath writes an empty entry. The client program skips a slot without a
 // destination address.
-func clearPath(paths, returns configurationMap, slot int) error {
+func clearPath(paths, returns, upReflect configurationMap, slot int) error {
 	if slot < 0 || slot >= config.MaxPaths {
 		return fmt.Errorf("path slot %d is outside 0 to %d", slot, config.MaxPaths-1)
 	}
@@ -168,6 +201,11 @@ func clearPath(paths, returns configurationMap, slot int) error {
 	}
 	if err := returns.Update(uint32(slot), mupPathReturnV1{}, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("clear return IP of client path %d: %w", slot, err)
+	}
+	if upReflect != nil {
+		if err := upReflect.Update(uint32(slot), mupUpReflectV1{}, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("clear up reflect members of client path %d: %w", slot, err)
+		}
 	}
 	return nil
 }

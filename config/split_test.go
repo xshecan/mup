@@ -96,10 +96,10 @@ func TestLoadClientRejectsBadDirections(t *testing.T) {
 			want: "at least one route",
 		},
 		{
-			name: "via on an up route",
+			name: "via on an up bridge",
 			group: `
       upstream:
-        routes:
+        bridges:
           - 203.0.113.5:9000/udp via 198.51.100.1
       downstream:
         routes:
@@ -163,6 +163,49 @@ client:
 				t.Fatalf("Load error = %v, want one with %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestUpRouteReflectParses(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Load(writeFile(t, `
+client:
+  advertise: 192.0.2.10
+  servers:
+    - port: 51820
+      upstream:
+        routes:
+          - 203.0.113.5:9000/icmp via 198.51.100.1
+          - 203.0.113.5:9100/icmp via 87.107.117.192/28 balance per-packet
+          - 203.0.113.5:9200/udp via 194.225.72.10
+      downstream:
+        routes:
+          - 203.0.113.5:9300/udp
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	group := cfg.Client.Groups[0]
+	if len(group.Paths) != 3 {
+		t.Fatalf("up paths = %d, want 3", len(group.Paths))
+	}
+	for index, path := range group.Paths {
+		if !path.UpReflect(group.Split()) {
+			t.Fatalf("up path %d UpReflect = false, want true (%s)", index, path)
+		}
+	}
+	if path := group.Paths[1]; !path.IsPool() || path.Balance != BalancePerPacket {
+		t.Fatalf("pool up path = %#v, want a per-packet pool", path)
+	}
+}
+
+func TestSymmetricRouteIsNotUpReflect(t *testing.T) {
+	t.Parallel()
+
+	path := mustPath(t, "203.0.113.5:9000/icmp via 198.51.100.1")
+	if path.UpReflect(false) {
+		t.Fatalf("a symmetric route must not be an up reflect path: %s", path)
 	}
 }
 

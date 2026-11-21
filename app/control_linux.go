@@ -46,6 +46,9 @@ func newClientPathOpener() clientControls {
 }
 
 func (c *linuxClientControls) open(registration pathRegistration) (pathConn, error) {
+	if registration.upReflect {
+		return openUpReflectPathConn(registration, c.sockets.router)
+	}
 	if registration.path.Transport == protocol.TransportUDP {
 		return openUDPPathConn(c.sockets, registration)
 	}
@@ -523,7 +526,10 @@ func serveServerICMPControl(
 			return err
 		}
 		echo, err := parseICMPEcho(stripIPv4Header(buffer[:count]))
-		if err != nil || echo.echoType != icmpEchoRequest || !server.Port.Contains(echo.identifier) {
+		// A reflected up REGISTER arrives as an Echo Reply from the via host, so
+		// the server reads both Echo Requests and Echo Replies as control.
+		if err != nil || (echo.echoType != icmpEchoRequest && echo.echoType != icmpEchoReply) ||
+			!server.Port.Contains(echo.identifier) {
 			continue
 		}
 		frame, err := protocol.DecodeControlFrame(echo.payload)
@@ -598,6 +604,10 @@ func acceptRegistration(
 	if frame.Flags&protocol.ControlFlagBalancePerPacket != 0 {
 		balance = config.BalancePerPacket
 	}
+	// An up reflect REGISTER arrives from the via host, so its source is the
+	// via. The path accepts the reflected upstream from that source, and it
+	// reflects no replies, so the server skips the reflector setup below.
+	upReflect := frame.Flags&protocol.ControlFlagUpReflect != 0
 	settings := dataplane.RegistrationSettings{
 		AdvertisedIP:  frame.AdvertisedIP,
 		InstanceNonce: frame.InstanceNonce,
@@ -607,6 +617,7 @@ func acceptRegistration(
 		ListenPort:    frame.ListenPort,
 		PathCount:     1,
 		ExpiresAtNS:   now + uint64(registrationLeaseSeconds)*uint64(time.Second),
+		UpReflect:     upReflect,
 		Path: dataplane.RegisteredPathSettings{
 			SourceIP:   source,
 			LocalIP:    local,
@@ -619,7 +630,7 @@ func acceptRegistration(
 		return nil, err
 	}
 	status := protocol.ControlStatusOK
-	if frame.Flags&protocol.ControlFlagReturnPool != 0 {
+	if !upReflect && frame.Flags&protocol.ControlFlagReturnPool != 0 {
 		if err := sink.ObservePool(frame.ReturnIP, frame.ReturnPrefix, transport); err != nil {
 			return nil, err
 		}

@@ -135,6 +135,22 @@ struct {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 8);
+	MUP_PINNED;
+	__type(key, __u32);
+	__type(value, struct up_reflect_v1);
+} up_reflect_members SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	MUP_PINNED;
+	__type(key, __u32);
+	__type(value, __u32);
+} up_reflect_cursor SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 1);
 	MUP_PINNED;
 	__type(key, __u32);
@@ -458,8 +474,64 @@ static __always_inline __u32 mup_mask64_has(__u64 mask, __u32 index)
 	return bit;
 }
 
+/*
+ * apply_up_reflect reflects the upstream of an up path through a member of its
+ * pool, when the slot has an up_reflect_members entry. It picks a member by the
+ * balance mode, and it rewrites a local copy of the path. On an ICMP path the
+ * source becomes the server and the destination becomes the member, so the
+ * member answers the server with an Echo Reply. On a UDP path the source
+ * becomes the member and the destination stays the server. A slot without an
+ * entry, or with no member, keeps the path as it is.
+ */
+static __always_inline void apply_up_reflect(__u32 index,
+					     struct path_config_v1 *path,
+					     __u32 peer_token)
+{
+	struct up_reflect_v1 *reflect;
+	__u32 cursor_key = 0;
+	__be32 member = 0;
+	__be32 server;
+	__u32 count;
+	__u32 slot;
+
+	reflect = bpf_map_lookup_elem(&up_reflect_members, &index);
+	if (!reflect)
+		return;
+	count = reflect->count;
+	if (count == 0 || count > MUP_MAX_POOL)
+		return;
+	if (reflect->flags & MUP_FLAG_BALANCE_PER_PACKET) {
+		__u32 *cursor = bpf_map_lookup_elem(&up_reflect_cursor,
+						    &cursor_key);
+
+		if (!cursor)
+			return;
+		slot = (*cursor)++ % count;
+	} else {
+		__u32 hash = peer_token * 0x9e3779b1U;
+
+		hash ^= hash >> 16;
+		slot = hash % count;
+	}
+#pragma clang loop unroll(full)
+	for (int member_index = 0; member_index < MUP_MAX_POOL; member_index++) {
+		if ((__u32)member_index == slot)
+			member = reflect->members[member_index];
+	}
+	if (!member)
+		return;
+	server = path->destination_ip;
+	if (path->transport == MUP_TRANSPORT_ICMP) {
+		path->source_ip = server;
+		path->destination_ip = member;
+	} else {
+		path->source_ip = member;
+	}
+}
+
 static __always_inline struct path_config_v1 *select_client_path(
-	const struct path_group_v1 *group, __u32 peer_token)
+	const struct path_group_v1 *group, __u32 peer_token,
+	__u32 *selected_index_out)
 {
 	struct path_state_v1 *state;
 	struct path_config_v1 *path;
@@ -470,6 +542,8 @@ static __always_inline struct path_config_v1 *select_client_path(
 	__u32 usable_mask;
 	__u8 selected_priority = 0xff;
 
+	if (selected_index_out)
+		*selected_index_out = 0;
 	state = bpf_map_lookup_elem(&path_state, &state_key);
 	if (!state)
 		return 0;
@@ -501,8 +575,11 @@ static __always_inline struct path_config_v1 *select_client_path(
 			path = bpf_map_lookup_elem(&path_config, &key);
 			if (!path || !path->destination_ip || !path->ifindex)
 				continue;
-			if (healthy_count == ordinal)
+			if (healthy_count == ordinal) {
+				if (selected_index_out)
+					*selected_index_out = index;
 				return path;
+			}
 			healthy_count++;
 		}
 		return 0;
@@ -524,6 +601,8 @@ static __always_inline struct path_config_v1 *select_client_path(
 	}
 	if (!selected)
 		return 0;
+	if (selected_index_out)
+		*selected_index_out = selected_index;
 	return bpf_map_lookup_elem(&path_config, &selected_index);
 }
 
@@ -1012,6 +1091,7 @@ __attribute__((noinline)) int mup_burst_clone(struct __sk_buff *skb, __u32 index
 	    !mapped_path->ifindex || mapped_path->transport > MUP_TRANSPORT_ICMP)
 		return MUP_BURST_SKIPPED;
 	path = *mapped_path;
+	apply_up_reflect(index, &path, peer_token);
 	result = rewrite_for_path(skb, &packet, (__u16)listen_port, &path,
 				  peer_token, partial);
 	if (result) {
@@ -1092,6 +1172,7 @@ static __always_inline int burst_client_packet(
 	    !mapped_path->ifindex || mapped_path->transport > MUP_TRANSPORT_ICMP)
 		return cloned ? TC_ACT_SHOT : count_and_drop(skb, MUP_DROP_NO_PATH);
 	path = *mapped_path;
+	apply_up_reflect(final_key, &path, peer_token);
 	result = rewrite_for_path(skb, packet, listen_port, &path, peer_token,
 				  partial);
 	if (result == -2)
@@ -1352,19 +1433,22 @@ int mup_client_ingress(struct __sk_buff *skb)
 					   group->path_mask, peer_token,
 					   partial);
 	}
-	path = select_client_path(group, peer_token);
+	__u32 selected_index = 0;
+	path = select_client_path(group, peer_token, &selected_index);
 	if (!path)
 		return count_and_drop(skb, MUP_DROP_NO_PATH);
+	struct path_config_v1 selected_path = *path;
+	apply_up_reflect(selected_index, &selected_path, peer_token);
 	if (mup_set_peer_token(&packet, peer_token))
 		return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
-	result = rewrite_for_path(skb, &packet, endpoint.listen_port, path,
-				  peer_token, partial);
+	result = rewrite_for_path(skb, &packet, endpoint.listen_port,
+				  &selected_path, peer_token, partial);
 	if (result == -2)
 		return count_and_drop(skb, MUP_DROP_TRANSPORT);
 	if (result)
 		return count_and_drop(skb, MUP_DROP_CHECKSUM);
 
-	return redirect_packet(path->ifindex);
+	return redirect_packet(selected_path.ifindex);
 }
 
 /*
@@ -1937,7 +2021,8 @@ int mup_server_ingress(struct __sk_buff *skb)
 		return MUP_TCX_NEXT;
 	if (packet.transport == MUP_TRANSPORT_ICMP) {
 		struct mup_icmphdr *icmp = packet.l4;
-		if (icmp->type != MUP_ICMP_ECHO_REQUEST || icmp->code != 0)
+		if ((icmp->type != MUP_ICMP_ECHO_REQUEST &&
+		     icmp->type != MUP_ICMP_ECHO_REPLY) || icmp->code != 0)
 			return MUP_TCX_NEXT;
 	}
 	path_key.source_ip = packet.ipv4->source;
@@ -1968,6 +2053,18 @@ int mup_server_ingress(struct __sk_buff *skb)
 	 */
 	if (!path)
 		return count_and_drop(skb, MUP_DROP_NOT_REGISTERED);
+	/*
+	 * A reflected upstream arrives as an Echo Reply from the via host, and
+	 * its registered path has MUP_FLAG_UP_REFLECT. Another Echo Reply with a
+	 * WireGuard payload is not a reflected upstream, so it goes on to the
+	 * kernel.
+	 */
+	if (packet.transport == MUP_TRANSPORT_ICMP) {
+		struct mup_icmphdr *icmp = packet.l4;
+		if (icmp->type == MUP_ICMP_ECHO_REPLY &&
+		    !(path->flags & MUP_FLAG_UP_REFLECT))
+			return MUP_TCX_NEXT;
+	}
 
 	now = bpf_ktime_get_ns();
 	if (path->expires_at_ns < now)

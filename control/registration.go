@@ -152,7 +152,9 @@ func (r *Registry) validate(request RegistrationRequest) error {
 	if request.Frame.Type != protocol.ControlRegister {
 		return ErrRegistrationType
 	}
-	if request.Path.Source != request.Frame.AdvertisedIP {
+	// An up reflect REGISTER arrives from the via host, so its source is the
+	// via, not the advertised IP. The server keys the path by the via source.
+	if request.Frame.Flags&protocol.ControlFlagUpReflect == 0 && request.Path.Source != request.Frame.AdvertisedIP {
 		return ErrRegistrationSource
 	}
 	if request.Frame.ServerPort < r.firstPort || request.Frame.ServerPort > r.lastPort ||

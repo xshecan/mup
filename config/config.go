@@ -337,11 +337,11 @@ func (g Group) validate() error {
 		if err := path.validate(); err != nil {
 			return fmt.Errorf("server %d: route %d: %w", g.ListenPort, index, err)
 		}
-		if g.Split() && path.ReturnIP.IsValid() {
-			return fmt.Errorf("server %d: upstream route %d: an up route has no via, because the downstream routes carry the replies", g.ListenPort, index)
-		}
 		if path.Bridge && !g.Split() {
 			return fmt.Errorf("server %d: route %d: a bridge needs a group with upstream and downstream", g.ListenPort, index)
+		}
+		if path.Bridge && path.ReturnIP.IsValid() {
+			return fmt.Errorf("server %d: upstream route %d: an up bridge has no via, because it passes the client packets on to the server", g.ListenPort, index)
 		}
 	}
 	if g.DownMode > ModeBurst {
@@ -391,6 +391,14 @@ func (p Path) Kind() string {
 // IsPool reports whether the path returns through a pool of addresses.
 func (p Path) IsPool() bool {
 	return p.ReturnPrefix != 0
+}
+
+// UpReflect reports whether the path reflects the upstream. An up route of a
+// group with down paths that has a return IP, and is not a bridge, reflects the
+// upstream through the return IP or the pool. The split argument is true for a
+// group with down paths.
+func (p Path) UpReflect(split bool) bool {
+	return split && !p.Bridge && p.ReturnIP.IsValid()
 }
 
 // HasPortRange reports whether the path has more than one server port.

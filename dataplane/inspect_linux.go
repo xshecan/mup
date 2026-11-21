@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"net/netip"
 	"slices"
 
 	"github.com/cilium/ebpf"
@@ -18,7 +19,7 @@ func (r *Runtime) SetPath(slot int, path PathSettings) error {
 	if r.closed {
 		return errors.New("set path: MUP dataplane is closed")
 	}
-	return applyPath(r.objects.PathConfig, r.objects.PathReturns, slot, path)
+	return applyPath(r.objects.PathConfig, r.objects.PathReturns, r.objects.UpReflectMembers, slot, path)
 }
 
 // ClearPath removes the configuration of one client path slot.
@@ -28,7 +29,19 @@ func (r *Runtime) ClearPath(slot int) error {
 	if r.closed {
 		return errors.New("clear path: MUP dataplane is closed")
 	}
-	return clearPath(r.objects.PathConfig, r.objects.PathReturns, slot)
+	return clearPath(r.objects.PathConfig, r.objects.PathReturns, r.objects.UpReflectMembers, slot)
+}
+
+// SetUpReflect writes the healthy reflect members of an up reflect path slot.
+// An empty list leaves the slot a direct path. perPacket picks the per-packet
+// balance mode.
+func (r *Runtime) SetUpReflect(slot int, members []netip.Addr, perPacket bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return errors.New("set up reflect: MUP dataplane is closed")
+	}
+	return applyUpReflectMembers(r.objects.UpReflectMembers, slot, members, perPacket)
 }
 
 // SetGroup writes the mode and the path mask of one group.

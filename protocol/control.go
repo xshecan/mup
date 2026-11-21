@@ -26,7 +26,7 @@ var (
 )
 
 // allControlFlags holds every defined control flag bit.
-const allControlFlags = ControlFlagReturnIP | ControlFlagReturnPool | ControlFlagBalancePerPacket | ControlFlagDownPath | ControlFlagBridge
+const allControlFlags = ControlFlagReturnIP | ControlFlagReturnPool | ControlFlagBalancePerPacket | ControlFlagDownPath | ControlFlagBridge | ControlFlagUpReflect
 
 // MaxDownMode is the largest down mode of a DOWN_REGISTER: 0 is fallback, 1
 // is balancer, and 2 is burst.
@@ -181,6 +181,14 @@ func validateControlFrame(frame ControlFrame) error {
 	}
 	if frame.Flags&ControlFlagBridge != 0 && frame.Type != ControlDownRegister {
 		return ErrControlFlags
+	}
+	if frame.Flags&ControlFlagUpReflect != 0 {
+		if frame.Type != ControlRegister && frame.Type != ControlRegisterACK {
+			return ErrControlFlags
+		}
+		if frame.Flags&(ControlFlagReturnIP|ControlFlagReturnPool) == 0 {
+			return ErrControlFlags
+		}
 	}
 	if frame.Type == ControlDownRegister {
 		if !frame.DownServer.Is4() || frame.DownServer.IsUnspecified() {

@@ -77,6 +77,12 @@ const (
 	// bridge. The down server field then holds the bridge address, and the
 	// server wraps the replies of the path for the bridge.
 	ControlFlagBridge uint8 = 1 << 4
+	// ControlFlagUpReflect marks a REGISTER of an up path that reflects the
+	// upstream through its return IP, with ControlFlagReturnIP, or through one
+	// member of its pool, with ControlFlagReturnPool. The server then accepts
+	// the reflected upstream from that source, and it does not reflect the
+	// replies of the path.
+	ControlFlagUpReflect uint8 = 1 << 5
 )
 
 type DropReason uint32

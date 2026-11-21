@@ -43,6 +43,36 @@ func TestControlFrameRoundTrip(t *testing.T) {
 	}
 }
 
+func TestUpReflectRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	want := ControlFrame{
+		Type:          ControlRegister,
+		Transport:     TransportICMP,
+		Flags:         ControlFlagUpReflect | ControlFlagReturnPool | ControlFlagBalancePerPacket,
+		PathID:        2,
+		ListenPort:    51820,
+		ServerPort:    9000,
+		AdvertisedIP:  netip.MustParseAddr("192.0.2.10"),
+		ReturnIP:      netip.MustParseAddr("87.107.117.192"),
+		ReturnPrefix:  28,
+		InstanceNonce: 0x1122334455667788,
+		Sequence:      7,
+		LeaseSeconds:  30,
+	}
+	buf := make([]byte, ControlFrameLength)
+	if err := EncodeControlFrame(buf, want); err != nil {
+		t.Fatalf("EncodeControlFrame: %v", err)
+	}
+	got, err := DecodeControlFrame(buf)
+	if err != nil {
+		t.Fatalf("DecodeControlFrame: %v", err)
+	}
+	if got != want {
+		t.Fatalf("decoded frame = %#v, want %#v", got, want)
+	}
+}
+
 func TestDecodeControlFrameRejectsReservedBytes(t *testing.T) {
 	t.Parallel()
 
@@ -107,6 +137,12 @@ func TestEncodeControlFrameRejectsInvalidPolicy(t *testing.T) {
 		{name: "return IP without flag", alter: func(frame *ControlFrame) { frame.ReturnIP = netip.MustParseAddr("198.51.100.1") }, err: ErrControlFlags},
 		{name: "flag without return IP", alter: func(frame *ControlFrame) { frame.Flags = ControlFlagReturnIP }, err: ErrControlAddress},
 		{name: "unknown status", alter: func(frame *ControlFrame) { frame.Status = ControlStatusNoReflector + 1 }, err: ErrControlStatus},
+		{name: "up reflect without return", alter: func(frame *ControlFrame) { frame.Flags = ControlFlagUpReflect }, err: ErrControlFlags},
+		{name: "up reflect on a probe", alter: func(frame *ControlFrame) {
+			frame.Type = ControlProbe
+			frame.Flags = ControlFlagUpReflect | ControlFlagReturnIP
+			frame.ReturnIP = netip.MustParseAddr("198.51.100.1")
+		}, err: ErrControlFlags},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

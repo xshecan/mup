@@ -208,11 +208,34 @@ A downstream route has the form of a path, with these differences:
 - `via` is optional, as in a path. The server reflects the replies through the return IP or the pool.
 - A downstream route has no `%IFACE` and no port range.
 
-An upstream route has no `via`, because the down paths carry the replies. A client has up to 8 up paths and up to 8 down paths in all groups.
+An upstream route can take a `via`, which reflects the upstream to the server. See [Upstream reflect](#upstream-reflect). A client has up to 8 up paths and up to 8 down paths in all groups.
 
 The server probes each down path every 2 seconds, through each member of a pool, and the client answers on an up path. A down path, or a member of its pool, is healthy while these probes come back. So a reflector that answers the ping of the server but does not reach the client carries no replies. The server also sends each ACK on the down paths, so an up path stays healthy even with no packet back on its own flow.
 
 In the downstream burst mode, the server sends each reply on every healthy down path, and the client passes the first copy to the peer. A server without down path support ignores the down paths, and its replies come back on the up paths.
+
+### Upstream reflect
+
+A `via` on an upstream route reflects the path, in the other direction from a down route. The client sends the upstream to the via host, and the via host passes it to the server. So the server never sees the client address on the upstream, only the via host.
+
+```yaml
+      upstream:
+        routes:
+          - 160.119.74.88:9000/icmp via 6.7.8.9
+          - 160.119.74.88:9100/icmp via 87.107.117.192/28 balance per-packet
+          - 160.119.74.88:9200/udp via 194.225.72.10
+```
+
+These rules apply:
+
+- An ICMP up route reflects. The client sends an Echo Request to the via host, with the server as the source. The via host then answers the server with an Echo Reply, and the server accepts the reply as the upstream.
+- A UDP up route forges the source. The client sends to the server with the via as the source, because a plain host does not reflect a UDP packet.
+- `via BASE/PREFIX balance per-peer` or `per-packet` reflects through a pool, as a down route does.
+- A `via` on an up route is valid only in a group with `upstream` and `downstream`. A symmetric route in `routes` keeps the return meaning of `via`.
+
+The client sends each REGISTER reflected through every member, so the server registers one path for each member that reflects. The client keeps the members whose ACK comes back, and spreads the upstream over them. A member that stops reflecting loses its registration and drops out, so the path carries no upstream through a dead member.
+
+The client must send a packet whose source is not the client address, which is the same spoofing that a reflected down path needs. An old server rejects an up reflect REGISTER, so the path stays unhealthy.
 
 ## Bridges
 

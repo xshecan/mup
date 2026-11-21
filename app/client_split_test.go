@@ -241,8 +241,8 @@ func TestDownPathRuntimeChanges(t *testing.T) {
 			t.Fatalf("%s: AddDownPath error = %v, want status %d", name, err, test.status)
 		}
 	}
-	if _, err := controller.AddPath("198.51.100.4:9600/udp via 203.0.113.9", 51820); statusOf(err) != http.StatusBadRequest {
-		t.Fatalf("AddPath with via in a split group error = %v", err)
+	if _, err := controller.AddBridge("198.51.100.4:9600/udp via 203.0.113.9", 51820); statusOf(err) != http.StatusBadRequest {
+		t.Fatalf("AddBridge with via error = %v, want bad request", err)
 	}
 
 	if err := controller.RemoveDownPath(1); err != nil {

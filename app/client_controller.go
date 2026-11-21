@@ -57,6 +57,14 @@ type pathRegistration struct {
 	nonce        uint64
 	pathID       uint16
 	downs        *downSet
+	// upReflect marks a path that reflects the upstream through its members.
+	// The control loop sends a REGISTER through each member and keeps the
+	// healthy ones. writeMembers publishes the healthy members to the
+	// dataplane, and perPacket picks the per-packet balance mode.
+	upReflect    bool
+	members      []netip.Addr
+	perPacket    bool
+	writeMembers func(members []netip.Addr) error
 }
 
 // downFrames returns the DOWN_REGISTER frames to send before the REGISTER
@@ -72,6 +80,7 @@ type pathOpener func(pathRegistration) (pathConn, error)
 type clientDataplane interface {
 	UpdatePathState(healthyMask uint8, generation uint32) error
 	SetPath(slot int, path dataplane.PathSettings) error
+	SetUpReflect(slot int, members []netip.Addr, perPacket bool) error
 	ClearPath(slot int) error
 	SetDownPath(slot int, path *dataplane.DownPathSettings) error
 	DownPathsSeen() ([dataplane.MaxDownPaths]time.Duration, error)
@@ -274,7 +283,7 @@ func (c *clientController) start(ctx context.Context) error {
 
 // registrationLocked takes the path on the server port that it uses now.
 func (c *clientController) registrationLocked(group *pathGroup, path config.Path, slot int) pathRegistration {
-	return pathRegistration{
+	registration := pathRegistration{
 		advertisedIP: c.client.AdvertisedIP,
 		listenPort:   group.settings.ListenPort,
 		returnIP:     path.ReturnIP,
@@ -283,7 +292,37 @@ func (c *clientController) registrationLocked(group *pathGroup, path config.Path
 		pathID:       uint16(slot),
 		downs:        group.downs,
 	}
+	if path.UpReflect(group.downs != nil) {
+		registration.upReflect = true
+		registration.members = candidateMembers(path)
+		registration.perPacket = path.Balance == config.BalancePerPacket
+		registration.writeMembers = func(members []netip.Addr) error {
+			return c.dataplane.SetUpReflect(slot, members, registration.perPacket)
+		}
+	}
+	return registration
 }
+
+// candidateMembers returns the via hosts of an up reflect path: the single
+// return IP, or the first addresses of the return pool. The cap matches the
+// pool size MUP_MAX_POOL in bpf/include/mup_abi.h.
+func candidateMembers(path config.Path) []netip.Addr {
+	if !path.ReturnIP.IsValid() {
+		return nil
+	}
+	if !path.IsPool() {
+		return []netip.Addr{path.ReturnIP}
+	}
+	prefix := netip.PrefixFrom(path.ReturnIP, int(path.ReturnPrefix)).Masked()
+	members := make([]netip.Addr, 0, maxUpReflectMembers)
+	for address := prefix.Addr(); prefix.Contains(address) && len(members) < maxUpReflectMembers; address = address.Next() {
+		members = append(members, address)
+	}
+	return members
+}
+
+// maxUpReflectMembers matches MUP_MAX_POOL in bpf/include/mup_abi.h.
+const maxUpReflectMembers = 16
 
 func (c *clientController) launchLocked(slot int, current *clientPath, conn pathConn) {
 	c.nextEpoch++
@@ -459,8 +498,8 @@ func (c *clientController) addPath(raw string, listenPort uint16, bridge bool) (
 	if err != nil {
 		return api.Path{}, err
 	}
-	if group.downs != nil && path.ReturnIP.IsValid() {
-		return api.Path{}, badRequest(errors.New("an up path of a group with down paths has no via, because the down paths carry the replies"))
+	if bridge && path.ReturnIP.IsValid() {
+		return api.Path{}, badRequest(errors.New("an up bridge has no via, because it passes the client packets on to the server"))
 	}
 	if bridge && group.downs == nil {
 		return api.Path{}, conflict("the group of listen port %d has no down paths, and a bridge needs a group with upstream and downstream", group.settings.ListenPort)

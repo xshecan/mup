@@ -92,6 +92,10 @@ func (*Runtime) SetPath(int, PathSettings) error {
 	return ErrUnsupportedPlatform
 }
 
+func (*Runtime) SetUpReflect(int, []netip.Addr, bool) error {
+	return ErrUnsupportedPlatform
+}
+
 func (*Runtime) ClearPath(int) error {
 	return ErrUnsupportedPlatform
 }

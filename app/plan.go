@@ -60,11 +60,21 @@ func buildPlan(appConfig config.App, nonce uint64, resolver routeResolver) (runt
 			Groups:        make([]dataplane.GroupSettings, 0, len(client.Groups)),
 			Paths:         make([]dataplane.PathSettings, 0, config.MaxPaths),
 		}
+		var upReflectMask uint32
 		for _, group := range client.Groups {
 			var pathMask uint8
 			for _, path := range group.Paths {
 				slot := len(settings.Paths)
-				_, ifindex, err := resolver.Resolve(path.Server, path.Interface)
+				// An up reflect path sends to the via host, so the interface
+				// comes from the route to the via, not to the server. The path
+				// starts unhealthy, because the control plane finds the healthy
+				// members before it carries the upstream.
+				destination := path.Server
+				if path.UpReflect(group.Split()) {
+					destination = path.ReturnIP
+					upReflectMask |= 1 << slot
+				}
+				_, ifindex, err := resolver.Resolve(destination, path.Interface)
 				if err != nil {
 					return runtimePlan{}, fmt.Errorf("resolve client path %d: %w", slot, err)
 				}
@@ -89,7 +99,7 @@ func buildPlan(appConfig config.App, nonce uint64, resolver routeResolver) (runt
 				DownMask:   downMask,
 			})
 		}
-		settings.HealthyMask = uint32(1)<<len(settings.Paths) - 1
+		settings.HealthyMask = (uint32(1)<<len(settings.Paths) - 1) &^ upReflectMask
 		return runtimePlan{
 			pinRoot:         defaultPinRoot + "/client",
 			attachIfindexes: uniqueSortedPositive(attachIfindexes),

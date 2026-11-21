@@ -261,6 +261,14 @@ type mupTargetIngressV1 struct {
 	Padding [2]uint8
 }
 
+type mupUpReflectV1 struct {
+	_       structs.HostLayout
+	Count   uint32
+	Flags   uint8
+	Padding [3]uint8
+	Members [16]uint32
+}
+
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
@@ -299,6 +307,8 @@ const (
 	mupMapServerRouteByPort        = "server_route_by_port"
 	mupMapStats                    = "stats"
 	mupMapTargetIngress            = "target_ingress"
+	mupMapUpReflectCursor          = "up_reflect_cursor"
+	mupMapUpReflectMembers         = "up_reflect_members"
 	mupProgMupBridgeIngress        = "mup_bridge_ingress"
 	mupProgMupClientIngress        = "mup_client_ingress"
 	mupProgMupServerEgress         = "mup_server_egress"
@@ -399,6 +409,8 @@ type mupMapSpecs struct {
 	ServerRouteByPort     *ebpf.MapSpec `ebpf:"server_route_by_port"`
 	Stats                 *ebpf.MapSpec `ebpf:"stats"`
 	TargetIngress         *ebpf.MapSpec `ebpf:"target_ingress"`
+	UpReflectCursor       *ebpf.MapSpec `ebpf:"up_reflect_cursor"`
+	UpReflectMembers      *ebpf.MapSpec `ebpf:"up_reflect_members"`
 }
 
 // mupVariableSpecs contains global variables before they are loaded into the kernel.
@@ -461,6 +473,8 @@ type mupMaps struct {
 	ServerRouteByPort     *ebpf.Map `ebpf:"server_route_by_port"`
 	Stats                 *ebpf.Map `ebpf:"stats"`
 	TargetIngress         *ebpf.Map `ebpf:"target_ingress"`
+	UpReflectCursor       *ebpf.Map `ebpf:"up_reflect_cursor"`
+	UpReflectMembers      *ebpf.Map `ebpf:"up_reflect_members"`
 }
 
 func (m *mupMaps) Close() error {
@@ -499,6 +513,8 @@ func (m *mupMaps) Close() error {
 		m.ServerRouteByPort,
 		m.Stats,
 		m.TargetIngress,
+		m.UpReflectCursor,
+		m.UpReflectMembers,
 	)
 }
 

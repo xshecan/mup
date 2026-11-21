@@ -21,6 +21,15 @@
  * in a UDP packet from local_ip to the bridge.
  */
 #define MUP_FLAG_BRIDGE (1U << 4)
+/*
+ * A client up path with MUP_FLAG_UP_REFLECT reflects the upstream through its
+ * return_ip, or through one member of its pool. On an ICMP path the client
+ * sends an Echo Request to the member with the server as the source. On a UDP
+ * path it sends to the server with the member as the source. A registered path
+ * with the flag on the server accepts the reflected upstream from that source,
+ * including an ICMP Echo Reply.
+ */
+#define MUP_FLAG_UP_REFLECT (1U << 5)
 #define MUP_MAX_POOL 16
 /*
  * The bridge wrapper is a UDP header and a 12-byte bridge header between the
@@ -344,6 +353,21 @@ struct path_return_v1 {
 };
 
 /*
+ * up_reflect_v1 holds the reflect members of one client up path, by path slot.
+ * The client reflects the upstream of the slot through the first count members,
+ * which are the healthy members for the path. A single return IP is a pool of
+ * one member. With MUP_FLAG_BALANCE_PER_PACKET the client steps a cursor for
+ * each packet, and without it the client hashes the peer token to a member. The
+ * client egress reads it when the slot has MUP_FLAG_UP_REFLECT.
+ */
+struct up_reflect_v1 {
+	__u32 count;
+	__u8 flags;
+	__u8 padding[3];
+	__be32 members[MUP_MAX_POOL];
+};
+
+/*
  * reflector_key_v1 names a return pool by its base and transport. A UDP route
  * and an ICMP route can share a range, and each keeps its own health.
  */
@@ -406,6 +430,7 @@ _Static_assert(sizeof(struct server_route_value_v1) == 32, "server_route_value_v
 _Static_assert(sizeof(struct server_reverse_value_v1) == 56, "server_reverse_value_v1 ABI");
 _Static_assert(sizeof(struct path_config_v1) == 16, "path_config_v1 ABI");
 _Static_assert(sizeof(struct path_return_v1) == 8, "path_return_v1 ABI");
+_Static_assert(sizeof(struct up_reflect_v1) == 72, "up_reflect_v1 ABI");
 _Static_assert(sizeof(struct reflector_key_v1) == 8, "reflector_key_v1 ABI");
 _Static_assert(sizeof(struct reflector_pool_v1) == 80, "reflector_pool_v1 ABI");
 _Static_assert(sizeof(struct path_state_v1) == 8, "path_state_v1 ABI");

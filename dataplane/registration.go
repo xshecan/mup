@@ -21,6 +21,10 @@ type RegistrationSettings struct {
 	PathCount     uint8
 	ExpiresAtNS   uint64
 	Path          RegisteredPathSettings
+	// UpReflect marks a path that reflects the upstream. The path source is the
+	// via host, not the advertised IP, so the server accepts the reflected
+	// upstream from it. The path carries no reply reflection.
+	UpReflect bool
 }
 
 type ClientKey struct {
@@ -58,7 +62,7 @@ func encodeRegistrationSettings(settings RegistrationSettings) (
 	if settings.PathCount == 0 || settings.PathCount > config.MaxPaths {
 		return key, value, pathKey, pathValue, fmt.Errorf("registration path count must be between 1 and %d", config.MaxPaths)
 	}
-	if settings.Path.SourceIP != settings.AdvertisedIP {
+	if !settings.UpReflect && settings.Path.SourceIP != settings.AdvertisedIP {
 		return key, value, pathKey, pathValue, errors.New("registered path source must equal advertised IP")
 	}
 	sourceIP, err := requiredIPv4Word(settings.Path.SourceIP, "registered path source IP")
@@ -77,22 +81,31 @@ func encodeRegistrationSettings(settings RegistrationSettings) (
 	var returnIP uint32
 	var flags uint8
 	var prefix uint8
-	if settings.ReturnPrefix != 0 {
-		returnIP, err = requiredIPv4Word(settings.ReturnIP, "registration return pool base")
-		if err != nil {
-			return key, value, pathKey, pathValue, err
+	// An up reflect path carries no reply reflection. Its return flags describe
+	// the upstream reflect, so the server records only the up reflect flag on
+	// the path, and keys the path by the via source above.
+	if !settings.UpReflect {
+		if settings.ReturnPrefix != 0 {
+			returnIP, err = requiredIPv4Word(settings.ReturnIP, "registration return pool base")
+			if err != nil {
+				return key, value, pathKey, pathValue, err
+			}
+			flags = protocol.ControlFlagReturnPool
+			if settings.Balance == config.BalancePerPacket {
+				flags |= protocol.ControlFlagBalancePerPacket
+			}
+			prefix = settings.ReturnPrefix
+		} else if settings.ReturnIP.IsValid() {
+			returnIP, err = requiredIPv4Word(settings.ReturnIP, "registration return IP")
+			if err != nil {
+				return key, value, pathKey, pathValue, err
+			}
+			flags = protocol.ControlFlagReturnIP
 		}
-		flags = protocol.ControlFlagReturnPool
-		if settings.Balance == config.BalancePerPacket {
-			flags |= protocol.ControlFlagBalancePerPacket
-		}
-		prefix = settings.ReturnPrefix
-	} else if settings.ReturnIP.IsValid() {
-		returnIP, err = requiredIPv4Word(settings.ReturnIP, "registration return IP")
-		if err != nil {
-			return key, value, pathKey, pathValue, err
-		}
-		flags = protocol.ControlFlagReturnIP
+	}
+	pathFlags := flags
+	if settings.UpReflect {
+		pathFlags |= protocol.ControlFlagUpReflect
 	}
 	key = mupClientKeyV1{
 		AdvertisedIp:  advertisedIP,
@@ -115,7 +128,7 @@ func encodeRegistrationSettings(settings RegistrationSettings) (
 		Client:      key,
 		ExpiresAtNs: settings.ExpiresAtNS,
 		PathId:      settings.Path.PathID,
-		Flags:       flags,
+		Flags:       pathFlags,
 		Prefix:      prefix,
 		ReturnIp:    returnIP,
 	}

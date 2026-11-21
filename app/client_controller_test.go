@@ -30,6 +30,7 @@ type fakeClientDataplane struct {
 	groups     map[uint16]dataplane.GroupSettings
 	attached   []int
 	routes     []dataplane.ClientRoute
+	reflect    map[int][]netip.Addr
 }
 
 func (f *fakeClientDataplane) record(entry string) {
@@ -57,6 +58,17 @@ func (f *fakeClientDataplane) ClearPath(slot int) error {
 	defer f.mu.Unlock()
 	f.record("clear")
 	delete(f.paths, slot)
+	return nil
+}
+
+func (f *fakeClientDataplane) SetUpReflect(slot int, members []netip.Addr, perPacket bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record(fmt.Sprintf("reflect %d %d", slot, len(members)))
+	if f.reflect == nil {
+		f.reflect = map[int][]netip.Addr{}
+	}
+	f.reflect[slot] = members
 	return nil
 }
 
