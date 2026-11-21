@@ -51,6 +51,32 @@ func (f *fakeClientAPI) SetMode(raw string, listenPort uint16) error {
 	return nil
 }
 
+func (f *fakeClientAPI) AddDownPath(raw string, listenPort uint16) (api.Path, error) {
+	f.group = listenPort
+	return api.Path{ID: 1, Direction: "down", Server: raw}, nil
+}
+
+func (f *fakeClientAPI) AddBridge(raw string, listenPort uint16) (api.Path, error) {
+	f.group = listenPort
+	return api.Path{ID: 2, Direction: "up", Bridge: true, Server: raw}, nil
+}
+
+func (f *fakeClientAPI) AddDownBridge(raw string, listenPort uint16) (api.Path, error) {
+	f.group = listenPort
+	return api.Path{ID: 4, Direction: "down", Bridge: true, Server: raw}, nil
+}
+
+func (f *fakeClientAPI) RemoveDownPath(id int) error {
+	f.removed = id + 100
+	return nil
+}
+
+func (f *fakeClientAPI) SetDownMode(raw string, listenPort uint16) error {
+	f.mode = "down " + raw
+	f.group = listenPort
+	return nil
+}
+
 func (f *fakeClientAPI) Peers() (api.PeerList, error) {
 	return api.PeerList{Peers: []api.Peer{{Token: 1}}}, nil
 }
@@ -215,5 +241,37 @@ func TestServeAPIStopsWithTheContext(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("serveAPI did not stop")
+	}
+}
+
+type fakeDropResetter struct {
+	resets int
+	err    error
+}
+
+func (f *fakeDropResetter) ResetDrops() error {
+	f.resets++
+	return f.err
+}
+
+func TestDropResetWorksForEveryRole(t *testing.T) {
+	t.Parallel()
+
+	drops := &fakeDropResetter{}
+	client := newTestDaemonClient(t, withDropReset(newAPIHandler(&fakeClientAPI{}, nil), drops))
+	ctx := context.Background()
+	if err := client.ResetDrops(ctx); err != nil || drops.resets != 1 {
+		t.Fatalf("ResetDrops = %v, resets = %d", err, drops.resets)
+	}
+	// The other calls still reach the role.
+	if status, err := client.Status(ctx); err != nil || status.Role != api.RoleClient {
+		t.Fatalf("Status = %#v, %v", status, err)
+	}
+	drops.err = errors.New("dataplane closed")
+	if err := client.ResetDrops(ctx); responseStatus(err) != http.StatusInternalServerError {
+		t.Fatalf("ResetDrops error = %v, want status 500", err)
+	}
+	if _, err := client.Paths(ctx); err != nil {
+		t.Fatalf("Paths after a failed reset: %v", err)
 	}
 }

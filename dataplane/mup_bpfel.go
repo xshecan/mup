@@ -13,11 +13,42 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type mupBridgeAllowKeyV1 struct {
+	_         structs.HostLayout
+	Prefixlen uint32
+	Address   uint32
+}
+
+type mupBridgeConfigV1 struct {
+	_         structs.HostLayout
+	ServerIp  uint32
+	PortFirst uint16
+	PortLast  uint16
+}
+
 type mupClientConfigV1 struct {
 	_             structs.HostLayout
 	InstanceNonce uint64
 	AdvertisedIp  uint32
 	Generation    uint32
+}
+
+type mupClientDownPathV1 struct {
+	_          structs.HostLayout
+	ServerIp   uint32
+	ReturnIp   uint32
+	ServerPort uint16
+	Transport  uint8
+	Flags      uint8
+	Prefix     uint8
+	Padding    [3]uint8
+	LastSeenNs uint64
+}
+
+type mupClientDuplicateKeyV1 struct {
+	_         structs.HostLayout
+	PeerToken uint32
+	Identity  [24]uint8
 }
 
 type mupClientKeyV1 struct {
@@ -30,6 +61,36 @@ type mupClientKeyV1 struct {
 type mupCsumScratch struct {
 	_     structs.HostLayout
 	Bytes [512]uint8
+}
+
+type mupDownGroupV1 struct {
+	_           structs.HostLayout
+	ListenPort  uint16
+	Mode        uint8
+	PathMask    uint8
+	HealthyMask uint8
+	IcmpMask    uint8
+	Padding     [2]uint8
+}
+
+type mupDownPathKeyV1 struct {
+	_       structs.HostLayout
+	Client  mupClientKeyV1
+	PathId  uint32
+	Padding uint32
+}
+
+type mupDownPathV1 struct {
+	_          structs.HostLayout
+	ServerIp   uint32
+	ReturnIp   uint32
+	Ifindex    uint32
+	ServerPort uint16
+	Transport  uint8
+	Flags      uint8
+	Count      uint32
+	LocalIp    uint32
+	Members    [16]uint32
 }
 
 type mupDuplicateKeyV1 struct {
@@ -64,7 +125,7 @@ type mupPathGroupV1 struct {
 	Mode     uint8
 	Flags    uint8
 	PathMask uint8
-	Padding  uint8
+	DownMask uint8
 }
 
 type mupPathReturnV1 struct {
@@ -146,6 +207,11 @@ type mupRegistrationValueV1 struct {
 	ExpiresAtNs uint64
 }
 
+type mupSendScratch struct {
+	_     structs.HostLayout
+	Words [11]uint64
+}
+
 type mupServerConfigV1 struct {
 	_          structs.HostLayout
 	TargetIp   uint32
@@ -199,7 +265,13 @@ type mupTargetIngressV1 struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	mupMapBridgeAddresses          = "bridge_addresses"
+	mupMapBridgeAllow              = "bridge_allow"
+	mupMapBridgeConfig             = "bridge_config"
+	mupMapBridgeCounters           = "bridge_counters"
 	mupMapClientConfig             = "client_config"
+	mupMapClientDownPaths          = "client_down_paths"
+	mupMapClientDuplicateCache     = "client_duplicate_cache"
 	mupMapClientEndpointByToken    = "client_endpoint_by_token"
 	mupMapClientPeerByEndpoint     = "client_peer_by_endpoint"
 	mupMapClientRoutesBySource     = "client_routes_by_source"
@@ -218,12 +290,16 @@ const (
 	mupMapReflectorPools           = "reflector_pools"
 	mupMapRegisteredPaths          = "registered_paths"
 	mupMapRegistrationByKey        = "registration_by_key"
+	mupMapSendScratch              = "send_scratch"
 	mupMapServerConfig             = "server_config"
+	mupMapServerDownGroups         = "server_down_groups"
+	mupMapServerDownPaths          = "server_down_paths"
 	mupMapServerPorts              = "server_ports"
 	mupMapServerRouteByKey         = "server_route_by_key"
 	mupMapServerRouteByPort        = "server_route_by_port"
 	mupMapStats                    = "stats"
 	mupMapTargetIngress            = "target_ingress"
+	mupProgMupBridgeIngress        = "mup_bridge_ingress"
 	mupProgMupClientIngress        = "mup_client_ingress"
 	mupProgMupServerEgress         = "mup_server_egress"
 	mupProgMupServerIngress        = "mup_server_ingress"
@@ -275,6 +351,7 @@ type mupSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type mupProgramSpecs struct {
+	MupBridgeIngress        *ebpf.ProgramSpec `ebpf:"mup_bridge_ingress"`
 	MupClientIngress        *ebpf.ProgramSpec `ebpf:"mup_client_ingress"`
 	MupServerEgress         *ebpf.ProgramSpec `ebpf:"mup_server_egress"`
 	MupServerIngress        *ebpf.ProgramSpec `ebpf:"mup_server_ingress"`
@@ -288,7 +365,13 @@ type mupProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type mupMapSpecs struct {
+	BridgeAddresses       *ebpf.MapSpec `ebpf:"bridge_addresses"`
+	BridgeAllow           *ebpf.MapSpec `ebpf:"bridge_allow"`
+	BridgeConfig          *ebpf.MapSpec `ebpf:"bridge_config"`
+	BridgeCounters        *ebpf.MapSpec `ebpf:"bridge_counters"`
 	ClientConfig          *ebpf.MapSpec `ebpf:"client_config"`
+	ClientDownPaths       *ebpf.MapSpec `ebpf:"client_down_paths"`
+	ClientDuplicateCache  *ebpf.MapSpec `ebpf:"client_duplicate_cache"`
 	ClientEndpointByToken *ebpf.MapSpec `ebpf:"client_endpoint_by_token"`
 	ClientPeerByEndpoint  *ebpf.MapSpec `ebpf:"client_peer_by_endpoint"`
 	ClientRoutesBySource  *ebpf.MapSpec `ebpf:"client_routes_by_source"`
@@ -307,7 +390,10 @@ type mupMapSpecs struct {
 	ReflectorPools        *ebpf.MapSpec `ebpf:"reflector_pools"`
 	RegisteredPaths       *ebpf.MapSpec `ebpf:"registered_paths"`
 	RegistrationByKey     *ebpf.MapSpec `ebpf:"registration_by_key"`
+	SendScratch           *ebpf.MapSpec `ebpf:"send_scratch"`
 	ServerConfig          *ebpf.MapSpec `ebpf:"server_config"`
+	ServerDownGroups      *ebpf.MapSpec `ebpf:"server_down_groups"`
+	ServerDownPaths       *ebpf.MapSpec `ebpf:"server_down_paths"`
 	ServerPorts           *ebpf.MapSpec `ebpf:"server_ports"`
 	ServerRouteByKey      *ebpf.MapSpec `ebpf:"server_route_by_key"`
 	ServerRouteByPort     *ebpf.MapSpec `ebpf:"server_route_by_port"`
@@ -341,7 +427,13 @@ func (o *mupObjects) Close() error {
 //
 // It can be passed to loadMupObjects or ebpf.CollectionSpec.LoadAndAssign.
 type mupMaps struct {
+	BridgeAddresses       *ebpf.Map `ebpf:"bridge_addresses"`
+	BridgeAllow           *ebpf.Map `ebpf:"bridge_allow"`
+	BridgeConfig          *ebpf.Map `ebpf:"bridge_config"`
+	BridgeCounters        *ebpf.Map `ebpf:"bridge_counters"`
 	ClientConfig          *ebpf.Map `ebpf:"client_config"`
+	ClientDownPaths       *ebpf.Map `ebpf:"client_down_paths"`
+	ClientDuplicateCache  *ebpf.Map `ebpf:"client_duplicate_cache"`
 	ClientEndpointByToken *ebpf.Map `ebpf:"client_endpoint_by_token"`
 	ClientPeerByEndpoint  *ebpf.Map `ebpf:"client_peer_by_endpoint"`
 	ClientRoutesBySource  *ebpf.Map `ebpf:"client_routes_by_source"`
@@ -360,7 +452,10 @@ type mupMaps struct {
 	ReflectorPools        *ebpf.Map `ebpf:"reflector_pools"`
 	RegisteredPaths       *ebpf.Map `ebpf:"registered_paths"`
 	RegistrationByKey     *ebpf.Map `ebpf:"registration_by_key"`
+	SendScratch           *ebpf.Map `ebpf:"send_scratch"`
 	ServerConfig          *ebpf.Map `ebpf:"server_config"`
+	ServerDownGroups      *ebpf.Map `ebpf:"server_down_groups"`
+	ServerDownPaths       *ebpf.Map `ebpf:"server_down_paths"`
 	ServerPorts           *ebpf.Map `ebpf:"server_ports"`
 	ServerRouteByKey      *ebpf.Map `ebpf:"server_route_by_key"`
 	ServerRouteByPort     *ebpf.Map `ebpf:"server_route_by_port"`
@@ -370,7 +465,13 @@ type mupMaps struct {
 
 func (m *mupMaps) Close() error {
 	return _MupClose(
+		m.BridgeAddresses,
+		m.BridgeAllow,
+		m.BridgeConfig,
+		m.BridgeCounters,
 		m.ClientConfig,
+		m.ClientDownPaths,
+		m.ClientDuplicateCache,
 		m.ClientEndpointByToken,
 		m.ClientPeerByEndpoint,
 		m.ClientRoutesBySource,
@@ -389,7 +490,10 @@ func (m *mupMaps) Close() error {
 		m.ReflectorPools,
 		m.RegisteredPaths,
 		m.RegistrationByKey,
+		m.SendScratch,
 		m.ServerConfig,
+		m.ServerDownGroups,
+		m.ServerDownPaths,
 		m.ServerPorts,
 		m.ServerRouteByKey,
 		m.ServerRouteByPort,
@@ -408,6 +512,7 @@ type mupVariables struct {
 //
 // It can be passed to loadMupObjects or ebpf.CollectionSpec.LoadAndAssign.
 type mupPrograms struct {
+	MupBridgeIngress        *ebpf.Program `ebpf:"mup_bridge_ingress"`
 	MupClientIngress        *ebpf.Program `ebpf:"mup_client_ingress"`
 	MupServerEgress         *ebpf.Program `ebpf:"mup_server_egress"`
 	MupServerIngress        *ebpf.Program `ebpf:"mup_server_ingress"`
@@ -419,6 +524,7 @@ type mupPrograms struct {
 
 func (p *mupPrograms) Close() error {
 	return _MupClose(
+		p.MupBridgeIngress,
 		p.MupClientIngress,
 		p.MupServerEgress,
 		p.MupServerIngress,

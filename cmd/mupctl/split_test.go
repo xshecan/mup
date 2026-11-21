@@ -1,0 +1,95 @@
+package main
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/xshecan/mup/api"
+)
+
+func splitClientStatus() api.Status {
+	return api.Status{
+		Role:      api.RoleClient,
+		StartedAt: testNow.Add(-time.Hour),
+		Client: &api.ClientStatus{
+			AdvertisedIP: "192.0.2.10",
+			Generation:   2,
+			TokensFree:   4095,
+			Groups: []api.Group{
+				{ListenPort: 51820, Mode: "fallback", Paths: 1, HealthyPaths: 1, DownMode: "burst", DownPaths: 2, HealthyDownPaths: 1},
+				{ListenPort: 51821, Mode: "balancer", Paths: 1, HealthyPaths: 1},
+			},
+			Paths: []api.Path{
+				{ID: 0, Direction: "up", ListenPort: 51820, Server: "203.0.113.5", Port: 9000, Transport: "udp", Interface: "eth0", Healthy: true, InUse: true, LastACK: testNow.Add(-4 * time.Second), RTTSeconds: 0.07},
+				{ID: 1, ListenPort: 51821, Server: "203.0.113.6", Port: 5000, Transport: "icmp", Interface: "eth0", Healthy: true, InUse: true, LastACK: testNow.Add(-2 * time.Second)},
+				{ID: 0, Direction: "down", ListenPort: 51820, Server: "203.0.113.5", Port: 9200, Transport: "icmp", ReturnIP: "198.51.100.0/28", Healthy: true, InUse: true, LastProbe: testNow.Add(-time.Second)},
+				{ID: 1, Direction: "down", ListenPort: 51820, Server: "203.0.113.5", Port: 9300, Transport: "udp"},
+			},
+		},
+	}
+}
+
+func TestStatusShowsSeparateDirections(t *testing.T) {
+	t.Parallel()
+
+	code, stdout, stderr := runCommand(t, fakeDaemon(t, splitClientStatus()), "status")
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	for _, want := range []string{
+		"Paths:        2/2 healthy, generation 2",
+		"Down paths:   1/2 healthy",
+		"GROUP   MODE       PATHS         DOWN MODE   DOWN PATHS    PEERS",
+		"51820   fallback   1/1 healthy   burst       1/2 healthy   0",
+		"51821   balancer   1/1 healthy   -           -             0",
+		"ID   DIR    GROUP   SERVER",
+		"0    up     51820   203.0.113.5:9000   udp         -                 eth0        healthy     yes      ack 4s",
+		"0    down   51820   203.0.113.5:9200   icmp        198.51.100.0/28   -           healthy     yes      probe 1s",
+		"1    down   51820   203.0.113.5:9300   udp         -                 -           unhealthy   no       probe never",
+		"1    -      51821   203.0.113.6:5000   icmp",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("status output misses %q:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestDownPathCommands(t *testing.T) {
+	t.Parallel()
+
+	daemon := fakeDaemon(t, splitClientStatus())
+	if code, stdout, stderr := runCommand(t, daemon, "add", "path", "203.0.113.8:9300/udp", "via", "198.51.100.0/28", "balance", "per-packet", "--down", "--group", "51820"); code != 0 ||
+		!strings.Contains(stdout, "down-path/4 created in group 51820 (203.0.113.8:9300/udp via 198.51.100.0/28, unhealthy until the first probe)") {
+		t.Fatalf("add down path = %d, %q, %q", code, stdout, stderr)
+	}
+	if code, stdout, stderr := runCommand(t, daemon, "delete", "path", "1", "--down"); code != 0 || stdout != "down-path/1 deleted\n" {
+		t.Fatalf("delete down path = %d, %q, %q", code, stdout, stderr)
+	}
+	if code, stdout, stderr := runCommand(t, daemon, "set", "mode", "balancer", "--down", "--group", "51821"); code != 0 || stdout != "downstream mode set to balancer\n" {
+		t.Fatalf("set down mode = %d, %q, %q", code, stdout, stderr)
+	}
+	if code, _, stderr := runCommand(t, daemon, "get", "paths", "--down"); code != 2 && !strings.Contains(stderr, "--down works only") {
+		t.Fatalf("get paths --down = %d, %q", code, stderr)
+	}
+}
+
+func TestClientsShowTheDownPaths(t *testing.T) {
+	t.Parallel()
+
+	var out strings.Builder
+	printClients(&out, []api.RegisteredClient{{
+		AdvertisedIP: "192.0.2.10",
+		Nonce:        "8f3a0000000000aa",
+		LeaseSeconds: 24,
+		Down: &api.DownGroup{Mode: "fallback", Paths: []api.DownPath{
+			{ID: 0, Server: "203.0.113.5", Port: 9200, Transport: "icmp", ReturnIP: "198.51.100.0/28", Healthy: true, Members: 9, HealthyMembers: 7},
+			{ID: 1, Server: "203.0.113.5", Port: 9300, Transport: "udp"},
+		}},
+	}}, true)
+	for _, want := range []string{"1/2 healthy, fallback", "0:icmp:203.0.113.5:9200 via 198.51.100.0/28 (7/9),1:udp:203.0.113.5:9300"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("clients output misses %q:\n%s", want, out.String())
+		}
+	}
+}

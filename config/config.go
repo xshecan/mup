@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -148,23 +149,34 @@ func ParseBalance(raw string) (Balance, error) {
 	}
 }
 
-// App is the configuration of one daemon. Exactly one of Client and Server is
-// set.
+// App is the configuration of one daemon. Exactly one of Client, Server, and
+// Bridge is set.
 type App struct {
 	Client *Client `yaml:"client"`
 	Server *Server `yaml:"server"`
+	Bridge *Bridge `yaml:"bridge"`
 }
 
 // Validate applies the rules that are common to the flags and the
 // configuration file.
 func (a App) Validate() error {
-	if (a.Client == nil) == (a.Server == nil) {
-		return errors.New("the configuration must have exactly one of client and server")
+	roles := 0
+	for _, set := range []bool{a.Client != nil, a.Server != nil, a.Bridge != nil} {
+		if set {
+			roles++
+		}
 	}
-	if a.Client != nil {
+	if roles != 1 {
+		return errors.New("the configuration must have exactly one of client, server, and bridge")
+	}
+	switch {
+	case a.Client != nil:
 		return a.Client.Validate()
+	case a.Server != nil:
+		return a.Server.Validate()
+	default:
+		return a.Bridge.Validate()
 	}
-	return a.Server.Validate()
 }
 
 type Client struct {
@@ -177,10 +189,79 @@ type Client struct {
 // a group forward to the same WireGuard target, because a WireGuard handshake
 // fails against another identity. The configuration file calls a group a
 // server and its paths routes.
+//
+// Paths and Mode are the up paths and the upstream mode. A group without down
+// paths sends each reply back on the path of the latest upstream packet. A
+// group with down paths lets the server pick the down path of each reply with
+// DownMode, so the two directions use separate paths.
 type Group struct {
-	ListenPort uint16 `yaml:"port"`
-	Mode       Mode   `yaml:"mode"`
-	Paths      []Path `yaml:"routes"`
+	ListenPort uint16
+	Mode       Mode
+	Paths      []Path
+	DownMode   Mode
+	DownPaths  []Path
+}
+
+// Direction is the upstream or the downstream block of a group in the
+// configuration file. Bridges are paths through a MUP bridge. They come after
+// the routes, so a route gets a lower path ID than a bridge.
+type Direction struct {
+	Mode    Mode   `yaml:"mode"`
+	Paths   []Path `yaml:"routes"`
+	Bridges []Path `yaml:"bridges"`
+}
+
+// all returns the routes and then the bridges of the direction, with the
+// bridges marked.
+func (d Direction) all() []Path {
+	paths := slices.Clone(d.Paths)
+	for _, bridge := range d.Bridges {
+		bridge.Bridge = true
+		paths = append(paths, bridge)
+	}
+	return paths
+}
+
+// Split reports whether the group has its own down paths.
+func (g Group) Split() bool {
+	return len(g.DownPaths) > 0
+}
+
+// UnmarshalYAML reads a group in one of two forms: "mode" and "routes" for
+// paths that carry both directions, or "upstream" and "downstream" blocks for
+// separate up paths and down paths.
+func (g *Group) UnmarshalYAML(unmarshal func(any) error) error {
+	var raw struct {
+		ListenPort uint16     `yaml:"port"`
+		Mode       *Mode      `yaml:"mode"`
+		Paths      []Path     `yaml:"routes"`
+		Upstream   *Direction `yaml:"upstream"`
+		Downstream *Direction `yaml:"downstream"`
+	}
+	if err := unmarshal(&raw); err != nil {
+		return err
+	}
+	*g = Group{ListenPort: raw.ListenPort, Paths: raw.Paths}
+	if raw.Mode != nil {
+		g.Mode = *raw.Mode
+	}
+	if raw.Upstream == nil && raw.Downstream == nil {
+		return nil
+	}
+	if raw.Mode != nil || len(raw.Paths) > 0 {
+		return fmt.Errorf("server %d: use mode and routes, or upstream and downstream, not both", raw.ListenPort)
+	}
+	if raw.Upstream == nil || raw.Downstream == nil {
+		return fmt.Errorf("server %d: upstream and downstream go together", raw.ListenPort)
+	}
+	if len(raw.Downstream.Paths)+len(raw.Downstream.Bridges) == 0 {
+		return fmt.Errorf("server %d: downstream requires at least one route or bridge", raw.ListenPort)
+	}
+	g.Mode = raw.Upstream.Mode
+	g.Paths = raw.Upstream.all()
+	g.DownMode = raw.Downstream.Mode
+	g.DownPaths = raw.Downstream.all()
+	return nil
 }
 
 // UnmarshalYAML keeps the default socket when the file does not set one. An
@@ -204,6 +285,7 @@ func (c Client) Validate() error {
 		listenPort uint16
 	}
 	var seen []groupPath
+	var downs []Path
 	for _, group := range c.Groups {
 		if err := group.validate(); err != nil {
 			return err
@@ -223,9 +305,20 @@ func (c Client) Validate() error {
 			}
 			seen = append(seen, groupPath{path: path, listenPort: group.ListenPort})
 		}
+		for _, down := range group.DownPaths {
+			for _, earlier := range downs {
+				if earlier.SameDownPath(down) {
+					return fmt.Errorf("client has the down route %s twice", down)
+				}
+			}
+			downs = append(downs, down)
+		}
 	}
 	if len(seen) > MaxPaths {
 		return fmt.Errorf("client accepts at most %d paths in all groups", MaxPaths)
+	}
+	if len(downs) > MaxPaths {
+		return fmt.Errorf("client accepts at most %d down routes in all groups", MaxPaths)
 	}
 	return nil
 }
@@ -244,6 +337,20 @@ func (g Group) validate() error {
 		if err := path.validate(); err != nil {
 			return fmt.Errorf("server %d: route %d: %w", g.ListenPort, index, err)
 		}
+		if g.Split() && path.ReturnIP.IsValid() {
+			return fmt.Errorf("server %d: upstream route %d: an up route has no via, because the downstream routes carry the replies", g.ListenPort, index)
+		}
+		if path.Bridge && !g.Split() {
+			return fmt.Errorf("server %d: route %d: a bridge needs a group with upstream and downstream", g.ListenPort, index)
+		}
+	}
+	if g.DownMode > ModeBurst {
+		return fmt.Errorf("server %d: invalid downstream mode %d", g.ListenPort, uint8(g.DownMode))
+	}
+	for index, path := range g.DownPaths {
+		if err := path.ValidateDown(); err != nil {
+			return fmt.Errorf("server %d: downstream route %d: %w", g.ListenPort, index, err)
+		}
 	}
 	return nil
 }
@@ -253,6 +360,10 @@ func (g Group) validate() error {
 // and an ICMP reply goes to the return IP as an Echo Request. If ReturnPrefix
 // is nonzero, ReturnIP is a pool base and the server spreads the replies over
 // the pool by Balance.
+//
+// If Bridge is set, Server is the address of a MUP bridge. An up bridge passes
+// the packets of the path to its server. A down bridge sends the replies that
+// a server wraps for it, and the address of the path is the bridge address.
 //
 // If LastPort is nonzero, the path has the server ports from ServerPort to
 // LastPort. It starts on ServerPort, and the client moves it to another port
@@ -266,6 +377,15 @@ type Path struct {
 	ReturnIP     netip.Addr
 	ReturnPrefix uint8
 	Balance      Balance
+	Bridge       bool
+}
+
+// Kind names the path type for the status output: "bridge" or "route".
+func (p Path) Kind() string {
+	if p.Bridge {
+		return "bridge"
+	}
+	return "route"
 }
 
 // IsPool reports whether the path returns through a pool of addresses.
@@ -341,6 +461,28 @@ func (p *Path) UnmarshalText(text []byte) error {
 	return nil
 }
 
+// ValidateDown applies the rules of a down path. The server sends the replies
+// from the address and port of the path, so the path has no interface and one
+// port.
+func (p Path) ValidateDown() error {
+	if err := p.validate(); err != nil {
+		return err
+	}
+	if p.Interface != "" {
+		return errors.New("a down route has no interface, because the server picks the interface")
+	}
+	if p.HasPortRange() {
+		return errors.New("a down route has one server port")
+	}
+	return nil
+}
+
+// SameDownPath reports whether two down paths send from the same server
+// address, port, and transport. The client cannot tell their replies apart.
+func (p Path) SameDownPath(other Path) bool {
+	return p.Server == other.Server && p.ServerPort == other.ServerPort && p.Transport == other.Transport
+}
+
 func (p Path) validate() error {
 	if !isNonzeroIPv4(p.Server) {
 		return errors.New("server path address must be a nonzero IPv4")
@@ -408,6 +550,50 @@ func (s Server) Validate() error {
 		}
 		if s.Port.Contains(s.Target.Port()) {
 			return errors.New("server target_ingress needs a target port outside the server ports")
+		}
+	}
+	return nil
+}
+
+// MaxBridgeAllow limits the extra sender ranges of a bridge. It mirrors the
+// size of the bridge_allow map, which also holds the server address.
+const MaxBridgeAllow = 63
+
+// Bridge is the configuration of a MUP bridge. The bridge passes the packets
+// of the clients on its ports to Server, and it sends the replies that
+// Server wraps for it. It takes wrapped replies only from Server and from
+// the Allow ranges, for example the NAT address of a server.
+type Bridge struct {
+	Server        netip.Addr     `yaml:"server"`
+	Port          PortRange      `yaml:"port"`
+	Allow         []netip.Prefix `yaml:"allow"`
+	ControlSocket string         `yaml:"control_socket"`
+}
+
+// UnmarshalYAML keeps the default socket when the file does not set one. An
+// empty value in the file turns the socket off.
+func (b *Bridge) UnmarshalYAML(unmarshal func(any) error) error {
+	type bridge Bridge
+	b.ControlSocket = api.DefaultBridgeSocket
+	return unmarshal((*bridge)(b))
+}
+
+func (b Bridge) Validate() error {
+	if !isNonzeroIPv4(b.Server) {
+		return errors.New("bridge server must be a nonzero IPv4 address")
+	}
+	if b.Port.First == 0 || b.Port.Last < b.Port.First {
+		return errors.New("bridge port must be PORT or FIRST-LAST between 1 and 65535")
+	}
+	if len(b.Allow) > MaxBridgeAllow {
+		return fmt.Errorf("bridge accepts at most %d allow ranges", MaxBridgeAllow)
+	}
+	for _, prefix := range b.Allow {
+		if !prefix.IsValid() || !prefix.Addr().Is4() {
+			return fmt.Errorf("bridge allow range %s must be an IPv4 CIDR", prefix)
+		}
+		if prefix.Bits() == 0 {
+			return errors.New("a bridge allow range of 0.0.0.0/0 lets any host use the bridge")
 		}
 	}
 	return nil

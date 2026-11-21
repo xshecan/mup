@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -57,6 +58,25 @@ func (f *fakeClientDataplane) ClearPath(slot int) error {
 	f.record("clear")
 	delete(f.paths, slot)
 	return nil
+}
+
+func (f *fakeClientDataplane) SetDownPath(slot int, path *dataplane.DownPathSettings) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if path == nil {
+		f.record(fmt.Sprintf("down %d clear", slot))
+		return nil
+	}
+	f.record(fmt.Sprintf("down %d %s:%d", slot, path.Server, path.ServerPort))
+	return nil
+}
+
+func (f *fakeClientDataplane) DownPathsSeen() ([dataplane.MaxDownPaths]time.Duration, error) {
+	var seen [dataplane.MaxDownPaths]time.Duration
+	for slot := range seen {
+		seen[slot] = -1
+	}
+	return seen, nil
 }
 
 func (f *fakeClientDataplane) SetGroup(group dataplane.GroupSettings) error {
@@ -157,7 +177,7 @@ func newGroupsFixture(t *testing.T, groups ...config.Group) controllerFixture {
 		fixture.registrations[int(registration.pathID)] = registration
 		return conn, nil
 	}
-	fixture.controller = newClientController(client, *plan.client, fake, resolver, open, time.Unix(100, 0), discardLogger)
+	fixture.controller = newClientController(client, *plan.client, fake, resolver, pathOpener(open), time.Unix(100, 0), discardLogger)
 	fixture.controller.interfaceName = func(ifindex int) string { return "if" + string(rune('0'+ifindex)) }
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -552,7 +572,7 @@ func TestControllerRunStopsWhenAPathLoopFails(t *testing.T) {
 	open := func(pathRegistration) (pathConn, error) {
 		return failingPathConn{err: want}, nil
 	}
-	controller := newClientController(client, settings, newFake(), fakeResolver{}, open, time.Now(), discardLogger)
+	controller := newClientController(client, settings, newFake(), fakeResolver{}, pathOpener(open), time.Now(), discardLogger)
 	done := make(chan error, 1)
 	go func() { done <- controller.run(context.Background()) }()
 	select {
@@ -566,7 +586,7 @@ func TestControllerRunStopsWhenAPathLoopFails(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	open = func(pathRegistration) (pathConn, error) { return newFakePathConn(), nil }
-	controller = newClientController(client, settings, newFake(), fakeResolver{}, open, time.Now(), discardLogger)
+	controller = newClientController(client, settings, newFake(), fakeResolver{}, pathOpener(open), time.Now(), discardLogger)
 	go func() { done <- controller.run(ctx) }()
 	cancel()
 	select {
@@ -739,7 +759,7 @@ func TestControllerStaysOnItsPortWhenAMoveFails(t *testing.T) {
 	fixture := newControllerFixture(t, "198.51.100.1:5000/udp", "198.51.100.3:7000-7009/icmp")
 	picks := fixture.countPortPicks(7005)
 	fixture.controller.mu.Lock()
-	fixture.controller.open = func(pathRegistration) (pathConn, error) { return nil, errors.New("no socket") }
+	fixture.controller.controls = pathOpener(func(pathRegistration) (pathConn, error) { return nil, errors.New("no socket") })
 	epoch := fixture.controller.slots[1].epoch
 	fixture.controller.mu.Unlock()
 	fixture.miss(t, 1, portMoveMisses)

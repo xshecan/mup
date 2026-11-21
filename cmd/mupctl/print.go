@@ -29,15 +29,26 @@ func printStatus(w io.Writer, status api.Status, clients []api.RegisteredClient,
 	switch {
 	case status.Client != nil:
 		client := status.Client
-		healthy := 0
+		healthy, total, downHealthy, downTotal := 0, 0, 0, 0
 		for _, path := range client.Paths {
+			if path.Direction == "down" {
+				downTotal++
+				if path.Healthy {
+					downHealthy++
+				}
+				continue
+			}
+			total++
 			if path.Healthy {
 				healthy++
 			}
 		}
 		field("IP", client.AdvertisedIP)
 		field("Uptime", humanDuration(now.Sub(status.StartedAt)))
-		field("Paths", fmt.Sprintf("%d/%d healthy, generation %d", healthy, len(client.Paths), client.Generation))
+		field("Paths", fmt.Sprintf("%d/%d healthy, generation %d", healthy, total, client.Generation))
+		if downTotal > 0 {
+			field("Down paths", fmt.Sprintf("%d/%d healthy", downHealthy, downTotal))
+		}
 		field("Peers", strconv.FormatUint(client.Peers, 10))
 		field("Tokens", tokenUsage(client))
 		field("Drops", dropSummary(status.Drops))
@@ -67,9 +78,38 @@ func printStatus(w io.Writer, status api.Status, clients []api.RegisteredClient,
 		_ = fields.Flush()
 		_, _ = fmt.Fprintln(w)
 		printClients(w, clients, wide)
+	case status.Bridge != nil:
+		bridge := status.Bridge
+		port := strconv.Itoa(int(bridge.Port))
+		if bridge.PortLast > bridge.Port {
+			port += "-" + strconv.Itoa(int(bridge.PortLast))
+		}
+		field("Server", bridge.Server)
+		field("Port", port)
+		field("Allow", orDash(strings.Join(bridge.Allow, ", ")))
+		field("Addresses", orDash(strings.Join(bridge.Addresses, ", ")))
+		field("Uptime", humanDuration(now.Sub(status.StartedAt)))
+		field("Upstream", fmt.Sprintf("%d packets, %s", bridge.UpPackets, humanBytes(bridge.UpBytes)))
+		field("Downstream", fmt.Sprintf("%d packets, %s", bridge.DownPackets, humanBytes(bridge.DownBytes)))
+		field("Drops", dropSummary(status.Drops))
+		_ = fields.Flush()
 	default:
 		_ = fields.Flush()
 	}
+}
+
+// humanBytes shows a byte count with a binary unit.
+func humanBytes(count uint64) string {
+	const unit = 1024
+	if count < unit {
+		return fmt.Sprintf("%d B", count)
+	}
+	value, prefix := float64(count)/unit, 0
+	for value >= unit && prefix < 4 {
+		value /= unit
+		prefix++
+	}
+	return fmt.Sprintf("%.1f %ciB", value, "KMGTP"[prefix])
 }
 
 // tokenUsage shows the peer tokens in use against the quota. A quarantined
@@ -88,15 +128,30 @@ func printGroups(w io.Writer, groups []api.Group) {
 		_, _ = fmt.Fprintln(w, "No groups found.")
 		return
 	}
-	table := newTable(w)
-	row(table, "GROUP", "MODE", "PATHS", "PEERS")
+	split := false
 	for _, group := range groups {
-		row(table,
+		split = split || group.DownMode != ""
+	}
+	table := newTable(w)
+	if split {
+		row(table, "GROUP", "MODE", "PATHS", "DOWN MODE", "DOWN PATHS", "PEERS")
+	} else {
+		row(table, "GROUP", "MODE", "PATHS", "PEERS")
+	}
+	for _, group := range groups {
+		cells := []string{
 			strconv.Itoa(int(group.ListenPort)),
 			group.Mode,
 			fmt.Sprintf("%d/%d healthy", group.HealthyPaths, group.Paths),
-			strconv.Itoa(group.Peers),
-		)
+		}
+		if split {
+			downPaths := "-"
+			if group.DownMode != "" {
+				downPaths = fmt.Sprintf("%d/%d healthy", group.HealthyDownPaths, group.DownPaths)
+			}
+			cells = append(cells, orDash(group.DownMode), downPaths)
+		}
+		row(table, append(cells, strconv.Itoa(group.Peers))...)
 	}
 	_ = table.Flush()
 }
@@ -106,8 +161,21 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 		_, _ = fmt.Fprintln(w, "No paths found.")
 		return
 	}
+	split, bridged := false, false
+	for _, path := range paths {
+		split = split || path.Direction != ""
+		bridged = bridged || path.Bridge
+	}
 	table := newTable(w)
 	header := []string{"ID", "GROUP", "SERVER", "TRANSPORT", "VIA", "INTERFACE", "STATUS", "IN USE", "LAST ACK", "RTT"}
+	if split {
+		// An up path shows its latest ACK, and a down path its latest probe.
+		header = []string{"ID", "DIR", "GROUP", "SERVER", "TRANSPORT", "VIA", "INTERFACE", "STATUS", "IN USE", "LAST", "RTT"}
+	}
+	if bridged {
+		// A bridge path shows the bridge address in the SERVER column.
+		header = slices.Insert(header, 2, "KIND")
+	}
 	if wide {
 		header = append(header, "PORTS", "PRIORITY", "MISSES")
 	}
@@ -117,8 +185,27 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 		if !path.LastACK.IsZero() {
 			lastACK = humanDuration(now.Sub(path.LastACK))
 		}
-		cells := []string{
-			strconv.Itoa(path.ID),
+		if split {
+			lastACK = "ack " + lastACK
+			if path.Direction == "down" {
+				lastACK = "probe never"
+				if !path.LastProbe.IsZero() {
+					lastACK = "probe " + humanDuration(now.Sub(path.LastProbe))
+				}
+			}
+		}
+		cells := []string{strconv.Itoa(path.ID)}
+		if split {
+			cells = append(cells, orDash(path.Direction))
+		}
+		if bridged {
+			kind := "route"
+			if path.Bridge {
+				kind = "bridge"
+			}
+			cells = append(cells, kind)
+		}
+		cells = append(cells,
 			strconv.Itoa(int(path.ListenPort)),
 			fmt.Sprintf("%s:%d", path.Server, path.Port),
 			path.Transport,
@@ -128,7 +215,7 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 			yesNo(path.InUse),
 			lastACK,
 			formatRTT(path.RTTSeconds),
-		}
+		)
 		if wide {
 			ports := "-"
 			if path.LastPort > path.FirstPort {
@@ -206,10 +293,20 @@ func printClients(w io.Writer, clients []api.RegisteredClient, wide bool) {
 		_, _ = fmt.Fprintln(w, "No clients found.")
 		return
 	}
+	split := false
+	for _, client := range clients {
+		split = split || client.Down != nil
+	}
 	table := newTable(w)
 	header := []string{"CLIENT", "NONCE", "PATHS", "PEERS", "RETURN IP", "LEASE"}
+	if split {
+		header = append(header, "DOWN")
+	}
 	if wide {
 		header = append(header, "LISTEN PORT", "PATH LIST")
+		if split {
+			header = append(header, "DOWN LIST")
+		}
 	}
 	row(table, header...)
 	for _, client := range clients {
@@ -229,16 +326,57 @@ func printClients(w io.Writer, clients []api.RegisteredClient, wide bool) {
 			orDash(client.ReturnIP),
 			lease,
 		}
+		if split {
+			cells = append(cells, downSummary(client.Down))
+		}
 		if wide {
 			list := make([]string, 0, len(client.Paths))
 			for _, path := range client.Paths {
 				list = append(list, fmt.Sprintf("%d:%s:%s", path.ID, path.Transport, path.Local))
 			}
 			cells = append(cells, strconv.Itoa(int(client.ListenPort)), orDash(strings.Join(list, ",")))
+			if split {
+				cells = append(cells, downList(client.Down))
+			}
 		}
 		row(table, cells...)
 	}
 	_ = table.Flush()
+}
+
+// downSummary shows the healthy down paths of a client and its downstream
+// mode.
+func downSummary(down *api.DownGroup) string {
+	if down == nil {
+		return "-"
+	}
+	healthy := 0
+	for _, path := range down.Paths {
+		if path.Healthy {
+			healthy++
+		}
+	}
+	return fmt.Sprintf("%d/%d healthy, %s", healthy, len(down.Paths), down.Mode)
+}
+
+// downList shows each down path as ID:TRANSPORT:SERVER:PORT, with the healthy
+// members of a path that reflects.
+func downList(down *api.DownGroup) string {
+	if down == nil {
+		return "-"
+	}
+	list := make([]string, 0, len(down.Paths))
+	for _, path := range down.Paths {
+		text := fmt.Sprintf("%d:%s:%s:%d", path.ID, path.Transport, path.Server, path.Port)
+		if path.Bridge {
+			text = fmt.Sprintf("%d:%s:bridge %s:%d", path.ID, path.Transport, path.Server, path.Port)
+		}
+		if path.ReturnIP != "" {
+			text += fmt.Sprintf(" via %s (%d/%d)", path.ReturnIP, path.HealthyMembers, path.Members)
+		}
+		list = append(list, text)
+	}
+	return orDash(strings.Join(list, ","))
 }
 
 // printDrops lists the nonzero counters, or every counter in wide output.

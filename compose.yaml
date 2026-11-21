@@ -1,6 +1,7 @@
 # Run one role on each host, after you replace the example addresses in configs/:
 #   docker compose --profile server up -d --build
 #   docker compose --profile client up -d --build
+#   docker compose --profile bridge up -d --build
 
 x-mup: &mup
   build: .
@@ -28,3 +29,8 @@ services:
     <<: *mup
     profiles: [client]
     command: --config /etc/mup/client.yaml
+
+  bridge:
+    <<: *mup
+    profiles: [bridge]
+    command: --config /etc/mup/bridge.yaml

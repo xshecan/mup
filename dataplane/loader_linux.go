@@ -59,6 +59,9 @@ func Load(cfg Config) (runtime *Runtime, err error) {
 	if err := os.Remove(filepath.Join(cfg.PinRoot, "reflector_health")); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("remove old reflector pin: %w", err)
 	}
+	if err := removeChangedPins(cfg.PinRoot); err != nil {
+		return nil, err
+	}
 	options := &ebpf.CollectionOptions{}
 	options.Maps.PinPath = cfg.PinRoot
 	runtime = &Runtime{
@@ -102,6 +105,49 @@ func Load(cfg Config) (runtime *Runtime, err error) {
 		return nil, err
 	}
 	return runtime, nil
+}
+
+// rebuiltPins are the maps whose content the daemon can lose: counters, and
+// state that the daemon or its clients write again soon after a start. v0.4.0
+// grew the drop counters and the down path entries.
+var rebuiltPins = []string{
+	"stats", "event_limits", "server_down_groups", "server_down_paths",
+	"bridge_config", "bridge_addresses", "bridge_allow", "bridge_counters",
+}
+
+// removeChangedPins removes the pin of a rebuilt map whose layout changed in
+// this version, so the new program gets an empty map. A program that is still
+// attached keeps its old map until the new program replaces it.
+func removeChangedPins(pinRoot string) error {
+	spec, err := loadMup()
+	if err != nil {
+		return fmt.Errorf("load MUP BPF specification: %w", err)
+	}
+	for _, name := range rebuiltPins {
+		mapSpec := spec.Maps[name]
+		if mapSpec == nil {
+			return fmt.Errorf("the MUP BPF specification has no map %s", name)
+		}
+		path := filepath.Join(pinRoot, name)
+		pinned, err := ebpf.LoadPinnedMap(path, nil)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect pinned map %s: %w", name, err)
+		}
+		info, err := pinned.Info()
+		_ = pinned.Close()
+		if err == nil && info.Type == mapSpec.Type && info.KeySize == mapSpec.KeySize &&
+			info.ValueSize == mapSpec.ValueSize && info.MaxEntries == mapSpec.MaxEntries &&
+			info.Flags == mapSpec.Flags {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove changed pin %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 func pinDoesNotExist(path string) (bool, error) {
@@ -150,6 +196,7 @@ func (r *Runtime) ConfigureClient(settings ClientSettings) error {
 		paths:   r.objects.PathConfig,
 		returns: r.objects.PathReturns,
 		state:   r.objects.PathState,
+		downs:   r.objects.ClientDownPaths,
 	}, settings)
 }
 
@@ -181,6 +228,15 @@ func (r *Runtime) ConfigureServer(settings ServerSettings) error {
 		ingress: r.objects.TargetIngress,
 	}, settings); err != nil {
 		return err
+	}
+	// The down paths of the previous run belong to no live registration. The
+	// clients send them again within a refresh, and until then the replies
+	// follow the upstream paths.
+	if err := clearMap[mupClientKeyV1, mupDownGroupV1](r.objects.ServerDownGroups); err != nil {
+		return fmt.Errorf("clear down groups: %w", err)
+	}
+	if err := clearMap[mupDownPathKeyV1, mupDownPathV1](r.objects.ServerDownPaths); err != nil {
+		return fmt.Errorf("clear down paths: %w", err)
 	}
 	if settings.Target.Addr() == settings.SourceIP {
 		return r.releaseLocalTargetPort(settings.Target.Port())

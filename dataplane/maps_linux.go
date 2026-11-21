@@ -54,3 +54,24 @@ func hasEntry[V any](entries *ebpf.Map, key any) (bool, error) {
 	}
 	return err == nil, err
 }
+
+// clearMap deletes every entry of a hash map. It reads the keys first,
+// because a deletion under the iterator restarts it.
+func clearMap[K comparable, V any](entries *ebpf.Map) error {
+	var keys []K
+	iterator := entries.Iterate()
+	var key K
+	var value V
+	for iterator.Next(&key, &value) {
+		keys = append(keys, key)
+	}
+	if err := iterator.Err(); err != nil && !errors.Is(err, ebpf.ErrIterationAborted) {
+		return err
+	}
+	for _, key := range keys {
+		if err := deleteEntry(entries, key); err != nil {
+			return err
+		}
+	}
+	return nil
+}

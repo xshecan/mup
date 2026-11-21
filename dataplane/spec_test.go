@@ -13,7 +13,7 @@ func TestMupCollectionSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadMup: %v", err)
 	}
-	for _, name := range []string{"mup_client_ingress", "mup_server_ingress", "mup_test_parse"} {
+	for _, name := range []string{"mup_client_ingress", "mup_server_ingress", "mup_bridge_ingress", "mup_test_parse"} {
 		program := spec.Programs[name]
 		if program == nil {
 			t.Fatalf("missing program %q", name)
@@ -45,9 +45,17 @@ func TestMupCollectionSpec(t *testing.T) {
 		"path_state":               {ebpf.Array, 1},
 		"duplicate_cache":          {ebpf.LRUHash, 16384},
 		"encap_programs":           {ebpf.ProgramArray, 3},
-		"stats":                    {ebpf.PerCPUArray, 23},
+		"stats":                    {ebpf.PerCPUArray, 26},
 		"events":                   {ebpf.RingBuf, 256 * 1024},
-		"event_limits":             {ebpf.Array, 23},
+		"event_limits":             {ebpf.Array, 26},
+		"client_down_paths":        {ebpf.Array, 8},
+		"client_duplicate_cache":   {ebpf.LRUHash, 16384},
+		"server_down_groups":       {ebpf.Hash, 4096},
+		"server_down_paths":        {ebpf.Hash, 32768},
+		"bridge_config":            {ebpf.Array, 1},
+		"bridge_addresses":         {ebpf.Hash, 64},
+		"bridge_allow":             {ebpf.LPMTrie, 64},
+		"bridge_counters":          {ebpf.PerCPUArray, 4},
 	}
 	for name, want := range wantMaps {
 		m := spec.Maps[name]

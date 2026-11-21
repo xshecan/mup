@@ -7,8 +7,36 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
 )
+
+// ResetDrops sets every drop counter to zero, on every CPU. A packet that the
+// program counts during the reset can keep its count.
+func (r *Runtime) ResetDrops() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return errors.New("reset drops: MUP dataplane is closed")
+	}
+	return zeroPerCPUCounters(r.objects.Stats, dropReasonCount)
+}
+
+// zeroPerCPUCounters writes zero to the first count entries of a per-CPU
+// array, on every CPU.
+func zeroPerCPUCounters(counters *ebpf.Map, count int) error {
+	cpus, err := ebpf.PossibleCPU()
+	if err != nil {
+		return fmt.Errorf("count the CPUs: %w", err)
+	}
+	zero := make([]uint64, cpus)
+	for index := range count {
+		if err := counters.Update(uint32(index), zero, ebpf.UpdateExist); err != nil {
+			return fmt.Errorf("reset counter %d: %w", index, err)
+		}
+	}
+	return nil
+}
 
 func (r *Runtime) Snapshot() (StatsSnapshot, error) {
 	r.mu.Lock()

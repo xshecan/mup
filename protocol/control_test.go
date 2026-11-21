@@ -119,3 +119,113 @@ func TestEncodeControlFrameRejectsInvalidPolicy(t *testing.T) {
 		})
 	}
 }
+
+func TestDownRegisterRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	want := ControlFrame{
+		Type:          ControlDownRegister,
+		Transport:     TransportICMP,
+		Flags:         ControlFlagReturnPool | ControlFlagBalancePerPacket,
+		PathID:        2,
+		ListenPort:    51820,
+		ServerPort:    9200,
+		AdvertisedIP:  netip.MustParseAddr("192.0.2.10"),
+		ReturnIP:      netip.MustParseAddr("198.51.100.0"),
+		ReturnPrefix:  28,
+		InstanceNonce: 7,
+		Sequence:      3,
+		LeaseSeconds:  30,
+		DownMode:      2,
+		DownServer:    netip.MustParseAddr("203.0.113.5"),
+	}
+	buf := make([]byte, ControlFrameLength)
+	if err := EncodeControlFrame(buf, want); err != nil {
+		t.Fatalf("EncodeControlFrame: %v", err)
+	}
+	if buf[18] != 2 || !bytes.Equal(buf[44:48], []byte{203, 0, 113, 5}) {
+		t.Fatalf("down mode byte = %d, server bytes = %v", buf[18], buf[44:48])
+	}
+	got, err := DecodeControlFrame(buf)
+	if err != nil {
+		t.Fatalf("DecodeControlFrame: %v", err)
+	}
+	if got != want {
+		t.Fatalf("decoded frame = %#v, want %#v", got, want)
+	}
+}
+
+// A server before v0.4.0 must ignore a DOWN_REGISTER. Its decoder rejects the
+// type and the reserved bytes, so the frame never reaches its registry.
+func TestDownFieldsStayReservedInOtherFrames(t *testing.T) {
+	t.Parallel()
+
+	frame := ControlFrame{
+		Type:          ControlRegister,
+		Transport:     TransportUDP,
+		AdvertisedIP:  netip.MustParseAddr("192.0.2.10"),
+		InstanceNonce: 1,
+		DownServer:    netip.MustParseAddr("203.0.113.5"),
+	}
+	if err := EncodeControlFrame(make([]byte, ControlFrameLength), frame); !errors.Is(err, ErrControlReserved) {
+		t.Fatalf("EncodeControlFrame error = %v, want %v", err, ErrControlReserved)
+	}
+	frame.DownServer = netip.Addr{}
+	buf := make([]byte, ControlFrameLength)
+	if err := EncodeControlFrame(buf, frame); err != nil {
+		t.Fatalf("EncodeControlFrame: %v", err)
+	}
+	buf[44] = 1
+	if _, err := DecodeControlFrame(buf); !errors.Is(err, ErrControlReserved) {
+		t.Fatalf("DecodeControlFrame error = %v, want %v", err, ErrControlReserved)
+	}
+}
+
+func TestDownPathFlagAndModeRules(t *testing.T) {
+	t.Parallel()
+
+	base := ControlFrame{
+		Type:          ControlDownRegister,
+		Transport:     TransportUDP,
+		AdvertisedIP:  netip.MustParseAddr("192.0.2.10"),
+		InstanceNonce: 1,
+		DownServer:    netip.MustParseAddr("203.0.113.5"),
+	}
+	tests := []struct {
+		name  string
+		alter func(*ControlFrame)
+		err   error
+	}{
+		{name: "no down server", alter: func(frame *ControlFrame) { frame.DownServer = netip.Addr{} }, err: ErrControlAddress},
+		{name: "unknown down mode", alter: func(frame *ControlFrame) { frame.DownMode = MaxDownMode + 1 }, err: ErrControlMode},
+		{name: "down flag on a register", alter: func(frame *ControlFrame) {
+			frame.Type = ControlRegister
+			frame.DownServer = netip.Addr{}
+			frame.Flags = ControlFlagDownPath
+		}, err: ErrControlFlags},
+		{name: "down flag on a probe", alter: func(frame *ControlFrame) {
+			frame.Type = ControlProbe
+			frame.DownServer = netip.Addr{}
+			frame.Flags = ControlFlagDownPath
+		}},
+		{name: "bridge flag on a down register", alter: func(frame *ControlFrame) {
+			frame.Flags = ControlFlagBridge | ControlFlagReturnIP
+			frame.ReturnIP = netip.MustParseAddr("198.51.100.7")
+		}},
+		{name: "bridge flag on a register", alter: func(frame *ControlFrame) {
+			frame.Type = ControlRegister
+			frame.DownServer = netip.Addr{}
+			frame.Flags = ControlFlagBridge
+		}, err: ErrControlFlags},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frame := base
+			tt.alter(&frame)
+			err := EncodeControlFrame(make([]byte, ControlFrameLength), frame)
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("EncodeControlFrame error = %v, want %v", err, tt.err)
+			}
+		})
+	}
+}

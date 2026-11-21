@@ -30,6 +30,10 @@ This document describes version 1 of the MUP protocol as the code implements it.
 | WireGuard peer | A WireGuard endpoint that sends its packets to the MUP client. |
 | WireGuard target | The one WireGuard endpoint behind the MUP server. The server `-r` flag sets it. |
 | Path | One way from the client to a server. One client `-u` flag sets one path. |
+| Up path | A path of a group with separate down paths. It carries only the packets from the client to the server. |
+| Down path | A way that the server sends the replies of a group to the client. One `downstream` route sets one down path. |
+| Bridge | A host that runs `mup bridge` between the clients and one server. One `bridges` entry sets one up path or down path through it. |
+| Bridge wrapper | The 20 bytes that a server puts after the IPv4 header of a reply for a bridge: a UDP header and the bridge header. |
 | Group | One listen port with its mode and its paths. Each path has an optional return IP. |
 | Port | The number in `-u SERVER:PORT` and in server `-p`. For UDP, it is the destination port. For ICMP, it is the Echo identifier. |
 | Listen port | The client `-p` port of a group. The peers send to it, and downstream packets arrive on it. |
@@ -53,7 +57,7 @@ This document describes version 1 of the MUP protocol as the code implements it.
 
 One MUP server serves many MUP clients. Each client serves many WireGuard peers and uses up to eight paths in all. Each server forwards all traffic to one WireGuard target. Each active client of a server must use an advertised IP that no other client of that server uses.
 
-MUP has two eBPF programs. `mup_client_ingress` runs on the client host, and `mup_server_ingress` runs on the server host. Each program attaches to the TCX ingress hook of every Ethernet interface that is up at start. The loopback interface counts as an Ethernet interface. For a packet that MUP does not own, the program returns `TCX_NEXT`, and the kernel handles the packet as usual.
+MUP has three ingress programs. `mup_client_ingress` runs on the client host, `mup_server_ingress` runs on the server host, and `mup_bridge_ingress` runs on a bridge host. Each program attaches to the TCX ingress hook of every Ethernet interface that is up at start. The loopback interface counts as an Ethernet interface. For a packet that MUP does not own, the program returns `TCX_NEXT`, and the kernel handles the packet as usual.
 
 ### Path groups
 
@@ -89,7 +93,7 @@ MUP computes the IPv4 header checksum again over the 20 header bytes. It updates
 
 A valid checksum stays valid after a rewrite, and a corrupt checksum stays corrupt. The receiver then drops the corrupt packet as usual. The UDP checksum covers the UDP pseudo-header, and the ICMP checksum does not. A computed UDP checksum of zero goes on the wire as 0xffff, as RFC 768 requires.
 
-A UDP checksum field of zero gives no payload sum to update. IPv4 lets a sender send zero when it computes no checksum. Some NAT devices also write zero when the computed checksum is zero, where RFC 768 requires 0xffff. About 1 packet in 65536 of their flows then arrives with zero, and plain WireGuard accepts it as a packet without a checksum. So MUP sums the payload of such a packet, up to 9216 bytes, writes its checksum, and then rewrites it as usual. If the payload is longer, MUP drops the packet and counts reason 20.
+A UDP checksum field of zero gives no payload sum to update. IPv4 lets a sender that computes no checksum send zero. Some NAT devices also write zero for a computed checksum of zero, where RFC 768 requires 0xffff. About 1 packet in 65536 of their flows then arrives with zero, and plain WireGuard accepts it as a packet without a checksum. So MUP sums the payload of such a packet, up to 9216 bytes, writes its checksum, and then rewrites it as usual. If the payload is longer, MUP drops the packet and counts reason 20.
 
 A target on the server host, for example `127.0.0.1`, answers from a local socket. Its replies have a partial checksum (`CHECKSUM_PARTIAL`): the UDP checksum field holds only the pseudo-header sum, and the network device adds the UDP header and the payload at send time. If the target IP equals the source IP of the target route, the server handles the target as local. The target can use any address of the server host, and the server reaches it through the loopback interface. On a UDP path, the server writes the new pseudo-header sum and leaves the rest to the device. On an ICMP path, the server computes the ICMP checksum from the payload and keeps the sequence at zero. It does not leave this checksum to the device, because some devices, for example vmxnet3, do not complete the partial checksum of an ICMP packet. A device that completes it writes a word at the UDP checksum offset, which is the Echo sequence field. If all words add up to 0xffff, a one's complement checksum is valid, so this word keeps the checksum valid. The client does not read the sequence, because the peer token is in the WireGuard bytes. The client does the same for a packet from WireGuard on the client host. That packet also comes through loopback with a partial checksum.
 
@@ -132,9 +136,49 @@ Every 2 seconds, the server sends one Echo Request to each host address of each 
 - An ICMP member must reply to ping, because it sends the Echo Reply to the client. The members are the live hosts. A member that misses 3 sweeps in a row is unhealthy, and a member that misses 15 sweeps leaves the pool.
 - A UDP member is only a spoofed source, so it does not have to reply to ping. The members are the live hosts first, then the other hosts of the range in order. Every 2 seconds, the server sends a control probe to the client from each member as a spoofed source. The client sends a probe reply to the real server for each probe that arrives. A UDP member is healthy for 6 seconds after its latest probe reply.
 
-If no member of a pool is healthy, the server answers each REGISTER of a path with that pool with the status NO_REFLECTOR. It still registers the path, so the path comes back when a reflector does. A new pool is ready for 6 seconds after its first registration, before the first sweep and the first probe replies. The client counts a NO_REFLECTOR answer as a missed ACK, so the path becomes unhealthy after 3 of them. `mupctl get paths` then shows the path as `unhealthy (no reflector)`. A client before this status cannot decode the answer, so it also counts it as missed.
+If no member of a pool is healthy, the server answers each REGISTER of a path with that pool with the status NO_REFLECTOR. It still registers the path, so the path comes back once a reflector is healthy. A new pool is ready for 6 seconds after its first registration, before the first sweep and the first probe replies. The client counts a NO_REFLECTOR answer as a missed ACK, so the path becomes unhealthy after 3 of them. `mupctl paths` then shows the path as `unhealthy (no reflector)`. A client before this status cannot decode the answer, so it also counts it as missed.
 
-If a probe reply names the client, the instance nonce, and the path of a live registration, the server accepts it. The member must also be in the pool of that path. When the number of live hosts of a pool changes, the server logs a line. `mupctl get reflectors` shows each member and its health.
+If a probe reply names the client, the instance nonce, and the path of a live registration, the server accepts it. The member must also be in the pool of that path. When the number of live hosts of a pool changes, the server logs a line. `mupctl reflectors` shows each member and its health.
+
+### Separate down paths
+
+A group can have separate down paths. The `upstream` routes of the group are its up paths, and its `downstream` routes are its down paths. The client picks the up path of each upstream packet with the upstream mode. The server picks the down path of each reply with the downstream mode. So the two directions fail over on their own.
+
+A down path names the server address and port that send the replies, the transport, and an optional return IP or pool. Its return modes are the modes in the table, with these differences:
+
+- A direct UDP down path sends from its server address and port to `-s`:listen.
+- A direct ICMP down path sends an Echo Reply from its server address, with the port of the path as identifier.
+- A reflected down path uses its return IP, or a member of its pool, as the table shows.
+
+The server address of a down path must be an address of the server host. The server sends each reply out of the interface that holds that address. If the address is on a loopback interface, the server uses the route to the destination.
+
+An up path has no return IP. The client also accepts a reply from the server of an up path, so an older server can still answer on the up paths.
+
+### Bridges
+
+A bridge serves one server. A path through a bridge names the bridge address in place of the server address. Only a group with separate down paths has bridges.
+
+An up bridge carries the upstream of a path. The client sends to the bridge in the same way as to a server. The bridge changes the destination to its server, and it keeps the source, the port, and the ICMP identifier. It updates the IPv4 checksum and the UDP checksum. So the server gets the same packet as from the client.
+
+A down bridge carries the replies of a down path. The server rewrites each reply as for a down route, with the bridge address as the server address of the path. A direct reply thus comes from the bridge address. Then the server puts the reply in the bridge wrapper:
+
+| Part | Size | Content |
+| --- | ---: | --- |
+| IPv4 header | 20 | From the server to the bridge, with protocol UDP. The other fields do not change. |
+| UDP header | 8 | The port of the down path at both ends. The checksum is zero. |
+| Bridge header | 12 | The magic 0x4d42 ("MB"), version 1, the inner protocol, the inner source address, and the inner destination address. |
+| Inner header | 8 | The UDP or ICMP header of the reply, with no change. |
+| Payload | n | The WireGuard message or the control frame, with no change. |
+
+The transport header and the payload do not move. So the inner checksum stays valid, and a partial checksum stays partial. The server sends the wrapped reply from the source address of its route to the bridge, through the interface of that route. If the wrapped reply does not fit the MTU of that interface, the server drops it and counts reason 25. In a downstream burst, the server removes the wrapper again after the copy of a down bridge. So the next down path gets the reply as it was.
+
+The bridge program handles each packet to an address of the bridge host and a port of the bridge:
+
+1. A UDP payload that starts with the bridge magic is a wrapped reply. It must come from the server or from an `allow` range, or the program counts reason 23. It must have version 1, UDP or ICMP inside, and a MUP packet inside, or the program counts reason 24. The program removes the wrapper and writes the inner protocol and addresses into the IPv4 header.
+2. Any other MUP packet goes to the server, except a packet from the server itself. A MUP packet is a control frame, or a WireGuard message with a token, in UDP or in an ICMP Echo Request.
+3. Every other packet goes on to the kernel. So a normal ping to the bridge still gets its reply.
+
+The program then finds the interface of the new destination with the FIB lookup of a forwarded packet, and it redirects the packet there. So the bridge host needs IPv4 forwarding.
 
 ## Packet flow
 
@@ -186,16 +230,16 @@ A UDP packet from the target address and port arrives at a target port. The serv
 
 ### Ingress delivery
 
-Ingress delivery (`target_ingress`) is for a target on the server host that has its own TC program on an interface, for example a WireGuard router with an eBPF fast path. Without it, the server sends to a target on the server host through the loopback interface, and a program on another interface never sees the packets.
+Ingress delivery (`target_ingress`) is for a target on the server host that has its own TC program on an interface. An example is a WireGuard router with an eBPF fast path. Without it, the server sends to a target on the server host through the loopback interface. A program on another interface then never sees the packets.
 
 With ingress delivery, the target address must be an address of the server host on an Ethernet interface. The server changes two steps of the upstream flow:
 
 1. It rewrites the packet from the advertised IP of the client and the target port of the route, not from its own address.
-2. It injects the packet into the ingress hook of the interface that holds the target address, with the Ethernet address of that interface as the destination.
+2. It injects the packet into the ingress hook of the interface that holds the target address. The Ethernet destination is the address of that interface.
 
-The programs on that hook then see a packet from the client, and the kernel delivers it to the target. The target answers the advertised IP of the client, so the reply leaves through the egress hook of the same interface. There, `mup_server_egress` catches a UDP packet from the target address and port to the advertised IP of a route at the target port of that route. It then does the target reply steps. If the reply leaves on the same interface, the program writes the Ethernet header from a FIB lookup and passes the packet on. Otherwise, it redirects the packet.
+The programs on that hook then see a packet from the client, and the kernel delivers it to the target. The target answers the advertised IP of the client, so the reply leaves through the egress hook of the same interface. There, `mup_server_egress` catches a UDP packet from the target address and port. The packet goes to the advertised IP of a route, at the target port of that route. It then does the target reply steps. If the reply leaves on the same interface, the program writes the Ethernet header from a FIB lookup and passes the packet on. Otherwise, it redirects the packet.
 
-A program before `mup_server_egress` on the egress hook can rewrite the reply source to the target address, as a WireGuard router does. So `mup_server_egress` goes after the programs that are on the hook when it attaches. Such a program must attach at the head of the hook. The target port must be outside the server ports, because an injected packet passes the server program again.
+A program before `mup_server_egress` on the egress hook can rewrite the reply source to the target address, as a WireGuard router does. So `mup_server_egress` goes after the programs already on the hook at attach time. Such a program must attach at the head of the hook. The target port must be outside the server ports, because an injected packet passes the server program again.
 
 If the target checksum offload is on, the reply has `CHECKSUM_PARTIAL`. The program detects this from the checksum field, which then holds only the pseudo-header sum, and uses the partial rewrites.
 
@@ -226,7 +270,15 @@ The client program reads the healthy path mask from `path_state` for each packet
 
 The balancer hash is `h = token * 0x9e3779b1 ^ mask * 0x85ebca6b`, then `h ^= h >> 16`. The index of the path in the list of healthy paths is `h % count`. A peer thus stays on one path until the set of healthy paths in its group changes. A health change in another group does not move the peer.
 
-The server does not select paths. It replies on the path of the latest upstream packet of each route. After a failover, the first upstream packet on the new path moves the downstream traffic too. In burst mode, the first copy to arrive sets the return path.
+Without down paths, the server does not select paths. It replies on the path of the latest upstream packet of each route. After a failover, the first upstream packet on the new path moves the downstream traffic too. In burst mode, the first copy to arrive sets the return path.
+
+For a group with down paths, the server picks the down path of each reply from the healthy down paths of the client. The downstream mode uses the rules of the client:
+
+- Fallback: The server uses the healthy down path with the lowest ID.
+- Balancer: The server hashes the token and the mask with the formula above.
+- Burst: The server sends the reply on every healthy down path.
+
+In burst mode, the client keeps the first copy of each message for 2 seconds and drops the other copies with reason 16. If the client has no healthy down path on the server, the server drops the reply and counts reason 15.
 
 ## Control plane
 
@@ -252,6 +304,14 @@ The server then writes the registration to `registration_by_key` and the path to
 
 The client waits 900 milliseconds for an ACK with the same nonce, path ID, and sequence. After an ACK, it sends the next REGISTER in 10 seconds. After a missing ACK, it sends the next REGISTER in 1 second. The source port of a UDP path never changes, because it must stay the listen port.
 
+### Down path registration
+
+An up path of a group with down paths sends one DOWN_REGISTER frame for each down path of the group before each REGISTER. The frames travel like the REGISTER, so each server that an up path reaches gets all of them. The server applies the REGISTER rules to the source, the port, and the path ID. It keeps only a down path whose server address is an address of the server host. A down path has a lease of 30 seconds. A DOWN_REGISTER with a lease of zero withdraws a down path that `mupctl` removed.
+
+A DOWN_REGISTER with flag bit 4 declares a down bridge, and its down server field holds the bridge address. A client does not know which server a bridge serves. So each server keeps a down bridge without the address check and without the port check, and it probes the bridge.
+
+The server sends each REGISTER_ACK directly, and also on every down path of the client, with the next member of a pool each time. One ACK makes the up path healthy, on any of these ways. So an up path stays healthy, even with no packet back on its own flow.
+
 ### Client restarts
 
 A client picks a new instance nonce at each start. The server keeps one registration for each advertised IP. A REGISTER with a new nonce replaces the registration of the old nonce. The next sweep then deletes the paths and routes of the old nonce.
@@ -269,22 +329,22 @@ The control frame is 48 bytes long, and all integers are big-endian.
 | ---: | ---: | --- | --- |
 | 0 | 4 | magic | 0x4d555043, which is "MUPC" in ASCII. |
 | 4 | 1 | version | 1. |
-| 5 | 1 | type | 1 is REGISTER, 2 is REGISTER_ACK, 3 is PROBE, and 4 is PROBE_REPLY. Types 5 and 6 are reserved. |
+| 5 | 1 | type | 1 is REGISTER, 2 is REGISTER_ACK, 3 is PROBE, 4 is PROBE_REPLY, and 7 is DOWN_REGISTER. Types 5 and 6 are reserved. |
 | 6 | 1 | transport | 0 is UDP and 1 is ICMP. |
-| 7 | 1 | flags | Bit 0 means that the return IP field holds one return IP. Bit 1 means that it holds the base of a return pool. Bit 2 selects the per-packet balance mode of a pool. The other bits must be zero. |
+| 7 | 1 | flags | Bit 0 means that the return IP field holds one return IP. Bit 1 means that it holds the base of a return pool. Bit 2 selects the per-packet balance mode of a pool. Bit 3 marks a PROBE or a PROBE_REPLY of a down path, and its path ID is then a down path ID. Bit 4 marks a DOWN_REGISTER of a down bridge. The other bits must be zero. |
 | 8 | 2 | length | 48. |
 | 10 | 2 | status | 0 is OK. 7 is NO_REFLECTOR: the return pool of the path has no healthy reflector. Values 1 to 6 name errors, but the server does not send them. |
 | 12 | 2 | path ID | 0 to 7, the slot of the path in the client. |
 | 14 | 2 | listen port | The listen port of the group of the path. |
 | 16 | 2 | server port | The server port. |
-| 18 | 1 | reserved | Zero. |
+| 18 | 1 | down mode | In a DOWN_REGISTER, the downstream mode: 0 is fallback, 1 is balancer, and 2 is burst. Zero otherwise. |
 | 19 | 1 | pool prefix | The prefix length of the return pool, 1 to 31, with flag bit 1. Zero otherwise. |
 | 20 | 4 | advertised IP | The client `-s` address. |
 | 24 | 4 | return IP | The return IP or the pool base of the path, or zero. In a PROBE_REPLY, the reflector that reached the client. |
 | 28 | 8 | instance nonce | The nonzero random number of the client process. |
 | 36 | 4 | sequence | A counter that goes up by one with each REGISTER on the path. |
 | 40 | 4 | lease seconds | 30. |
-| 44 | 4 | reserved | Zero. |
+| 44 | 4 | down server | In a DOWN_REGISTER, the server address of the down path, or the bridge address with flag bit 4. Zero otherwise. |
 
 Some payloads are exactly 48 bytes long and start with the magic, version 1, and length 48. The TCX programs pass such a payload to the kernel as a control frame.
 
@@ -294,9 +354,17 @@ The client measures the health of each path with the ACKs to its REGISTER frames
 
 A dead path becomes unhealthy about 5 to 15 seconds after it fails. The delay depends on the time that remains until the next REGISTER. If no path of a group is healthy, the client drops the upstream packets of that group and counts reason 15.
 
+### Down path health
+
+Every 2 seconds, the server sends a PROBE on each down path of each client, in the same way as a reply. A path with a pool gets one probe through each member. The client answers each probe with a PROBE_REPLY on its healthy up path with the lowest priority. If no up path is healthy, it answers on every up path. The reply names the source of the probe, which is the member of a pool.
+
+A down path, or a member of its pool, is healthy for 6 seconds after its latest reply. A new down path is healthy for its first 6 seconds. A new down bridge is unhealthy until its first reply, because the bridge drops the wrapped probes of the other servers. The members of a pool come from the sweeps of the pool, but each down path keeps its own member health. So a member that answers the ping of the server but does not reach the client carries no replies of that client.
+
+The client shows a down path as healthy while its probes arrive. It shows a down path as in use while the program accepts replies on it.
+
 ### Port moves
 
-A path can have a range of server ports. A filter on the way can drop the packets of one flow and pass the others, so a path that gets no ACK on one server port can get through on another. The path starts on the first port of its range. If 10 REGISTER frames in a row get no answer, the client moves the path to a random other port of the range. With the ACK timeout and the retry of 1 second, the first move comes about 19 seconds after the last answer. Each move without an answer doubles the number of frames before the next move, up to 160. An ACK or a NO_REFLECTOR answer resets the count to 10, and a NO_REFLECTOR answer never moves a path, because the server received the frame.
+A path can have a range of server ports. A filter on the way can drop the packets of one flow and pass the others. So a path that gets no ACK on one server port can get through on another. The path starts on the first port of its range. If 10 REGISTER frames in a row get no answer, the client moves the path to a random other port of the range. With the ACK timeout and the retry of 1 second, the first move comes about 19 seconds after the last answer. Each move without an answer doubles the number of frames before the next move, up to 160. An ACK or a NO_REFLECTOR answer resets the count to 10, and a NO_REFLECTOR answer never moves a path, because the server received the frame.
 
 The client moves a path in this order:
 
@@ -313,10 +381,12 @@ Pinned BPF maps hold all dataplane state. Go writes the configuration and the re
 | Map | Type | Capacity | Key and value | Writer |
 | --- | --- | ---: | --- | --- |
 | `client_config` | array | 1 | Nonce, `-s`, and generation. | Go |
-| `path_groups` | hash | 8 | Listen port to mode and path mask. The return IP and flags fields are not used. | Go |
+| `path_groups` | hash | 8 | Listen port to mode, path mask, down path mask, and flags. Flag bit 0 turns on the duplicate filter of a downstream burst. The return IP field is not used. | Go |
 | `path_config` | array | 8 | Destination, source, interface, port, transport, and priority of each path. | Go |
 | `path_returns` | array | 8 | Return IP and flags of each path. | Go |
 | `path_state` | array | 1 | Healthy mask and generation. | Go |
+| `client_down_paths` | array | 8 | Server, return IP or pool, port, and transport of each down path, and the time of its latest reply. | Both |
+| `client_duplicate_cache` | LRU hash | 16384 | Token and first 24 WireGuard bytes to the time seen, for a downstream burst. | Program |
 | `client_peer_by_endpoint` | hash | 4096 | Peer endpoint to token and last-seen time. | Program |
 | `client_endpoint_by_token` | hash | 4096 | Token to peer endpoint, interface, and last-seen time. | Program |
 | `free_peer_tokens` | queue | 4095 | Unused tokens. | Both |
@@ -329,9 +399,15 @@ Pinned BPF maps hold all dataplane state. Go writes the configuration and the re
 | `server_route_by_port` | hash | 41000 | Target port to route key and return path. | Program |
 | `free_target_ports` | queue | 41000 | Unused target ports. | Both |
 | `duplicate_cache` | LRU hash | 16384 | Route key and first 24 WireGuard bytes to the time seen. | Program |
-| `stats` | per-CPU array | 23 | Drop counters, one for each reason. | Program |
+| `server_down_groups` | hash | 4096 | Client key to listen port, downstream mode, and the masks of its down paths. | Go |
+| `server_down_paths` | hash | 32768 | Client key and down path ID to the down path, its interface, and its healthy pool members. A down bridge also has flag bit 4 and the source address of its wrapper. | Go |
+| `bridge_config` | array | 1 | The server of a bridge, and its first and last port. | Go |
+| `bridge_addresses` | hash | 64 | The IPv4 addresses of the bridge host. Go writes them again every 10 seconds. | Go |
+| `bridge_allow` | LPM trie | 64 | The senders of wrapped replies: the server, and the `allow` ranges. | Go |
+| `bridge_counters` | per-CPU array | 4 | The packets and bytes that a bridge sent upstream and downstream. | Program |
+| `stats` | per-CPU array | 26 | Drop counters, one for each reason. | Program |
 | `events` | ring buffer | 256 KiB | Events for reasons 11, 12, and 13. | Program |
-| `event_limits` | array | 23 | Rate limit of the events for each reason. | Program |
+| `event_limits` | array | 26 | Rate limit of the events for each reason. | Program |
 
 Each route has a forward entry and a reverse entry that point at each other. The program writes the forward entry first. If the reverse entry fails, the program deletes the forward entry and returns the token or port to its queue. The last-seen times in the maps use the monotonic clock of the kernel.
 
@@ -365,12 +441,14 @@ The sweep copies each map before it deletes entries, because a deletion restarts
 | Registration lease | 30 s | Life of a registration without a new REGISTER. |
 | Route idle timeout | 180 s | Life of a route without traffic. |
 | Quarantine | 120 s | Wait before a token or port goes back into use. |
-| Duplicate window | 2 s | Time in which the server drops a burst copy. |
+| Duplicate window | 2 s | Time in which the server drops a burst copy, and the client drops a downstream burst copy. |
+| Down path probe | 2 s | Time between two probes of each down path. |
+| Down path health | 6 s | Life of the health of a down path or a pool member without a probe reply. |
 | Sweep | 1 s | Time between two sweeps. |
 
 ## Input rules
 
-A network device can keep only the first bytes of a large packet in the buffer that a program can read. The programs need only the first 90 bytes of a packet: the headers, the start of the WireGuard message, and a control frame. If fewer bytes are readable, the program pulls them into the buffer. Only a checksum that MUP must compute makes it read the rest of the payload, and it copies those bytes chunk by chunk without a pull.
+A network device can keep only the first bytes of a large packet in the buffer that a program can read. The programs need only the first 90 bytes of a packet: the headers, the start of the WireGuard message, and a control frame. If fewer bytes are readable, the program pulls them into the buffer. Only a checksum that MUP must compute makes it read the rest of the payload. It copies those bytes chunk by chunk without a pull.
 
 The programs forward only IPv4 packets with a 20-byte header, no fragments, and a UDP or ICMP header. The UDP length must match the IPv4 total length. The WireGuard message must have a valid length for its type.
 
@@ -401,18 +479,21 @@ A program returns `TCX_NEXT` for traffic that it does not own. This traffic incl
 | 12 | `TARGET_PORT_POOL` | The server has no free target port. |
 | 13 | `MAP_INVARIANT` | A forward entry and its reverse entry disagree, or a map update failed. |
 | 14 | `ROUTE_MISS` | The server has no route for the target port, or the client has no peer for the token. |
-| 15 | `NO_PATH` | The group of the peer has no healthy path. |
-| 16 | `DUPLICATE` | The server already forwarded this burst copy. |
+| 15 | `NO_PATH` | The group of the peer has no healthy path, or the client has no healthy down path on the server. |
+| 16 | `DUPLICATE` | The server already forwarded this burst copy, or the client already passed this downstream burst copy. |
 | 17 | `FIB` | A burst clone got no FIB result for its path. MUP skips the clone, not the packet. |
 | 18 | `NEIGHBOR` | A burst clone failed to redirect. MUP skips the clone, not the packet. |
 | 19 | `TAIL_CALL` | Reserved. Version 1 does not count it. |
 | 20 | `CHECKSUM` | A rewrite failed, for example on a UDP packet without a checksum and with a payload longer than 9216 bytes. |
 | 21 | `SOURCE_LIMIT` | The source IP of a new peer already has 1024 routes on the client. |
 | 22 | `DOWNSTREAM_SOURCE` | A downstream packet came from a source that the group of the peer does not expect. |
+| 23 | `BRIDGE_SOURCE` | A bridge got a wrapped reply from a sender that is not its server or in an `allow` range. |
+| 24 | `BRIDGE_PACKET` | A bridge got a wrapped reply with a bad version, a bad inner protocol, or no MUP packet inside. If a wrap or an unwrap fails half way, a server also counts it. |
+| 25 | `BRIDGE_SIZE` | A reply for a down bridge does not fit the MTU of the interface to the bridge after the wrap. |
 
 ## Attachment and restarts
 
-The loader pins the maps by name under `/sys/fs/bpf/mup/client` or `/sys/fs/bpf/mup/server`. It pins each TCX link under `/sys/fs/bpf/mup/<role>/<role>/<ifindex>/ingress`. With ingress delivery, the server also pins the egress link of the target interface under `/sys/fs/bpf/mup/server/server/<ifindex>/egress`. Without it, the server removes that link at start. The client attaches to every Ethernet interface that is up and to the interface of each path. The server attaches to every Ethernet interface that is up and to the interface that leads to the target.
+The loader pins the maps by name under `/sys/fs/bpf/mup/client`, `/sys/fs/bpf/mup/server`, or `/sys/fs/bpf/mup/bridge`. A bridge attaches to every Ethernet interface that is up. It pins each TCX link under `/sys/fs/bpf/mup/<role>/<role>/<ifindex>/ingress`. With ingress delivery, the server also pins the egress link of the target interface under `/sys/fs/bpf/mup/server/server/<ifindex>/egress`. Without it, the server removes that link at start. The client attaches to every Ethernet interface that is up and to the interface of each path. The server attaches to every Ethernet interface that is up and to the interface that leads to the target.
 
 The programs read an Ethernet header from every packet. So MUP does not attach to an interface without one, for example a PPP, tun, WireGuard, or raw-IP modem interface. If a path or the target route uses such an interface, the start fails with an error.
 
@@ -425,6 +506,8 @@ At start, the loader does these steps in order:
 5. For an existing queue, it puts each lost token or port into quarantine.
 6. It deletes the groups that are not in the configuration, and it writes the configuration of the role.
 7. It replaces the program in each pinned link, or it attaches and pins a new link.
+
+Before step 1, the loader removes the pin of a map whose layout changed in this version. It does this only for the maps of counters and of state that the daemon or its clients write again soon after a start. v0.4.0 grew `stats`, `event_limits`, and `server_down_paths`. The program that is still attached keeps its old map until step 7 replaces it.
 
 A lost token or port is not free, not in a route, and not in quarantine. A crash between a pop and a route insert can lose one. Step 7 keeps forwarding active during a restart.
 
@@ -440,9 +523,10 @@ The daemon does not log counters. The control socket reports them on demand, and
 | --- | --- | --- |
 | Drops | Both | The `stats` map, summed over all CPUs. |
 | Paths | Client | The healthy mask and the generation in `path_state`. |
+| Down paths | Client | The time of the latest probe of each down path, and the reply times in `client_down_paths`. |
 | Peers | Client | The entries in `client_peer_by_endpoint`. The local port of an entry gives its group. |
 | Tokens | Client | The used tokens and the quota of 4095. The used tokens are the routes and the tokens in quarantine. |
-| Clients | Server | The entries in `registration_by_key` and `registered_paths`. |
+| Clients | Server | The entries in `registration_by_key` and `registered_paths`, and the down paths with their health. |
 | Peers | Server | The entries in `server_route_by_key`. |
 | Target ports | Server | 41000, minus the routes, minus the ports in quarantine. |
 | Duplicates | Server | The entries in `duplicate_cache`. |
@@ -451,19 +535,21 @@ The programs write events to the `events` ring buffer for reasons 11, 12, and 13
 
 ## Control socket
 
-The daemon serves a control API for `mupctl` on a Unix socket. The default socket is `/run/mup/client.sock` for a client and `/run/mup/server.sock` for a server. The daemon creates the socket at each start with mode 0660. It replaces a stale socket file. If another daemon still answers on the socket, the start fails.
+The daemon serves a control API for `mupctl` on a Unix socket. The default socket is `/run/mup/client.sock` for a client, `/run/mup/server.sock` for a server, and `/run/mup/bridge.sock` for a bridge. A bridge serves only `GET /v1/status` and `DELETE /v1/drops`. The daemon creates the socket at each start with mode 0660. It replaces a stale socket file. If another daemon still answers on the socket, the start fails.
 
 The API is JSON over HTTP/1.1. The file `api/api.go` defines the request and response types.
 
 | Method | Path | Role | Result |
 | --- | --- | --- | --- |
-| `GET` | `/v1/status` | Both | The overview and the drop counters. |
+| `GET` | `/v1/status` | All | The overview and the drop counters. A bridge also shows its packet and byte counters. |
 | `GET` | `/v1/paths` | Client | The paths with their health. |
-| `POST` | `/v1/paths` | Client | Adds a path. The body is `{"path": "SERVER[%IFACE]:PORT/udp", "listen_port": 51820}`. |
-| `DELETE` | `/v1/paths/{id}` | Client | Removes a path. |
-| `PUT` | `/v1/mode` | Client | Changes the mode of a group. The body is `{"mode": "burst", "listen_port": 51820}`. |
+| `POST` | `/v1/paths` | Client | Adds a path. The body is `{"path": "SERVER[%IFACE]:PORT/udp", "listen_port": 51820}`. With `"down": true`, it adds a down path. With `"bridge": true`, the path goes through the bridge that it names. |
+| `DELETE` | `/v1/paths/{id}` | Client | Removes a path. With `?direction=down`, it removes a down path. |
+| `PUT` | `/v1/mode` | Client | Changes the mode of a group. The body is `{"mode": "burst", "listen_port": 51820}`. With `"down": true`, it changes the downstream mode. |
 | `GET` | `/v1/peers` | Both | The peers of a client, or the peer routes of a server. |
 | `GET` | `/v1/clients` | Server | The registered clients with their paths. |
+| `GET` | `/v1/reflectors` | Server | The members of the return pools and their health. |
+| `DELETE` | `/v1/drops` | All | Sets every drop counter to zero, on every CPU. |
 
 The `listen_port` field selects a group. A client with one group does not need it. The status response of a client lists its groups.
 
@@ -490,6 +576,8 @@ The client removes a path in this order:
 
 The client program thus never picks a path with a partial configuration. A result from an old REGISTER loop has no effect on a new path in the same slot. The client does not remove the last path of a group. The server needs no change, because it learns each path from its REGISTER frames. The lease of a removed path ends after 30 seconds.
 
+A group with down paths also takes runtime changes of its down paths. A new down path takes the lowest free down path slot, and it is unhealthy until its first probe. The client writes it to `client_down_paths`, adds it to the down mask of the group, and sends it with the next DOWN_REGISTER frames. A removed down path leaves the down mask first. Then the client sends it with a lease of zero for one lease, so the servers stop to use it within 10 seconds. A new downstream mode reaches the servers with the next REGISTER. The client does not remove the last down path of a group. It does not add a down path to a group without down paths.
+
 Path changes are not saved. At the next start, the daemon uses its flags or its configuration file again.
 
 ## Trust model
@@ -498,18 +586,22 @@ MUP has no keys and no authentication of its own. It relies on these facts:
 
 - WireGuard authenticates its handshake and its encrypted payload end to end.
 - The server accepts data only on a live registered path, and the path gives the client key.
-- The client accepts downstream packets only from the paths of the group of the peer: from the server of a path, or from the return IP of a path.
+- The client accepts downstream packets only from the paths of the group of the peer: from the server of a path, from the return IP of a path, or from a down path of the group.
 - The target accepts only valid WireGuard messages.
 
 A host can spoof the source address of a registered client. That host can then register paths for the client, change its return mode, and drop or misroute its traffic. It cannot read or forge WireGuard payloads. Use MUP only on networks where you control the hosts and the routing.
 
 The duplicate cache is a filter for burst copies, not a replay defense. WireGuard provides replay protection for its transport data.
 
+A bridge keeps the source of each upstream packet, and it sends only MUP packets and only to its server. So the upstream through a bridge gives no host a new way to spoof an address. On the downstream, a bridge sends packets with any source. So it takes wrapped replies only from its server and its `allow` ranges, and only with a MUP packet inside. A host that spoofs the address of the server can still make the bridge send MUP packets to any address.
+
 ## Limits
 
 - MUP supports IPv4 only. It forwards no IPv4 options and no fragments.
 - The largest WireGuard message is the path MTU minus 28 bytes, which is 1472 bytes at MTU 1500. WireGuard needs no MTU change.
-- A client has up to 8 paths in all groups.
+- A client has up to 8 paths and 8 down paths in all groups. The bridges of a direction count as its paths.
+- The bridge wrapper adds 20 bytes. On a down bridge, the largest WireGuard message is the path MTU minus 48 bytes.
+- A down path has one server port, and it does not move to another port.
 - A client serves up to 4095 peers in all groups. A server holds up to 41000 routes and 4096 registrations.
 - One peer source IP has up to 1024 routes on a client. The count can be too low for one second after a new route.
 - Each active client of a server needs its own advertised IP.

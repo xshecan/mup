@@ -23,8 +23,13 @@ type clientAPI interface {
 	Status() (api.Status, error)
 	Paths() ([]api.Path, error)
 	AddPath(raw string, listenPort uint16) (api.Path, error)
+	AddBridge(raw string, listenPort uint16) (api.Path, error)
 	RemovePath(id int) error
 	SetMode(raw string, listenPort uint16) error
+	AddDownPath(raw string, listenPort uint16) (api.Path, error)
+	AddDownBridge(raw string, listenPort uint16) (api.Path, error)
+	RemoveDownPath(id int) error
+	SetDownMode(raw string, listenPort uint16) error
 	Peers() (api.PeerList, error)
 }
 
@@ -33,6 +38,10 @@ type serverAPI interface {
 	Peers() (api.PeerList, error)
 	Clients() ([]api.RegisteredClient, error)
 	Reflectors() (api.ReflectorList, error)
+}
+
+type bridgeAPI interface {
+	Status() (api.Status, error)
 }
 
 // apiError carries the HTTP status of a failed request. Other errors become
@@ -64,12 +73,36 @@ func unavailable(format string, args ...any) error {
 type apiHandler struct {
 	client clientAPI
 	server serverAPI
+	bridge bridgeAPI
 }
 
 // newAPIHandler serves the control API of a client or of a server. Exactly
 // one of client and server is non-nil.
 func newAPIHandler(client clientAPI, server serverAPI) http.Handler {
-	handler := apiHandler{client: client, server: server}
+	return apiHandler{client: client, server: server}.mux()
+}
+
+// newBridgeAPIHandler serves the control API of a bridge. A bridge has only a
+// status.
+func newBridgeAPIHandler(bridge bridgeAPI) http.Handler {
+	return apiHandler{bridge: bridge}.mux()
+}
+
+// role names the role of the daemon for the error of a call that the role
+// does not serve.
+func (h apiHandler) role() string {
+	switch {
+	case h.client != nil:
+		return api.RoleClient
+	case h.server != nil:
+		return api.RoleServer
+	default:
+		return api.RoleBridge
+	}
+}
+
+func (h apiHandler) mux() http.Handler {
+	handler := h
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", handler.status)
 	mux.HandleFunc("GET /v1/paths", handler.paths)
@@ -86,12 +119,16 @@ func newAPIHandler(client clientAPI, server serverAPI) http.Handler {
 }
 
 func (h apiHandler) status(w http.ResponseWriter, _ *http.Request) {
-	if h.client != nil {
-		value, err := h.client.Status()
-		writeResult(w, http.StatusOK, value, err)
-		return
+	var value api.Status
+	var err error
+	switch {
+	case h.client != nil:
+		value, err = h.client.Status()
+	case h.server != nil:
+		value, err = h.server.Status()
+	default:
+		value, err = h.bridge.Status()
 	}
-	value, err := h.server.Status()
 	writeResult(w, http.StatusOK, value, err)
 }
 
@@ -111,7 +148,18 @@ func (h apiHandler) addPath(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	value, err := h.client.AddPath(request.Path, request.ListenPort)
+	var add func(string, uint16) (api.Path, error)
+	switch {
+	case request.Down && request.Bridge:
+		add = h.client.AddDownBridge
+	case request.Down:
+		add = h.client.AddDownPath
+	case request.Bridge:
+		add = h.client.AddBridge
+	default:
+		add = h.client.AddPath
+	}
+	value, err := add(request.Path, request.ListenPort)
 	writeResult(w, http.StatusCreated, value, err)
 }
 
@@ -124,7 +172,11 @@ func (h apiHandler) removePath(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(fmt.Errorf("path ID %q is not a number", r.PathValue("id"))))
 		return
 	}
-	if err := h.client.RemovePath(id); err != nil {
+	remove := h.client.RemovePath
+	if r.URL.Query().Get("direction") == "down" {
+		remove = h.client.RemoveDownPath
+	}
+	if err := remove(id); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -140,7 +192,11 @@ func (h apiHandler) setMode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if err := h.client.SetMode(request.Mode, request.ListenPort); err != nil {
+	set := h.client.SetMode
+	if request.Down {
+		set = h.client.SetDownMode
+	}
+	if err := set(request.Mode, request.ListenPort); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -148,18 +204,21 @@ func (h apiHandler) setMode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h apiHandler) peers(w http.ResponseWriter, _ *http.Request) {
-	if h.client != nil {
+	switch {
+	case h.client != nil:
 		value, err := h.client.Peers()
 		writeResult(w, http.StatusOK, value, err)
-		return
+	case h.server != nil:
+		value, err := h.server.Peers()
+		writeResult(w, http.StatusOK, value, err)
+	default:
+		writeError(w, conflict("the daemon runs as a bridge, and a bridge has no peers"))
 	}
-	value, err := h.server.Peers()
-	writeResult(w, http.StatusOK, value, err)
 }
 
 func (h apiHandler) clients(w http.ResponseWriter, _ *http.Request) {
 	if h.server == nil {
-		writeError(w, conflict("the daemon runs as a client, and only a server has registered clients"))
+		writeError(w, conflict("the daemon runs as a %s, and only a server has registered clients", h.role()))
 		return
 	}
 	value, err := h.server.Clients()
@@ -168,7 +227,7 @@ func (h apiHandler) clients(w http.ResponseWriter, _ *http.Request) {
 
 func (h apiHandler) reflectors(w http.ResponseWriter, _ *http.Request) {
 	if h.server == nil {
-		writeError(w, conflict("the daemon runs as a client, and only a server has return pools"))
+		writeError(w, conflict("the daemon runs as a %s, and only a server has return pools", h.role()))
 		return
 	}
 	value, err := h.server.Reflectors()
@@ -177,7 +236,7 @@ func (h apiHandler) reflectors(w http.ResponseWriter, _ *http.Request) {
 
 func (h apiHandler) requireClient(w http.ResponseWriter, resource string) bool {
 	if h.client == nil {
-		writeError(w, conflict("the daemon runs as a server, and only a client has %s", resource))
+		writeError(w, conflict("the daemon runs as a %s, and only a client has %s", h.role(), resource))
 		return false
 	}
 	return true
@@ -214,6 +273,27 @@ func writeError(w http.ResponseWriter, err error) {
 		status = failure.status
 	}
 	writeJSON(w, status, api.Error{Error: err.Error()})
+}
+
+// dropResetter sets the drop counters of the dataplane to zero.
+type dropResetter interface {
+	ResetDrops() error
+}
+
+// withDropReset adds DELETE /v1/drops to the API of every role. The drop
+// counters belong to the dataplane, so the request does not depend on the
+// role.
+func withDropReset(handler http.Handler, drops dropResetter) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /v1/drops", func(w http.ResponseWriter, _ *http.Request) {
+		if err := drops.ResetDrops(); err != nil {
+			writeError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.Handle("/", handler)
+	return mux
 }
 
 // serveAPI serves handler on a Unix socket until ctx ends. An empty socket

@@ -5,6 +5,7 @@ package dataplane
 import (
 	"context"
 	"net/netip"
+	"time"
 
 	"github.com/xshecan/mup/protocol"
 )
@@ -115,6 +116,50 @@ func (*Runtime) RegisteredPaths() ([]RegisteredPath, error) {
 	return nil, ErrUnsupportedPlatform
 }
 
+func (*Runtime) SetDownPath(int, *DownPathSettings) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Runtime) DownPathsSeen() ([MaxDownPaths]time.Duration, error) {
+	return [MaxDownPaths]time.Duration{}, ErrUnsupportedPlatform
+}
+
+func (*Runtime) SetServerDownPath(DownPathEntry) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Runtime) DeleteServerDownPath(ClientKey, uint16) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Runtime) SetServerDownGroup(DownGroupEntry) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Runtime) DeleteServerDownGroup(ClientKey) error {
+	return ErrUnsupportedPlatform
+}
+
 func (*Runtime) Close() error {
 	return nil
+}
+
+func (*Runtime) ConfigureBridge(BridgeSettings) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Runtime) SetBridgeAddresses([]netip.Addr) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Runtime) AttachBridge([]int) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Runtime) BridgeCounters() (BridgeCounters, error) {
+	return BridgeCounters{}, ErrUnsupportedPlatform
+}
+
+func (*Runtime) ResetDrops() error {
+	return ErrUnsupportedPlatform
 }

@@ -255,3 +255,80 @@ func TestRunExitCodes(t *testing.T) {
 		t.Fatalf("application failure exitCode = %d, want 1", got)
 	}
 }
+
+func TestParseArgsClientSplitPaths(t *testing.T) {
+	appConfig, err := parseArgs([]string{
+		"client", "-p", "51820", "-s", "192.0.2.10",
+		"--up", "203.0.113.5:9000/udp", "--up", "203.0.113.5:9100/icmp",
+		"--down", "203.0.113.5:9200/icmp via 198.51.100.0/28",
+		"--up-mode", "balancer", "--down-mode", "burst",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	group := appConfig.Client.Groups[0]
+	if len(group.Paths) != 2 || len(group.DownPaths) != 1 ||
+		group.Mode != config.ModeBalancer || group.DownMode != config.ModeBurst {
+		t.Fatalf("group = %#v", group)
+	}
+}
+
+func TestParseArgsClientRejectsMixedForms(t *testing.T) {
+	for _, args := range [][]string{
+		{"client", "-p", "51820", "-s", "192.0.2.10", "-u", "203.0.113.5:9000/udp", "--down", "203.0.113.5:9200/udp"},
+		{"client", "-p", "51820", "-s", "192.0.2.10", "--up", "203.0.113.5:9000/udp"},
+		{"client", "-p", "51820", "-s", "192.0.2.10", "--up", "203.0.113.5:9000/udp", "--down", "203.0.113.5:9200/udp", "--mode", "burst"},
+	} {
+		if _, err := parseArgs(args); err == nil {
+			t.Fatalf("parseArgs(%q) succeeded", args)
+		}
+	}
+}
+
+func TestParseArgsClientBridges(t *testing.T) {
+	appConfig, err := parseArgs([]string{
+		"client", "-p", "51820", "-s", "160.119.74.74",
+		"--up", "46.102.130.95:9000/icmp", "--up-bridge", "5.6.7.8:9100/udp",
+		"--down-bridge", "5.6.7.8:9200/icmp via 87.107.117.192/28",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	group := appConfig.Client.Groups[0]
+	if len(group.Paths) != 2 || group.Paths[0].Bridge || !group.Paths[1].Bridge {
+		t.Fatalf("up paths = %#v", group.Paths)
+	}
+	if len(group.DownPaths) != 1 || !group.DownPaths[0].Bridge {
+		t.Fatalf("down paths = %#v", group.DownPaths)
+	}
+	for _, args := range [][]string{
+		{"client", "-p", "51820", "-s", "192.0.2.10", "--up-bridge", "5.6.7.8:9100/udp"},
+		{"client", "-p", "51820", "-s", "192.0.2.10", "-u", "203.0.113.5:9000/udp", "--down-bridge", "5.6.7.8:9200/udp"},
+	} {
+		if _, err := parseArgs(args); err == nil {
+			t.Fatalf("parseArgs(%q) succeeded", args)
+		}
+	}
+}
+
+func TestParseArgsBridge(t *testing.T) {
+	appConfig, err := parseArgs([]string{"bridge", "-s", "46.102.130.95", "-p", "9000-9399", "-a", "46.102.130.0/24", "--control-socket", ""})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	bridge := appConfig.Bridge
+	if bridge == nil || bridge.Server != netip.MustParseAddr("46.102.130.95") || bridge.Port.Last != 9399 ||
+		len(bridge.Allow) != 1 || bridge.ControlSocket != "" {
+		t.Fatalf("bridge = %#v", bridge)
+	}
+	for _, args := range [][]string{
+		{"bridge", "-p", "9000"},
+		{"bridge", "-s", "46.102.130.95"},
+		{"bridge", "-s", "46.102.130.95", "-p", "9000", "-a", "0.0.0.0/0"},
+		{"bridge", "-s", "46.102.130.95", "-p", "9000", "extra"},
+	} {
+		if _, err := parseArgs(args); err == nil {
+			t.Fatalf("parseArgs(%q) succeeded", args)
+		}
+	}
+}

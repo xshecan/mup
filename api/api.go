@@ -7,18 +7,37 @@ import "time"
 const (
 	DefaultClientSocket = "/run/mup/client.sock"
 	DefaultServerSocket = "/run/mup/server.sock"
+	DefaultBridgeSocket = "/run/mup/bridge.sock"
 
 	RoleClient = "client"
 	RoleServer = "server"
+	RoleBridge = "bridge"
 )
 
-// Status is the overview of a daemon. Exactly one of Client and Server is set.
+// Status is the overview of a daemon. Exactly one of Client, Server, and
+// Bridge is set.
 type Status struct {
 	Role      string        `json:"role"`
 	StartedAt time.Time     `json:"started_at"`
 	Client    *ClientStatus `json:"client,omitempty"`
 	Server    *ServerStatus `json:"server,omitempty"`
+	Bridge    *BridgeStatus `json:"bridge,omitempty"`
 	Drops     []Drop        `json:"drops"`
+}
+
+// BridgeStatus describes a bridge. It takes the ports from Port to PortLast,
+// sends the upstream to Server, and takes wrapped replies from Server and the
+// Allow ranges. The counters count the packets and bytes that it sent.
+type BridgeStatus struct {
+	Server      string   `json:"server"`
+	Port        uint16   `json:"port"`
+	PortLast    uint16   `json:"port_last,omitempty"`
+	Allow       []string `json:"allow,omitempty"`
+	Addresses   []string `json:"addresses"`
+	UpPackets   uint64   `json:"up_packets"`
+	UpBytes     uint64   `json:"up_bytes"`
+	DownPackets uint64   `json:"down_packets"`
+	DownBytes   uint64   `json:"down_bytes"`
 }
 
 type ClientStatus struct {
@@ -34,13 +53,17 @@ type ClientStatus struct {
 	TokensQuota uint64 `json:"tokens_quota,omitempty"`
 }
 
-// Group is the set of servers for the peers of one listen port.
+// Group is the set of servers for the peers of one listen port. A group with
+// separate down paths also has DownMode and its down path counts.
 type Group struct {
-	ListenPort   uint16 `json:"listen_port"`
-	Mode         string `json:"mode"`
-	Paths        int    `json:"paths"`
-	HealthyPaths int    `json:"healthy_paths"`
-	Peers        int    `json:"peers"`
+	ListenPort       uint16 `json:"listen_port"`
+	Mode             string `json:"mode"`
+	Paths            int    `json:"paths"`
+	HealthyPaths     int    `json:"healthy_paths"`
+	Peers            int    `json:"peers"`
+	DownMode         string `json:"down_mode,omitempty"`
+	DownPaths        int    `json:"down_paths,omitempty"`
+	HealthyDownPaths int    `json:"healthy_down_paths,omitempty"`
 }
 
 // ServerStatus describes a server. It accepts the ports from Port to
@@ -59,9 +82,15 @@ type ServerStatus struct {
 }
 
 // Path is one client path. ListenPort names its group. InUse reports whether
-// the mode of the group sends traffic on the path.
+// the mode of the group sends traffic on the path. Direction is "up" for an up
+// path and "down" for a down path of a group with separate down paths, and
+// empty for a path that carries both directions. A down path is healthy while
+// its probes arrive, and LastProbe is the time of the latest one. A path with
+// Bridge goes through a MUP bridge, and Server is the bridge address.
 type Path struct {
 	ID         int    `json:"id"`
+	Direction  string `json:"direction,omitempty"`
+	Bridge     bool   `json:"bridge,omitempty"`
 	ListenPort uint16 `json:"listen_port"`
 	Server     string `json:"server"`
 	Port       uint16 `json:"port"`
@@ -78,6 +107,7 @@ type Path struct {
 	InUse      bool      `json:"in_use"`
 	Misses     int       `json:"misses"`
 	LastACK    time.Time `json:"last_ack,omitzero"`
+	LastProbe  time.Time `json:"last_probe,omitzero"`
 	RTTSeconds float64   `json:"rtt_seconds,omitzero"`
 }
 
@@ -133,6 +163,31 @@ type RegisteredClient struct {
 	LeaseSeconds float64          `json:"lease_seconds"`
 	Paths        []RegisteredPath `json:"paths"`
 	Peers        int              `json:"peers"`
+	// Down holds the down paths of a client with separate down paths.
+	Down *DownGroup `json:"down,omitempty"`
+}
+
+// DownGroup is the downstream mode and the down paths of a client, as a server
+// sees them.
+type DownGroup struct {
+	Mode  string     `json:"mode"`
+	Paths []DownPath `json:"paths"`
+}
+
+// DownPath is one down path of a client on a server. Members counts the
+// reflectors that the path can use, and HealthyMembers the ones whose probes
+// reach the client.
+type DownPath struct {
+	ID             uint16  `json:"id"`
+	Bridge         bool    `json:"bridge,omitempty"`
+	Server         string  `json:"server"`
+	Port           uint16  `json:"port"`
+	Transport      string  `json:"transport"`
+	ReturnIP       string  `json:"return_ip,omitempty"`
+	Healthy        bool    `json:"healthy"`
+	Members        int     `json:"members"`
+	HealthyMembers int     `json:"healthy_members"`
+	LeaseSeconds   float64 `json:"lease_seconds"`
 }
 
 type RegisteredPath struct {
@@ -156,6 +211,10 @@ type Drop struct {
 type AddPathRequest struct {
 	Path       string `json:"path"`
 	ListenPort uint16 `json:"listen_port,omitempty"`
+	// Down adds a down path to a group with separate down paths.
+	Down bool `json:"down,omitempty"`
+	// Bridge adds a path through a MUP bridge. Path then names the bridge.
+	Bridge bool `json:"bridge,omitempty"`
 }
 
 // ModeRequest changes the mode of a group. ListenPort names the group. A client
@@ -163,6 +222,8 @@ type AddPathRequest struct {
 type ModeRequest struct {
 	Mode       string `json:"mode"`
 	ListenPort uint16 `json:"listen_port,omitempty"`
+	// Down changes the downstream mode of a group with separate down paths.
+	Down bool `json:"down,omitempty"`
 }
 
 type Error struct {

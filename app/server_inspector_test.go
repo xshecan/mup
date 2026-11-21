@@ -57,7 +57,7 @@ func TestServerInspectorGroupsPathsAndPeersByClient(t *testing.T) {
 			{Client: first, Token: 2, TargetPort: 20001, Transport: protocol.TransportICMP, Ifindex: 2},
 		},
 	}
-	inspector := newServerInspector(config.Server{Port: config.SinglePort(5000), Target: netip.MustParseAddrPort("198.51.100.7:51820")}, fake, time.Unix(0, 0))
+	inspector := newServerInspector(config.Server{Port: config.SinglePort(5000), Target: netip.MustParseAddrPort("198.51.100.7:51820")}, fake, time.Unix(0, 0), nil)
 	inspector.interfaceName = func(int) string { return "eth0" }
 
 	clients, err := inspector.Clients()
@@ -99,7 +99,7 @@ func TestServerInspectorShowsReturnPools(t *testing.T) {
 			{Client: client, Token: 9, TargetPort: 20000, Transport: protocol.TransportUDP, ReturnIP: base, ReturnPool: true},
 		},
 	}
-	inspector := newServerInspector(config.Server{Port: config.SinglePort(9000), Target: netip.MustParseAddrPort("127.0.0.1:51820")}, fake, time.Unix(0, 0))
+	inspector := newServerInspector(config.Server{Port: config.SinglePort(9000), Target: netip.MustParseAddrPort("127.0.0.1:51820")}, fake, time.Unix(0, 0), nil)
 	inspector.interfaceName = func(int) string { return "eth0" }
 
 	clients, err := inspector.Clients()

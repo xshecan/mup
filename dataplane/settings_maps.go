@@ -21,6 +21,7 @@ type configurationMaps struct {
 	paths   configurationMap
 	returns configurationMap
 	state   configurationMap
+	downs   configurationMap
 }
 
 func applyClientSettings(maps configurationMaps, settings ClientSettings) error {
@@ -46,6 +47,19 @@ func applyClientSettings(maps configurationMaps, settings ClientSettings) error 
 		}
 		if err := maps.paths.Update(uint32(index), path, ebpf.UpdateAny); err != nil {
 			return fmt.Errorf("update client path %d: %w", index, err)
+		}
+	}
+	if maps.downs != nil {
+		for slot := range MaxDownPaths {
+			var down mupClientDownPathV1
+			if slot < len(settings.DownPaths) && settings.DownPaths[slot] != nil {
+				if down, err = encodeClientDownPath(slot, *settings.DownPaths[slot]); err != nil {
+					return err
+				}
+			}
+			if err := maps.downs.Update(uint32(slot), down, ebpf.UpdateAny); err != nil {
+				return fmt.Errorf("update client down path %d: %w", slot, err)
+			}
 		}
 	}
 	for listenPort, group := range groups {
@@ -121,6 +135,24 @@ func applyPath(paths, returns configurationMap, slot int, path PathSettings) err
 	}
 	if err := paths.Update(uint32(slot), encoded, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("update client path %d: %w", slot, err)
+	}
+	return nil
+}
+
+// applyDownPath writes one client down path slot. A nil path clears it.
+func applyDownPath(downs configurationMap, slot int, path *DownPathSettings) error {
+	var encoded mupClientDownPathV1
+	if slot < 0 || slot >= MaxDownPaths {
+		return fmt.Errorf("down path slot %d is outside 0 to %d", slot, MaxDownPaths-1)
+	}
+	if path != nil {
+		var err error
+		if encoded, err = encodeClientDownPath(slot, *path); err != nil {
+			return err
+		}
+	}
+	if err := downs.Update(uint32(slot), encoded, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("update client down path %d: %w", slot, err)
 	}
 	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -29,14 +30,166 @@ type syscallConnection interface {
 	SyscallConn() (syscall.RawConn, error)
 }
 
-func newClientPathOpener() pathOpener {
-	sockets := newUDPControlSockets(listenUDPControl)
-	return func(registration pathRegistration) (pathConn, error) {
-		if registration.path.Transport == protocol.TransportUDP {
-			return openUDPPathConn(sockets, registration)
-		}
-		return openICMPPathConn(registration)
+// linuxClientControls owns the control sockets of a client. The UDP sockets
+// of the groups take the frames on UDP paths. One raw ICMP socket takes the
+// frames on the ICMP down paths, and the ACKs of the ICMP up paths, of the
+// groups with separate down paths.
+type linuxClientControls struct {
+	sockets *udpControlSockets
+
+	mu   sync.Mutex
+	icmp *net.IPConn
+}
+
+func newClientPathOpener() clientControls {
+	return &linuxClientControls{sockets: newUDPControlSockets(listenUDPControl)}
+}
+
+func (c *linuxClientControls) open(registration pathRegistration) (pathConn, error) {
+	if registration.path.Transport == protocol.TransportUDP {
+		return openUDPPathConn(c.sockets, registration)
 	}
+	conn, err := openICMPPathConn(registration)
+	if err != nil {
+		return nil, err
+	}
+	if registration.downs != nil {
+		// The ACK of this path can arrive on any down path, and the shared
+		// ICMP socket reads it, so this socket only sends.
+		if err := dropAllInput(conn.connection); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("filter ICMP control path %d: %w", registration.pathID, err)
+		}
+		conn.router = c.sockets.router
+		conn.routed = c.sockets.router.subscribe(registration.pathID)
+	}
+	return conn, nil
+}
+
+func (c *linuxClientControls) listenDown(listen downListen, handle func(downProbe)) (func(), error) {
+	connection, err := net.ListenIP("ip4:icmp", &net.IPAddr{IP: net.IP(listen.advertisedIP.AsSlice())})
+	if err != nil {
+		return nil, fmt.Errorf("open the ICMP socket of the down paths: %w", err)
+	}
+	sockets := make([]*udpControlSocket, 0, len(listen.listenPorts))
+	release := func() {
+		for _, socket := range sockets {
+			c.sockets.release(socket)
+		}
+	}
+	for _, port := range listen.listenPorts {
+		socket, err := c.sockets.acquire(netip.AddrPortFrom(listen.advertisedIP, port))
+		if err != nil {
+			release()
+			_ = connection.Close()
+			return nil, err
+		}
+		sockets = append(sockets, socket)
+	}
+	c.sockets.onProbe.Store(&handle)
+	c.mu.Lock()
+	c.icmp = connection
+	c.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		readDownICMP(connection, listen.nonce, c.sockets.router, handle)
+	}()
+	return func() {
+		c.sockets.onProbe.Store(nil)
+		c.mu.Lock()
+		c.icmp = nil
+		c.mu.Unlock()
+		_ = connection.Close()
+		<-done
+		release()
+	}, nil
+}
+
+// readDownICMP reads the Echo Replies to the client. A REGISTER_ACK goes to
+// the up path that waits for it, and a down path probe goes to handle.
+func readDownICMP(connection *net.IPConn, nonce uint64, router *ackRouter, handle func(downProbe)) {
+	buffer := make([]byte, icmpControlBufferLength)
+	for {
+		count, _, _, source, err := connection.ReadMsgIP(buffer, nil)
+		if errors.Is(err, net.ErrClosed) {
+			return
+		}
+		if err != nil {
+			time.Sleep(udpReadErrorPause)
+			continue
+		}
+		echo, err := parseICMPEcho(stripIPv4Header(buffer[:count]))
+		if err != nil || echo.echoType != icmpEchoReply || len(echo.payload) != protocol.ControlFrameLength {
+			continue
+		}
+		frame, err := protocol.DecodeControlFrame(echo.payload)
+		if err != nil || frame.InstanceNonce != nonce {
+			continue
+		}
+		switch {
+		case frame.Type == protocol.ControlRegisterACK:
+			router.post(frame.PathID, echo.payload)
+		case frame.Type == protocol.ControlProbe && frame.Flags&protocol.ControlFlagDownPath != 0:
+			handle(downProbe{
+				frame:     frame,
+				source:    ipAddress(source.IP),
+				transport: protocol.TransportICMP,
+				port:      echo.identifier,
+				received:  time.Now(),
+			})
+		}
+	}
+}
+
+func (c *linuxClientControls) sendUp(registration pathRegistration, frame []byte) error {
+	ifindex := 0
+	if name := registration.path.Interface; name != "" {
+		networkInterface, err := net.InterfaceByName(name)
+		if err != nil {
+			return err
+		}
+		ifindex = networkInterface.Index
+	}
+	if registration.path.Transport == protocol.TransportUDP {
+		socket, err := c.sockets.acquire(netip.AddrPortFrom(registration.advertisedIP, registration.listenPort))
+		if err != nil {
+			return err
+		}
+		defer c.sockets.release(socket)
+		return socket.conn.writeControl(frame, registration.path.Endpoint(), ifindex)
+	}
+	c.mu.Lock()
+	connection := c.icmp
+	c.mu.Unlock()
+	if connection == nil {
+		return errors.New("the ICMP socket of the down paths is closed")
+	}
+	echo := marshalICMPEcho(icmpEchoRequest, registration.path.ServerPort, 0, frame)
+	var oob []byte
+	if ifindex > 0 {
+		oob = unix.PktInfo4(&unix.Inet4Pktinfo{Ifindex: int32(ifindex), Spec_dst: registration.advertisedIP.As4()})
+	}
+	_, _, err := connection.WriteMsgIP(echo, oob, &net.IPAddr{IP: net.IP(registration.path.Server.AsSlice())})
+	return err
+}
+
+// dropAllInput attaches a socket filter that drops every packet, for a raw
+// socket that only sends.
+func dropAllInput(connection syscallConnection) error {
+	raw, err := connection.SyscallConn()
+	if err != nil {
+		return err
+	}
+	filter := []unix.SockFilter{{Code: unix.BPF_RET | unix.BPF_K, K: 0}}
+	program := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
+	var socketErr error
+	if err := raw.Control(func(fd uintptr) {
+		socketErr = unix.SetsockoptSockFprog(int(fd), unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &program)
+	}); err != nil {
+		return err
+	}
+	return socketErr
 }
 
 type udpControlSocketConn struct {
@@ -92,6 +245,10 @@ type icmpPathConn struct {
 	destination  *net.IPAddr
 	buffer       []byte
 	registration pathRegistration
+	// An up path of a group with separate down paths reads its ACK from
+	// the shared ICMP socket through routed.
+	router *ackRouter
+	routed *ackWaiter
 }
 
 func openICMPPathConn(registration pathRegistration) (*icmpPathConn, error) {
@@ -112,11 +269,14 @@ func openICMPPathConn(registration pathRegistration) (*icmpPathConn, error) {
 }
 
 func (s *icmpPathConn) Close() error {
+	if s.routed != nil {
+		s.router.unsubscribe(s.routed)
+	}
 	return s.connection.Close()
 }
 
 func (s *icmpPathConn) Run(ctx context.Context, report probeReporter) error {
-	defer s.connection.Close()
+	defer s.Close()
 	var sequence uint32
 	for {
 		sequence++
@@ -139,10 +299,19 @@ func (s *icmpPathConn) Run(ctx context.Context, report probeReporter) error {
 // ACK in an Echo Reply.
 func (s *icmpPathConn) register(frame []byte, sentAt time.Time, sequence uint32) registerResult {
 	path := s.registration.path
+	for _, down := range s.registration.downFrames(sequence) {
+		_, _ = s.connection.WriteToIP(marshalICMPEcho(icmpEchoRequest, path.ServerPort, uint16(sequence), down), s.destination)
+	}
+	if s.routed != nil {
+		drainRouted(s.routed)
+	}
 	echo := marshalICMPEcho(icmpEchoRequest, path.ServerPort, uint16(sequence), frame)
 	_ = s.connection.SetDeadline(sentAt.Add(controlReplyTimeout))
 	if _, err := s.connection.WriteToIP(echo, s.destination); err != nil {
 		return registerMissed
+	}
+	if s.routed != nil {
+		return s.awaitRouted(sentAt, sequence)
 	}
 	for {
 		// ReadMsgIP keeps the IPv4 header, unlike ReadFromIP.
@@ -163,21 +332,39 @@ func (s *icmpPathConn) register(frame []byte, sentAt time.Time, sequence uint32)
 	}
 }
 
+// awaitRouted waits for the ACK of an up path of a group with separate down
+// paths, which the shared ICMP socket or a UDP socket passes on.
+func (s *icmpPathConn) awaitRouted(sentAt time.Time, sequence uint32) registerResult {
+	timer := time.NewTimer(time.Until(sentAt.Add(controlReplyTimeout)))
+	defer timer.Stop()
+	for {
+		select {
+		case <-timer.C:
+			return registerMissed
+		case reply := <-s.routed.replies:
+			if result, ok := registrationACKResult(reply, s.registration.nonce, s.registration.pathID, sequence); ok {
+				return result
+			}
+		}
+	}
+}
+
 func serveServerControls(
 	ctx context.Context,
 	server config.Server,
 	registry *control.Registry,
 	sink registrationSink,
 	targets *reflectorTargets,
+	downs *downService,
 ) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := make(chan error, 3)
 	go func() {
-		results <- serveServerUDPControl(ctx, server, registry, sink, targets)
+		results <- serveServerUDPControl(ctx, server, registry, sink, targets, downs)
 	}()
 	go func() {
-		results <- serveServerICMPControl(ctx, server, registry, sink, targets)
+		results <- serveServerICMPControl(ctx, server, registry, sink, targets, downs)
 	}()
 	go func() {
 		results <- expireRegistry(ctx, registry)
@@ -214,6 +401,7 @@ func serveServerUDPControl(
 	registry *control.Registry,
 	sink registrationSink,
 	targets *reflectorTargets,
+	downs *downService,
 ) error {
 	connections := make([]*net.UDPConn, 0, server.Port.Len())
 	defer func() {
@@ -234,7 +422,7 @@ func serveServerUDPControl(
 	results := make(chan error, len(connections))
 	for _, connection := range connections {
 		go func() {
-			results <- serveServerUDPConnection(ctx, connection, registry, sink, targets)
+			results <- serveServerUDPConnection(ctx, connection, registry, sink, targets, downs)
 		}()
 	}
 	return <-results
@@ -246,6 +434,7 @@ func serveServerUDPConnection(
 	registry *control.Registry,
 	sink registrationSink,
 	targets *reflectorTargets,
+	downs *downService,
 ) error {
 	serverPort := uint16(connection.LocalAddr().(*net.UDPAddr).Port)
 	buffer := make([]byte, udpControlBufferLength)
@@ -265,11 +454,17 @@ func serveServerUDPConnection(
 		if count != protocol.ControlFrameLength {
 			continue
 		}
+		frame, err := protocol.DecodeControlFrame(buffer[:count])
+		if err != nil {
+			continue
+		}
+		if downs.handle(frame, ipAddress(source.IP)) {
+			continue
+		}
 		// A probe reply confirms a UDP reflector reached the client. It carries
 		// the reflector in its return IP, because the reply itself comes from
 		// the client, not from the spoofed source.
-		if frame, err := protocol.DecodeControlFrame(buffer[:count]); err == nil &&
-			frame.Type == protocol.ControlProbeReply {
+		if frame.Type == protocol.ControlProbeReply {
 			if targets != nil && targets.confirms(frame, time.Now()) {
 				_ = sink.ConfirmReflector(frame.ReturnIP)
 			}
@@ -288,9 +483,11 @@ func serveServerUDPConnection(
 			registry,
 			sink,
 			targets,
+			downs,
 		)
 		if err == nil {
 			_, _, _ = connection.WriteMsgUDP(ack, replySource(local), source)
+			downs.ack(frame, ack)
 		}
 	}
 }
@@ -301,6 +498,7 @@ func serveServerICMPControl(
 	registry *control.Registry,
 	sink registrationSink,
 	targets *reflectorTargets,
+	downs *downService,
 ) error {
 	connection, err := net.ListenIP("ip4:icmp", &net.IPAddr{IP: net.IPv4zero})
 	if err != nil {
@@ -328,6 +526,10 @@ func serveServerICMPControl(
 		if err != nil || echo.echoType != icmpEchoRequest || !server.Port.Contains(echo.identifier) {
 			continue
 		}
+		frame, err := protocol.DecodeControlFrame(echo.payload)
+		if err != nil || downs.handle(frame, ipAddress(source.IP)) {
+			continue
+		}
 		local, err := packetInfoDestination(oob[:oobCount])
 		if err != nil {
 			continue
@@ -341,10 +543,12 @@ func serveServerICMPControl(
 			registry,
 			sink,
 			targets,
+			downs,
 		)
 		if err == nil {
 			reply := marshalICMPEcho(icmpEchoReply, echo.identifier, echo.sequence, ack)
 			_, _, _ = connection.WriteMsgIP(reply, replySource(local), source)
+			downs.ack(frame, ack)
 		}
 	}
 }
@@ -357,6 +561,7 @@ func acceptRegistration(
 	registry *control.Registry,
 	sink registrationSink,
 	targets *reflectorTargets,
+	downs *downService,
 ) ([]byte, error) {
 	frame, err := protocol.DecodeControlFrame(packet)
 	if err != nil {
@@ -376,12 +581,14 @@ func acceptRegistration(
 		return nil, err
 	}
 	if result.Replaced != nil {
-		if err := sink.RevokeRegistration(dataplane.ClientKey{
+		replaced := dataplane.ClientKey{
 			AdvertisedIP:  result.Replaced.AdvertisedIP,
 			InstanceNonce: result.Replaced.InstanceNonce,
-		}); err != nil {
+		}
+		if err := sink.RevokeRegistration(replaced); err != nil {
 			return nil, err
 		}
+		downs.revoke(replaced)
 	}
 	now, err := monotonicNowNS()
 	if err != nil {

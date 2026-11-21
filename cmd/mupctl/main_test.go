@@ -60,8 +60,17 @@ func fakeDaemon(t *testing.T, status api.Status) *api.DaemonClient {
 			reply(w, http.StatusBadRequest, api.Error{Error: "the client has 2 groups, so choose one with its listen port"})
 			return
 		}
+		if request.Bridge {
+			reply(w, http.StatusCreated, api.Path{ID: 5, Bridge: true, Direction: map[bool]string{true: "down", false: "up"}[request.Down], ListenPort: request.ListenPort, Server: "5.6.7.8", Port: 9600, Transport: "udp"})
+			return
+		}
+		if request.Down {
+			reply(w, http.StatusCreated, api.Path{ID: 4, Direction: "down", ListenPort: request.ListenPort, Server: "203.0.113.8", Port: 9300, Transport: "udp", ReturnIP: "198.51.100.0/28"})
+			return
+		}
 		reply(w, http.StatusCreated, api.Path{ID: 3, ListenPort: request.ListenPort, Server: "203.0.113.8", Port: 5000, Transport: "icmp"})
 	})
+	mux.HandleFunc("DELETE /v1/drops", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.HandleFunc("PUT /v1/mode", func(w http.ResponseWriter, r *http.Request) {
 		var request api.ModeRequest
 		_ = json.NewDecoder(r.Body).Decode(&request)
@@ -72,6 +81,10 @@ func fakeDaemon(t *testing.T, status api.Status) *api.DaemonClient {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("DELETE /v1/paths/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("direction") == "down" && r.PathValue("id") == "1" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if r.PathValue("id") != "2" {
 			reply(w, http.StatusNotFound, api.Error{Error: "path " + r.PathValue("id") + " does not exist"})
 			return
@@ -286,6 +299,10 @@ func TestResolveSocket(t *testing.T) {
 	env.exists = func(path string) bool { return path == api.DefaultServerSocket }
 	if socket, _ := resolveSocket("", env); socket != api.DefaultServerSocket {
 		t.Fatalf("detected socket = %q", socket)
+	}
+	env.exists = func(path string) bool { return path == api.DefaultBridgeSocket }
+	if socket, _ := resolveSocket("", env); socket != api.DefaultBridgeSocket {
+		t.Fatalf("detected bridge socket = %q", socket)
 	}
 	env.exists = func(string) bool { return true }
 	if _, err := resolveSocket("", env); err == nil {

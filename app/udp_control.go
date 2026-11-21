@@ -49,18 +49,23 @@ func (r udpControlReply) answer(registration pathRegistration, ifindex int, sequ
 
 type udpControlSockets struct {
 	listen udpControlListener
+	// router passes the REGISTER_ACK frames of the up paths of groups with
+	// separate down paths, and onProbe takes the probes of down paths.
+	router  *ackRouter
+	onProbe atomic.Pointer[func(downProbe)]
 
 	mu      sync.Mutex
 	sockets map[netip.AddrPort]*udpControlSocket
 }
 
 func newUDPControlSockets(listen udpControlListener) *udpControlSockets {
-	return &udpControlSockets{listen: listen, sockets: map[netip.AddrPort]*udpControlSocket{}}
+	return &udpControlSockets{listen: listen, router: &ackRouter{}, sockets: map[netip.AddrPort]*udpControlSocket{}}
 }
 
 type udpControlSocket struct {
 	local   netip.AddrPort
 	conn    udpControlConn
+	owner   *udpControlSockets
 	closing atomic.Bool
 	done    chan struct{}
 
@@ -88,7 +93,7 @@ func (s *udpControlSockets) acquire(local netip.AddrPort) (*udpControlSocket, er
 	if err != nil {
 		return nil, fmt.Errorf("the control frames of a path leave from the listen port of its group, so the client must bind %s: %w", local, err)
 	}
-	socket := &udpControlSocket{local: local, conn: conn, done: make(chan struct{}), references: 1}
+	socket := &udpControlSocket{local: local, conn: conn, owner: s, done: make(chan struct{}), references: 1}
 	s.sockets[local] = socket
 	go socket.read()
 	return socket, nil
@@ -126,9 +131,24 @@ func (s *udpControlSocket) read() {
 		if err != nil {
 			continue
 		}
+		if frame.Type == protocol.ControlProbe && frame.Flags&protocol.ControlFlagDownPath != 0 {
+			if handle := s.owner.onProbe.Load(); handle != nil {
+				(*handle)(downProbe{
+					frame:     frame,
+					source:    source.Addr().Unmap(),
+					transport: protocol.TransportUDP,
+					port:      source.Port(),
+					received:  time.Now(),
+				})
+			}
+			continue
+		}
 		if frame.Type == protocol.ControlProbe {
 			s.respondToProbe(frame, source.Addr().Unmap())
 			continue
+		}
+		if frame.Type == protocol.ControlRegisterACK {
+			s.owner.router.post(frame.PathID, buffer[:count])
 		}
 		reply := udpControlReply{
 			source:  netip.AddrPortFrom(source.Addr().Unmap(), source.Port()),
@@ -218,6 +238,9 @@ type udpPathConn struct {
 	sockets      *udpControlSockets
 	socket       *udpControlSocket
 	waiter       *udpControlWaiter
+	// routed takes the ACK of an up path of a group with separate down
+	// paths, which can arrive on any down path.
+	routed *ackWaiter
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -240,7 +263,7 @@ func (s *udpControlSockets) openPath(registration pathRegistration, ifindex int)
 	if err != nil {
 		return nil, err
 	}
-	return &udpPathConn{
+	conn := &udpPathConn{
 		registration: registration,
 		destination:  registration.path.Endpoint(),
 		ifindex:      ifindex,
@@ -248,13 +271,20 @@ func (s *udpControlSockets) openPath(registration pathRegistration, ifindex int)
 		socket:       socket,
 		waiter:       socket.subscribe(registration, ifindex),
 		closed:       make(chan struct{}),
-	}, nil
+	}
+	if registration.downs != nil {
+		conn.routed = s.router.subscribe(registration.pathID)
+	}
+	return conn, nil
 }
 
 func (s *udpPathConn) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.closed)
 		s.socket.unsubscribe(s.waiter)
+		if s.routed != nil {
+			s.sockets.router.unsubscribe(s.routed)
+		}
 		s.sockets.release(s.socket)
 	})
 	return nil
@@ -290,8 +320,15 @@ func (s *udpPathConn) register(ctx context.Context, frame []byte, sentAt time.Ti
 	default:
 	}
 	s.drain()
+	for _, down := range s.registration.downFrames(sequence) {
+		_ = s.socket.conn.writeControl(down, s.destination, s.ifindex)
+	}
 	if err := s.socket.conn.writeControl(frame, s.destination, s.ifindex); err != nil {
 		return registerMissed, nil
+	}
+	var routed chan []byte
+	if s.routed != nil {
+		routed = s.routed.replies
 	}
 	timer := time.NewTimer(time.Until(sentAt.Add(controlReplyTimeout)))
 	defer timer.Stop()
@@ -307,6 +344,10 @@ func (s *udpPathConn) register(ctx context.Context, frame []byte, sentAt time.Ti
 			if result, ok := reply.answer(s.registration, s.ifindex, sequence); ok {
 				return result, nil
 			}
+		case reply := <-routed:
+			if result, ok := registrationACKResult(reply, s.registration.nonce, s.registration.pathID, sequence); ok {
+				return result, nil
+			}
 		}
 	}
 }
@@ -315,6 +356,19 @@ func (s *udpPathConn) drain() {
 	for {
 		select {
 		case <-s.waiter.replies:
+		default:
+			if s.routed != nil {
+				drainRouted(s.routed)
+			}
+			return
+		}
+	}
+}
+
+func drainRouted(waiter *ackWaiter) {
+	for {
+		select {
+		case <-waiter.replies:
 		default:
 			return
 		}

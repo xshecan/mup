@@ -29,12 +29,26 @@ type runtimePlan struct {
 }
 
 func buildPlan(appConfig config.App, nonce uint64, resolver routeResolver) (runtimePlan, error) {
-	if (appConfig.Client == nil) == (appConfig.Server == nil) {
-		return runtimePlan{}, errors.New("exactly one client or server configuration is required")
+	roles := 0
+	for _, set := range []bool{appConfig.Client != nil, appConfig.Server != nil, appConfig.Bridge != nil} {
+		if set {
+			roles++
+		}
+	}
+	if roles != 1 {
+		return runtimePlan{}, errors.New("exactly one client, server, or bridge configuration is required")
 	}
 	attachIfindexes, err := resolver.UpInterfaceIndexes()
 	if err != nil {
 		return runtimePlan{}, fmt.Errorf("enumerate interfaces: %w", err)
+	}
+	// A bridge takes packets on every interface, and the start writes its
+	// settings with the addresses of that moment.
+	if appConfig.Bridge != nil {
+		return runtimePlan{
+			pinRoot:         defaultPinRoot + "/bridge",
+			attachIfindexes: uniqueSortedPositive(attachIfindexes),
+		}, nil
 	}
 
 	if appConfig.Client != nil {
@@ -61,10 +75,18 @@ func buildPlan(appConfig config.App, nonce uint64, resolver routeResolver) (runt
 				settings.Paths = append(settings.Paths, clientPathSettings(path, client.AdvertisedIP, ifindex, uint8(slot)))
 				pathMask |= 1 << slot
 			}
+			var downMask uint8
+			for _, down := range group.DownPaths {
+				downSettings := dataplane.DownPathFromConfig(down)
+				downMask |= 1 << len(settings.DownPaths)
+				settings.DownPaths = append(settings.DownPaths, &downSettings)
+			}
 			settings.Groups = append(settings.Groups, dataplane.GroupSettings{
 				ListenPort: group.ListenPort,
 				Mode:       group.Mode,
 				PathMask:   pathMask,
+				DownMode:   group.DownMode,
+				DownMask:   downMask,
 			})
 		}
 		settings.HealthyMask = uint32(1)<<len(settings.Paths) - 1

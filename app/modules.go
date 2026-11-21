@@ -35,10 +35,13 @@ type registrationSink interface {
 // role module runs first, so the program is attached before the loops start.
 func daemonOptions(appConfig config.App, logger *log.Logger) fx.Option {
 	var role fx.Option
-	if appConfig.Client != nil {
+	switch {
+	case appConfig.Client != nil:
 		role = clientModule(*appConfig.Client)
-	} else {
+	case appConfig.Server != nil:
 		role = serverModule(*appConfig.Server)
+	default:
+		role = bridgeModule(*appConfig.Bridge)
 	}
 	return fx.Options(
 		fx.Supply(appConfig, time.Now(), logger),
@@ -83,11 +86,29 @@ func serverModule(server config.Server) fx.Option {
 				return control.NewRegistry(server.Port.First, server.Port.Last, registrationLeaseSeconds*time.Second)
 			},
 			newReflectorTargets,
+			newDownService,
+			asLoop(func(downs *downService) loop { return downs.run }),
 			asLoop(newServerControlLoop),
 			asLoop(newReflectorProbeLoop),
 			asLoop(newReflectorEmitLoop),
 		),
 		fx.Invoke(attachServer),
+	)
+}
+
+func bridgeModule(bridge config.Bridge) fx.Option {
+	return fx.Module("bridge",
+		fx.Supply(bridge),
+		fx.Provide(
+			func() controlSocket { return controlSocket(bridge.ControlSocket) },
+			func(runtime *dataplane.Runtime) bridgeDataplane { return runtime },
+			newBridgeInspector,
+			func(inspector *bridgeInspector) http.Handler { return newBridgeAPIHandler(inspector) },
+			asLoop(func(inspector *bridgeInspector, logger *log.Logger) loop {
+				return func(ctx context.Context) error { return inspector.refreshAddresses(ctx, logger) }
+			}),
+		),
+		fx.Invoke(attachBridge),
 	)
 }
 
@@ -148,18 +169,54 @@ func attachServer(lifecycle fx.Lifecycle, runtime *dataplane.Runtime, plan runti
 	}))
 }
 
-func newServerControlLoop(server config.Server, registry *control.Registry, runtime *dataplane.Runtime, targets *reflectorTargets) loop {
+func attachBridge(lifecycle fx.Lifecycle, runtime *dataplane.Runtime, plan runtimePlan, bridge config.Bridge, logger *log.Logger) {
+	lifecycle.Append(fx.StartHook(func() error {
+		if err := checkForwarding("/proc/sys/net/ipv4/ip_forward"); err != nil {
+			return err
+		}
+		addresses, err := hostIPv4Addresses()
+		if err != nil {
+			return fmt.Errorf("read the host addresses: %w", err)
+		}
+		if err := runtime.ConfigureBridge(bridgeSettings(bridge, addresses)); err != nil {
+			return err
+		}
+		if err := runtime.AttachBridge(plan.attachIfindexes); err != nil {
+			return err
+		}
+		logger.Printf("mup bridge: %s", describeBridge(bridge))
+		return nil
+	}))
+}
+
+// newDownService opens the raw socket that sends probes and ACKs on the down
+// paths of the clients. The server already needs raw sockets for its ICMP
+// control frames, so a failure here stops the start.
+func newDownService(lifecycle fx.Lifecycle, server config.Server, runtime *dataplane.Runtime, logger *log.Logger) (*downService, error) {
+	sender, err := openDownSender()
+	if err != nil {
+		return nil, fmt.Errorf("open the down path socket: %w", err)
+	}
+	lifecycle.Append(fx.StopHook(sender.Close))
+	return &downService{
+		registry: newDownRegistry(server.Port, runtime, locateDownInterface, logger),
+		sender:   sender,
+		logger:   logger,
+	}, nil
+}
+
+func newServerControlLoop(server config.Server, registry *control.Registry, runtime *dataplane.Runtime, targets *reflectorTargets, downs *downService) loop {
 	return func(ctx context.Context) error {
-		if err := serveServerControls(ctx, server, registry, runtime, targets); err != nil {
+		if err := serveServerControls(ctx, server, registry, runtime, targets, downs); err != nil {
 			return fmt.Errorf("serve control plane: %w", err)
 		}
 		return nil
 	}
 }
 
-func newAPILoop(socket controlSocket, handler http.Handler) loop {
+func newAPILoop(socket controlSocket, handler http.Handler, runtime *dataplane.Runtime) loop {
 	return func(ctx context.Context) error {
-		return serveAPI(ctx, string(socket), handler)
+		return serveAPI(ctx, string(socket), withDropReset(handler, runtime))
 	}
 }
 

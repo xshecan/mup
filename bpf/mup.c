@@ -166,6 +166,76 @@ struct {
 } duplicate_cache SEC(".maps");
 
 struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 8);
+	MUP_PINNED;
+	__type(key, __u32);
+	__type(value, struct client_down_path_v1);
+} client_down_paths SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 16384);
+	MUP_PINNED;
+	__type(key, struct client_duplicate_key_v1);
+	__type(value, __u64);
+} client_duplicate_cache SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	MUP_PINNED;
+	__type(key, struct client_key_v1);
+	__type(value, struct down_group_v1);
+} server_down_groups SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 32768);
+	MUP_PINNED;
+	__type(key, struct down_path_key_v1);
+	__type(value, struct down_path_v1);
+} server_down_paths SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	MUP_PINNED;
+	__type(key, __u32);
+	__type(value, struct bridge_config_v1);
+} bridge_config SEC(".maps");
+
+/* bridge_addresses holds the IPv4 addresses of the bridge host. */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 64);
+	MUP_PINNED;
+	__type(key, __be32);
+	__type(value, __u8);
+} bridge_addresses SEC(".maps");
+
+/*
+ * bridge_allow holds the senders of wrapped replies: the server of the bridge,
+ * and the allow ranges of its configuration.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(max_entries, 64);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	MUP_PINNED;
+	__type(key, struct bridge_allow_key_v1);
+	__type(value, __u8);
+} bridge_allow SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, MUP_BRIDGE_COUNTERS);
+	MUP_PINNED;
+	__type(key, __u32);
+	__type(value, __u64);
+} bridge_counters SEC(".maps");
+
+struct {
 	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
 	__uint(max_entries, 3);
 	MUP_PINNED;
@@ -214,7 +284,31 @@ struct {
 	__type(value, struct csum_scratch);
 } csum_scratch SEC(".maps");
 
+/*
+ * send_scratch holds the large values of a send that would not fit on the
+ * stack of a function that a program calls: the FIB lookup of a clone, and
+ * the key of a down path. It holds no state, so it is not pinned.
+ */
+struct send_scratch_layout {
+	struct bpf_fib_lookup fib;
+	struct down_path_key_v1 key;
+};
+
+/* bpf2go cannot describe the unions of bpf_fib_lookup, so the map holds words. */
+struct send_scratch {
+	__u64 words[(sizeof(struct send_scratch_layout) + 7) / 8];
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct send_scratch);
+} send_scratch SEC(".maps");
+
 #define MUP_DUPLICATE_WINDOW_NS 2000000000ULL
+/* A down path records the time of a reply at most this often. */
+#define MUP_DOWN_SEEN_STEP_NS 1000000000ULL
 #define MUP_EVENT_WINDOW_NS 60000000000ULL
 #define MUP_EVENT_LIMIT 10U
 
@@ -485,10 +579,54 @@ static __always_inline int is_client_downstream_source(
 	return 0;
 }
 
+/*
+ * A group with separate down paths also accepts a reply from one of its down
+ * paths: from the server address of a direct path, from the return IP of the
+ * path, or from any address in its return pool. The match records the time,
+ * at most once a second, so mupctl can show which down paths carry data.
+ */
+static __always_inline int is_client_down_source(
+	const struct mup_packet *packet, __u32 down_mask)
+{
+	struct client_down_path_v1 *down;
+	__be32 source = packet->ipv4->source;
+	int matched;
+	__u16 observed_port = packet->transport == MUP_TRANSPORT_UDP ?
+				  packet->source_port : packet->server_port;
+
+#pragma clang loop unroll(full)
+	for (int index = 0; index < 8; index++) {
+		if (!mup_mask_has(down_mask, index))
+			continue;
+		__u32 key = index;
+		down = bpf_map_lookup_elem(&client_down_paths, &key);
+		if (!down || !down->server_ip)
+			continue;
+		if (down->flags & MUP_FLAG_RETURN_POOL) {
+			__be32 mask = mup_prefix_netmask(down->prefix);
+			matched = (source & mask) == (down->return_ip & mask);
+		} else if (down->flags & MUP_FLAG_RETURN_IP) {
+			matched = down->return_ip == source;
+		} else {
+			matched = down->server_ip == source;
+		}
+		if (matched && down->server_port == observed_port &&
+		    down->transport == packet->transport) {
+			__u64 now = bpf_ktime_get_ns();
+
+			if (now - down->last_seen_ns > MUP_DOWN_SEEN_STEP_NS)
+				down->last_seen_ns = now;
+			return 1;
+		}
+	}
+	return 0;
+}
+
 static __always_inline int is_client_icmp_port(
 	const struct mup_packet *packet)
 {
 	struct path_config_v1 *path;
+	struct client_down_path_v1 *down;
 
 #pragma clang loop unroll(full)
 	for (int index = 0; index < 8; index++) {
@@ -498,8 +636,40 @@ static __always_inline int is_client_icmp_port(
 		    path->transport == MUP_TRANSPORT_ICMP &&
 		    path->server_port == packet->server_port)
 			return 1;
+		down = bpf_map_lookup_elem(&client_down_paths, &key);
+		if (down && down->server_ip &&
+		    down->transport == MUP_TRANSPORT_ICMP &&
+		    down->server_port == packet->server_port)
+			return 1;
 	}
 	return 0;
+}
+
+/*
+ * A server with a downstream burst sends each reply on several down paths.
+ * The client keeps the first copy of each message for 2 seconds and drops the
+ * others, so each peer gets one copy. The key is the token and the first 24
+ * WireGuard bytes, which hold the counter of a data message.
+ */
+static __always_inline int check_client_duplicate(
+	const struct mup_packet *packet, __u32 peer_token)
+{
+	struct client_duplicate_key_v1 duplicate = {};
+	__u64 now = bpf_ktime_get_ns();
+	__u64 *seen;
+
+	if (!mup_payload_fits(packet, sizeof(duplicate.identity)))
+		return MUP_DROP_WG_LENGTH;
+	duplicate.peer_token = peer_token;
+#pragma clang loop unroll(full)
+	for (int index = 0; index < sizeof(duplicate.identity); index++)
+		duplicate.identity[index] = packet->payload[index];
+	seen = bpf_map_lookup_elem(&client_duplicate_cache, &duplicate);
+	if (seen && now >= *seen && now - *seen < MUP_DUPLICATE_WINDOW_NS)
+		return MUP_DROP_DUPLICATE;
+	if (bpf_map_update_elem(&client_duplicate_cache, &duplicate, &now, BPF_ANY))
+		return MUP_DROP_MAP_INVARIANT;
+	return MUP_DROP_NONE;
 }
 
 static __always_inline int redirect_packet(__u32 ifindex)
@@ -507,6 +677,110 @@ static __always_inline int redirect_packet(__u32 ifindex)
 	if (!ifindex)
 		return TC_ACT_SHOT;
 	return bpf_redirect_neigh(ifindex, 0, 0, 0);
+}
+
+/*
+ * mup_bridge_wrap puts a packet in the wrapper of a MUP bridge. It inserts 20
+ * bytes after the IPv4 header for a UDP header and a bridge header, and turns
+ * the IPv4 header into a UDP packet from local_ip to bridge_ip, on port at
+ * both ends. The bridge header keeps the protocol and the addresses of the
+ * packet. The transport header and the payload do not move, so the inner
+ * checksum stays valid, and a partial checksum stays partial. The outer UDP
+ * checksum is zero. The function returns MUP_DROP_BRIDGE_SIZE without a
+ * change if the wrapped packet does not fit the MTU of ifindex, and another
+ * drop reason if it fails after the change. The verifier checks this global
+ * function once for all callers.
+ */
+__attribute__((noinline)) int mup_bridge_wrap(struct __sk_buff *skb,
+					      __u32 local_ip, __u32 bridge_ip,
+					      __u32 port, __u32 ifindex)
+{
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	struct mup_iphdr *ipv4 = data + sizeof(struct ethhdr);
+	__u8 *wrapper;
+	__u32 mtu = 0;
+	__be32 source;
+	__be32 destination;
+	__u16 total_length;
+	__u8 protocol;
+
+	if ((void *)(ipv4 + 1) > data_end)
+		return MUP_DROP_MALFORMED_IPV4;
+	source = ipv4->source;
+	destination = ipv4->destination;
+	protocol = ipv4->protocol;
+	total_length = mup_read_be16((const __u8 *)&ipv4->total_length);
+	if (total_length > 0xffff - MUP_BRIDGE_OVERHEAD)
+		return MUP_DROP_BRIDGE_SIZE;
+	if (bpf_check_mtu(skb, ifindex, &mtu, MUP_BRIDGE_OVERHEAD, 0))
+		return MUP_DROP_BRIDGE_SIZE;
+	if (bpf_skb_adjust_room(skb, MUP_BRIDGE_OVERHEAD, BPF_ADJ_ROOM_NET, 0))
+		return MUP_DROP_BRIDGE_SIZE;
+	data = (void *)(long)skb->data;
+	data_end = (void *)(long)skb->data_end;
+	ipv4 = data + sizeof(struct ethhdr);
+	wrapper = (__u8 *)(ipv4 + 1);
+	if (wrapper + MUP_BRIDGE_OVERHEAD > (__u8 *)data_end)
+		return MUP_DROP_MAP_INVARIANT;
+	ipv4->protocol = MUP_IPPROTO_UDP;
+	ipv4->source = local_ip;
+	ipv4->destination = bridge_ip;
+	mup_write_be16(&ipv4->total_length, total_length + MUP_BRIDGE_OVERHEAD);
+	mup_refresh_ipv4_checksum(ipv4);
+	/* The outer UDP length is the old IPv4 total length. */
+	mup_write_be16((__be16 *)wrapper, port);
+	mup_write_be16((__be16 *)(wrapper + 2), port);
+	mup_write_be16((__be16 *)(wrapper + 4), total_length);
+	wrapper[6] = 0;
+	wrapper[7] = 0;
+	wrapper[8] = MUP_BRIDGE_MAGIC_0;
+	wrapper[9] = MUP_BRIDGE_MAGIC_1;
+	wrapper[10] = MUP_BRIDGE_VERSION;
+	wrapper[11] = protocol;
+	__builtin_memcpy(wrapper + 12, &source, sizeof(source));
+	__builtin_memcpy(wrapper + 16, &destination, sizeof(destination));
+	return MUP_DROP_NONE;
+}
+
+/*
+ * mup_bridge_unwrap removes the wrapper of a MUP bridge. It writes the
+ * protocol and the addresses of the bridge header into the IPv4 header, and
+ * removes the 20 bytes after it. The caller checks the wrapper first. The
+ * function returns a drop reason.
+ */
+__attribute__((noinline)) int mup_bridge_unwrap(struct __sk_buff *skb)
+{
+	void *data;
+	void *data_end;
+	struct mup_iphdr *ipv4;
+	__u8 *wrapper;
+	__u16 total_length;
+
+	if (skb->len < sizeof(struct ethhdr) + sizeof(struct mup_iphdr) +
+			       MUP_BRIDGE_OVERHEAD + 8 ||
+	    bpf_skb_pull_data(skb, sizeof(struct ethhdr) +
+					   sizeof(struct mup_iphdr) +
+					   MUP_BRIDGE_OVERHEAD))
+		return MUP_DROP_BRIDGE_PACKET;
+	data = (void *)(long)skb->data;
+	data_end = (void *)(long)skb->data_end;
+	ipv4 = data + sizeof(struct ethhdr);
+	wrapper = (__u8 *)(ipv4 + 1);
+	if (wrapper + MUP_BRIDGE_OVERHEAD > (__u8 *)data_end)
+		return MUP_DROP_BRIDGE_PACKET;
+	total_length = mup_read_be16((const __u8 *)&ipv4->total_length);
+	if (total_length < sizeof(*ipv4) + MUP_BRIDGE_OVERHEAD + 8)
+		return MUP_DROP_BRIDGE_PACKET;
+	ipv4->protocol = wrapper[11];
+	__builtin_memcpy(&ipv4->source, wrapper + 12, sizeof(ipv4->source));
+	__builtin_memcpy(&ipv4->destination, wrapper + 16,
+			 sizeof(ipv4->destination));
+	mup_write_be16(&ipv4->total_length, total_length - MUP_BRIDGE_OVERHEAD);
+	mup_refresh_ipv4_checksum(ipv4);
+	if (bpf_skb_adjust_room(skb, -MUP_BRIDGE_OVERHEAD, BPF_ADJ_ROOM_NET, 0))
+		return MUP_DROP_BRIDGE_PACKET;
+	return MUP_DROP_NONE;
 }
 
 /* MUP accepts no IPv4 options, so the payload offset is fixed. */
@@ -680,31 +954,38 @@ static __always_inline int prepare_clone_l2(
 	const struct mup_packet *packet,
 	__u32 expected_ifindex)
 {
-	struct bpf_fib_lookup fib = {};
+	struct send_scratch_layout *scratch;
+	struct bpf_fib_lookup *fib;
+	__u32 scratch_key = 0;
 
-	fib.family = AF_INET;
-	fib.l4_protocol = packet->ipv4->protocol;
-	fib.tot_len = mup_read_be16((const __u8 *)&packet->ipv4->total_length);
-	fib.ifindex = expected_ifindex;
-	fib.tos = packet->ipv4->tos;
-	fib.ipv4_src = packet->ipv4->source;
-	fib.ipv4_dst = packet->ipv4->destination;
+	scratch = bpf_map_lookup_elem(&send_scratch, &scratch_key);
+	if (!scratch)
+		return MUP_DROP_MAP_INVARIANT;
+	fib = &scratch->fib;
+	__builtin_memset(fib, 0, sizeof(*fib));
+	fib->family = AF_INET;
+	fib->l4_protocol = packet->ipv4->protocol;
+	fib->tot_len = mup_read_be16((const __u8 *)&packet->ipv4->total_length);
+	fib->ifindex = expected_ifindex;
+	fib->tos = packet->ipv4->tos;
+	fib->ipv4_src = packet->ipv4->source;
+	fib->ipv4_dst = packet->ipv4->destination;
 	if (packet->transport == MUP_TRANSPORT_UDP) {
 		struct mup_udphdr *udp = packet->l4;
 
-		fib.sport = udp->source;
-		fib.dport = udp->destination;
+		fib->sport = udp->source;
+		fib->dport = udp->destination;
 	}
-	if (bpf_fib_lookup(skb, &fib, sizeof(fib),
+	if (bpf_fib_lookup(skb, fib, sizeof(*fib),
 			   BPF_FIB_LOOKUP_OUTPUT) != BPF_FIB_LKUP_RET_SUCCESS)
 		return MUP_DROP_FIB;
-	if (fib.ifindex != expected_ifindex)
+	if (fib->ifindex != expected_ifindex)
 		return MUP_DROP_FIB;
 
 #pragma clang loop unroll(full)
 	for (int index = 0; index < 6; index++) {
-		packet->ethernet->source[index] = fib.smac[index];
-		packet->ethernet->destination[index] = fib.dmac[index];
+		packet->ethernet->source[index] = fib->smac[index];
+		packet->ethernet->destination[index] = fib->dmac[index];
 	}
 	return MUP_DROP_NONE;
 }
@@ -1013,8 +1294,14 @@ int mup_client_ingress(struct __sk_buff *skb)
 					    &reverse->endpoint.listen_port);
 		if (!group)
 			return count_and_drop(skb, MUP_DROP_DOWNSTREAM_SOURCE);
-		if (!is_client_downstream_source(&packet, group->path_mask))
+		if (!is_client_downstream_source(&packet, group->path_mask) &&
+		    !is_client_down_source(&packet, group->down_mask))
 			return count_and_drop(skb, MUP_DROP_DOWNSTREAM_SOURCE);
+		if (group->flags & MUP_GROUP_FLAG_DEDUP) {
+			result = check_client_duplicate(&packet, peer_token);
+			if (result != MUP_DROP_NONE)
+				return count_and_drop(skb, result);
+		}
 		reverse->last_seen_ns = bpf_ktime_get_ns();
 		forward = bpf_map_lookup_elem(&client_peer_by_endpoint,
 					      &reverse->endpoint);
@@ -1142,6 +1429,326 @@ __attribute__((noinline)) __be32 pick_reflector(__be32 base, __u8 transport,
 }
 
 /*
+ * The meta argument of mup_down_send packs the listen port in bits 0 to 15,
+ * the down path ID in bits 16 to 18, the flags below, and the peer token in
+ * bits 22 to 33. A BPF function has at most five arguments.
+ */
+#define MUP_DOWN_META_PARTIAL (1ULL << 19)
+#define MUP_DOWN_META_CLONE (1ULL << 20)
+#define MUP_DOWN_META_EGRESS (1ULL << 21)
+#define MUP_DOWN_META_TOKEN_SHIFT 22
+
+/*
+ * down_send_core rewrites a reply of the target for one down path of a client
+ * and sends it. A direct path sends from the server address of the path. A
+ * path with a return IP or a pool reflects the reply as the other modes do.
+ * With MUP_DOWN_META_CLONE, it sends a copy, returns one of the MUP_BURST_*
+ * values, and the caller keeps the packet. Otherwise it returns the verdict.
+ *
+ * A partial reply on an ICMP path needs the sum of its payload. The caller
+ * computes it once in payload_sum, because a call from here to
+ * mup_payload_sum_of makes the stack of the server program too deep. The
+ * function parses the packet again into packet, because a clone invalidates
+ * the packet pointers.
+ */
+static __always_inline int down_send_core(struct __sk_buff *skb,
+					  struct mup_packet *packet,
+					  __u32 advertised_ip,
+					  __u64 instance_nonce, __u64 meta,
+					  __u32 payload_sum)
+{
+	struct send_scratch_layout *scratch;
+	struct down_path_v1 *mapped;
+	__u32 clone = (meta & MUP_DOWN_META_CLONE) != 0;
+	__u32 partial = (meta & MUP_DOWN_META_PARTIAL) != 0;
+	__u32 peer_token = (meta >> MUP_DOWN_META_TOKEN_SHIFT) & MUP_MAX_PEER_TOKEN;
+	__u16 listen_port = meta & 0xffff;
+	__u32 cursor_key = 0;
+	__be32 member = 0;
+	__be32 source_ip;
+	__be32 destination_ip;
+	__u32 reason = MUP_DROP_NONE;
+	__u32 ifindex;
+	__u32 count;
+	__u32 slot;
+	__u16 server_port;
+	__u8 transport;
+	__u8 flags;
+	__u8 type;
+	int result;
+
+	*packet = (struct mup_packet){};
+	if (parse_ipv4_l4(skb, packet) != MUP_DROP_NONE)
+		return clone ? MUP_BURST_FAILED : TC_ACT_SHOT;
+	scratch = bpf_map_lookup_elem(&send_scratch, &cursor_key);
+	if (!scratch) {
+		reason = MUP_DROP_MAP_INVARIANT;
+		goto fail;
+	}
+	__builtin_memset(&scratch->key, 0, sizeof(scratch->key));
+	scratch->key.client.advertised_ip = advertised_ip;
+	scratch->key.client.instance_nonce = instance_nonce;
+	scratch->key.path_id = (meta >> 16) & 7;
+	mapped = bpf_map_lookup_elem(&server_down_paths, &scratch->key);
+	if (!mapped || !mapped->server_ip || !mapped->ifindex) {
+		reason = MUP_DROP_NO_PATH;
+		goto fail;
+	}
+	flags = mapped->flags;
+	transport = mapped->transport;
+	server_port = mapped->server_port;
+	ifindex = mapped->ifindex;
+	if (flags & MUP_FLAG_RETURN_POOL) {
+		count = mapped->count;
+		if (count == 0 || count > MUP_MAX_POOL) {
+			reason = MUP_DROP_NO_PATH;
+			goto fail;
+		}
+		if (flags & MUP_FLAG_BALANCE_PER_PACKET) {
+			__u32 *cursor = bpf_map_lookup_elem(&reflector_cursor,
+							    &cursor_key);
+
+			if (!cursor) {
+				reason = MUP_DROP_MAP_INVARIANT;
+				goto fail;
+			}
+			slot = (*cursor)++ % count;
+		} else {
+			__u32 hash = peer_token * 0x9e3779b1U;
+
+			hash ^= hash >> 16;
+			slot = hash % count;
+		}
+#pragma clang loop unroll(full)
+		for (int index = 0; index < MUP_MAX_POOL; index++) {
+			if ((__u32)index == slot)
+				member = mapped->members[index];
+		}
+		if (!member) {
+			reason = MUP_DROP_NO_PATH;
+			goto fail;
+		}
+	} else if (flags & MUP_FLAG_RETURN_IP) {
+		member = mapped->return_ip;
+	}
+
+	if (transport == MUP_TRANSPORT_UDP) {
+		source_ip = member ? member : mapped->server_ip;
+		if (partial)
+			result = mup_rewrite_udp_partial(packet, source_ip,
+							 advertised_ip,
+							 server_port,
+							 listen_port,
+							 peer_token);
+		else
+			result = mup_rewrite_udp(packet, source_ip,
+						 advertised_ip, server_port,
+						 listen_port);
+	} else if (transport == MUP_TRANSPORT_ICMP) {
+		if (member) {
+			source_ip = advertised_ip;
+			destination_ip = member;
+			type = MUP_ICMP_ECHO_REQUEST;
+		} else {
+			source_ip = mapped->server_ip;
+			destination_ip = advertised_ip;
+			type = MUP_ICMP_ECHO_REPLY;
+		}
+		if (partial) {
+			result = mup_rewrite_icmp_partial(packet, source_ip,
+							  destination_ip, type,
+							  server_port,
+							  peer_token);
+			if (!result)
+				mup_finish_rewrite(packet, payload_sum);
+		} else {
+			result = mup_rewrite_icmp(packet, source_ip,
+						  destination_ip, type,
+						  server_port,
+						  (__u16)peer_token);
+		}
+	} else {
+		reason = MUP_DROP_TRANSPORT;
+		goto fail;
+	}
+	if (result) {
+		/* A packet that failed half way cannot go on. */
+		if (clone) {
+			count_reason(MUP_DROP_CHECKSUM);
+			return MUP_BURST_FAILED;
+		}
+		return count_and_drop(skb, MUP_DROP_CHECKSUM);
+	}
+	/*
+	 * A path through a bridge wraps the reply for the bridge. A copy of a
+	 * burst loses the wrapper again after the clone, so the next path gets
+	 * the reply as it was.
+	 */
+	if (flags & MUP_FLAG_BRIDGE) {
+		reason = mup_bridge_wrap(skb, mapped->local_ip, mapped->server_ip,
+					 server_port, ifindex);
+		if (reason == MUP_DROP_BRIDGE_SIZE)
+			goto fail;
+		*packet = (struct mup_packet){};
+		if (reason != MUP_DROP_NONE ||
+		    parse_ipv4_l4(skb, packet) != MUP_DROP_NONE) {
+			if (clone) {
+				count_reason(MUP_DROP_BRIDGE_PACKET);
+				return MUP_BURST_FAILED;
+			}
+			return count_and_drop(skb, MUP_DROP_BRIDGE_PACKET);
+		}
+	}
+
+	if (clone) {
+		int sent = MUP_BURST_SENT;
+
+		result = prepare_clone_l2(skb, packet, ifindex);
+		if (result != MUP_DROP_NONE) {
+			count_reason(result);
+			sent = MUP_BURST_SKIPPED;
+		} else if (bpf_clone_redirect(skb, ifindex, 0)) {
+			count_reason(MUP_DROP_NEIGHBOR);
+			sent = MUP_BURST_SKIPPED;
+		}
+		if ((flags & MUP_FLAG_BRIDGE) &&
+		    mup_bridge_unwrap(skb) != MUP_DROP_NONE) {
+			count_reason(MUP_DROP_BRIDGE_PACKET);
+			return MUP_BURST_FAILED;
+		}
+		return sent;
+	}
+	if ((meta & MUP_DOWN_META_EGRESS) && ifindex == skb->ifindex &&
+	    prepare_clone_l2(skb, packet, ifindex) == MUP_DROP_NONE)
+		return TC_ACT_OK;
+	return redirect_packet(ifindex);
+
+fail:
+	if (clone) {
+		count_reason(reason);
+		return MUP_BURST_SKIPPED;
+	}
+	return count_and_drop(skb, reason);
+}
+
+/*
+ * mup_down_send is down_send_core in a function of its own, for the egress
+ * program. The verifier checks it once, so the burst loop stays cheap. The
+ * ingress program has a larger stack, so it runs the core inline.
+ */
+__attribute__((noinline)) int mup_down_send(struct __sk_buff *skb,
+					    __u32 advertised_ip,
+					    __u64 instance_nonce, __u64 meta,
+					    __u32 payload_sum)
+{
+	struct mup_packet packet = {};
+
+	return down_send_core(skb, &packet, advertised_ip, instance_nonce,
+			      meta, payload_sum);
+}
+
+/*
+ * send_down_reply picks the down paths of a reply with the downstream mode of
+ * the client, among its healthy down paths. Fallback takes the lowest down
+ * path ID, balancer hashes the token as the client upstream does, and burst
+ * sends a copy on each healthy down path. The packet itself goes on the
+ * highest path that it uses. With inline_send, the sends run inline and reuse
+ * packet. Otherwise they call mup_down_send.
+ */
+static __always_inline int send_down_reply(
+	struct __sk_buff *skb,
+	struct mup_packet *packet,
+	const struct server_reverse_value_v1 *reverse,
+	const struct down_group_v1 *down,
+	__u16 listen_port,
+	int partial,
+	int at_egress,
+	int inline_send)
+{
+	__u32 usable = (__u32)down->path_mask & (__u32)down->healthy_mask;
+	__u32 peer_token = reverse->route_key.peer_token;
+	__u32 advertised_ip = reverse->route_key.client.advertised_ip;
+	__u64 instance_nonce = reverse->route_key.client.instance_nonce;
+	__u64 meta = listen_port;
+	__u32 sending = 0;
+	__u32 count = 0;
+	__u32 ordinal;
+	__u32 hash;
+	__u32 final = 0;
+	int payload_sum = 0;
+	int result;
+
+	if (partial)
+		meta |= MUP_DOWN_META_PARTIAL;
+	if (at_egress)
+		meta |= MUP_DOWN_META_EGRESS;
+	meta |= (__u64)(peer_token & MUP_MAX_PEER_TOKEN) << MUP_DOWN_META_TOKEN_SHIFT;
+	if (!usable)
+		return count_and_drop(skb, MUP_DROP_NO_PATH);
+
+	if (down->mode == MUP_MODE_BURST) {
+		sending = usable;
+	} else if (down->mode == MUP_MODE_BALANCER) {
+#pragma clang loop unroll(full)
+		for (int index = 0; index < 8; index++) {
+			if (mup_mask_has(usable, index))
+				count++;
+		}
+		hash = peer_token * 0x9e3779b1U ^ usable * 0x85ebca6bU;
+		hash ^= hash >> 16;
+		ordinal = hash % count;
+		count = 0;
+#pragma clang loop unroll(full)
+		for (int index = 0; index < 8; index++) {
+			if (!mup_mask_has(usable, index))
+				continue;
+			if (count == ordinal)
+				sending = 1U << index;
+			count++;
+		}
+	} else {
+		sending = usable & -usable;
+	}
+	if (!sending)
+		return count_and_drop(skb, MUP_DROP_NO_PATH);
+	/* Each copy has the same payload, so one sum serves them all. */
+	if (partial && (sending & down->icmp_mask)) {
+		payload_sum = mup_payload_sum_of(skb, packet->payload_length);
+		if (payload_sum < 0)
+			return count_and_drop(skb, MUP_DROP_CHECKSUM);
+	}
+#pragma clang loop unroll(full)
+	for (int index = 0; index < 8; index++) {
+		if (mup_mask_has(sending, index))
+			final = index;
+	}
+	/* A bounded loop keeps one copy of an inline send in the program. */
+#pragma clang loop unroll(disable)
+	for (__u32 index = 0; index < 8; index++) {
+		__u64 clone_meta = meta | MUP_DOWN_META_CLONE | ((__u64)index << 16);
+
+		if (!((sending >> index) & 1) || index == final)
+			continue;
+		if (inline_send)
+			result = down_send_core(skb, packet, advertised_ip,
+						instance_nonce, clone_meta,
+						payload_sum);
+		else
+			result = mup_down_send(skb, advertised_ip,
+					       instance_nonce, clone_meta,
+					       payload_sum);
+		if (result == MUP_BURST_FAILED)
+			return TC_ACT_SHOT;
+	}
+	meta |= (__u64)(final & 7) << 16;
+	if (inline_send)
+		return down_send_core(skb, packet, advertised_ip,
+				      instance_nonce, meta, payload_sum);
+	return mup_down_send(skb, advertised_ip, instance_nonce, meta,
+			     payload_sum);
+}
+
+/*
  * server_target_reply sends one reply of the target back to the client on the
  * return path of its route. A partial packet still has CHECKSUM_PARTIAL, so the
  * rewrite leaves the checksum to the device. At egress, a reply that leaves on
@@ -1157,6 +1764,7 @@ static __always_inline int server_target_reply(
 {
 	struct registration_value_v1 *registration;
 	struct server_route_value_v1 *forward;
+	struct down_group_v1 *down;
 	__u32 peer_token = 0;
 	__be32 pool_addr = 0;
 	__u64 now;
@@ -1180,6 +1788,18 @@ static __always_inline int server_target_reply(
 	if (!partial &&
 	    mup_set_peer_token(packet, reverse->route_key.peer_token))
 		return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
+	/*
+	 * A client with separate down paths lets the server pick the down path
+	 * of each reply. Other clients get the reply on the path of the latest
+	 * upstream packet.
+	 */
+	down = bpf_map_lookup_elem(&server_down_groups,
+				   &reverse->route_key.client);
+	if (down && down->path_mask &&
+	    down->listen_port == registration->listen_port)
+		return send_down_reply(skb, packet, reverse, down,
+				       registration->listen_port, partial,
+				       at_egress, !at_egress);
 	if (reverse->route_value.flags & MUP_FLAG_RETURN_POOL) {
 		pool_addr = pick_reflector(reverse->route_value.return_ip,
 					   reverse->route_value.transport,
@@ -1444,6 +2064,148 @@ int mup_server_egress(struct __sk_buff *skb)
 		return MUP_TCX_NEXT;
 	return server_target_reply(skb, &packet, reverse,
 				   mup_udp_is_partial(&packet), 1);
+}
+
+static __always_inline void bridge_count(__u32 key, __u32 bytes)
+{
+	__u64 *counter;
+
+	counter = bpf_map_lookup_elem(&bridge_counters, &key);
+	if (counter)
+		*counter += 1;
+	key++;
+	counter = bpf_map_lookup_elem(&bridge_counters, &key);
+	if (counter)
+		*counter += bytes;
+}
+
+/*
+ * bridge_is_mup reports a MUP packet: a control frame, or a WireGuard message
+ * with a peer token, in UDP or in an ICMP Echo.
+ */
+static __always_inline int bridge_is_mup(const struct mup_packet *packet)
+{
+	__u32 peer_token = 0;
+
+	if (packet->transport == MUP_TRANSPORT_ICMP) {
+		struct mup_icmphdr *icmp = packet->l4;
+
+		if ((icmp->type != MUP_ICMP_ECHO_REQUEST &&
+		     icmp->type != MUP_ICMP_ECHO_REPLY) ||
+		    icmp->code != 0)
+			return 0;
+	}
+	return is_mup_control(packet) ||
+	       validate_wg(packet, 1, &peer_token) == MUP_DROP_NONE;
+}
+
+/* bridge_is_wrapped reports a UDP payload that starts with the bridge magic. */
+static __always_inline int bridge_is_wrapped(const struct mup_packet *packet)
+{
+	return packet->transport == MUP_TRANSPORT_UDP &&
+	       mup_payload_fits(packet, MUP_BRIDGE_HEADER_LEN + 8) &&
+	       packet->payload[0] == MUP_BRIDGE_MAGIC_0 &&
+	       packet->payload[1] == MUP_BRIDGE_MAGIC_1;
+}
+
+/*
+ * bridge_send redirects a packet to the interface of the route to its
+ * destination. The lookup is the lookup of a forwarded packet, so the bridge
+ * host needs IPv4 forwarding.
+ */
+static __always_inline int bridge_send(struct __sk_buff *skb,
+				       const struct mup_packet *packet)
+{
+	struct bpf_fib_lookup fib = {};
+	long result;
+
+	fib.family = AF_INET;
+	fib.l4_protocol = packet->ipv4->protocol;
+	fib.tot_len = mup_read_be16((const __u8 *)&packet->ipv4->total_length);
+	fib.ifindex = skb->ifindex;
+	fib.tos = packet->ipv4->tos;
+	fib.ipv4_src = packet->ipv4->source;
+	fib.ipv4_dst = packet->ipv4->destination;
+	result = bpf_fib_lookup(skb, &fib, sizeof(fib), 0);
+	if (result != BPF_FIB_LKUP_RET_SUCCESS &&
+	    result != BPF_FIB_LKUP_RET_NO_NEIGH)
+		return count_and_drop(skb, MUP_DROP_FIB);
+	return redirect_packet(fib.ifindex);
+}
+
+/*
+ * mup_bridge_ingress runs on a MUP bridge. A MUP packet from a client to a
+ * port of the bridge goes on to the server of the bridge, from the same
+ * source. A wrapped reply from the server or an allowed sender loses its
+ * wrapper and goes on to its inner destination, with its inner source. Every
+ * other packet goes on to the kernel, so a normal ping still gets its reply.
+ */
+SEC("tc")
+int mup_bridge_ingress(struct __sk_buff *skb)
+{
+	struct mup_packet packet = {};
+	struct bridge_config_v1 *configuration;
+	struct bridge_allow_key_v1 sender = {};
+	__u32 configuration_key = 0;
+	__be32 server_ip;
+	__u8 inner_protocol;
+	int result;
+
+	result = parse_ipv4_l4(skb, &packet);
+	if (result != MUP_DROP_NONE)
+		return MUP_TCX_NEXT;
+	configuration = bpf_map_lookup_elem(&bridge_config, &configuration_key);
+	if (!configuration || !configuration->server_ip)
+		return MUP_TCX_NEXT;
+	server_ip = configuration->server_ip;
+	if (packet.server_port < configuration->port_first ||
+	    packet.server_port > configuration->port_last)
+		return MUP_TCX_NEXT;
+	if (!bpf_map_lookup_elem(&bridge_addresses, &packet.ipv4->destination))
+		return MUP_TCX_NEXT;
+
+	if (bridge_is_wrapped(&packet)) {
+		sender.prefixlen = 32;
+		sender.address = packet.ipv4->source;
+		if (!bpf_map_lookup_elem(&bridge_allow, &sender))
+			return count_and_drop(skb, MUP_DROP_BRIDGE_SOURCE);
+		inner_protocol = packet.payload[3];
+		if (packet.payload[2] != MUP_BRIDGE_VERSION ||
+		    (inner_protocol != MUP_IPPROTO_UDP &&
+		     inner_protocol != MUP_IPPROTO_ICMP))
+			return count_and_drop(skb, MUP_DROP_BRIDGE_PACKET);
+		if (mup_bridge_unwrap(skb) != MUP_DROP_NONE)
+			return count_and_drop(skb, MUP_DROP_BRIDGE_PACKET);
+		packet = (struct mup_packet){};
+		if (parse_ipv4_l4(skb, &packet) != MUP_DROP_NONE ||
+		    !bridge_is_mup(&packet))
+			return count_and_drop(skb, MUP_DROP_BRIDGE_PACKET);
+		bridge_count(MUP_BRIDGE_DOWN_PACKETS, skb->len);
+		return bridge_send(skb, &packet);
+	}
+
+	if (packet.ipv4->source == server_ip || !bridge_is_mup(&packet))
+		return MUP_TCX_NEXT;
+	if (packet.transport == MUP_TRANSPORT_ICMP) {
+		struct mup_icmphdr *icmp = packet.l4;
+
+		if (icmp->type != MUP_ICMP_ECHO_REQUEST)
+			return MUP_TCX_NEXT;
+		result = mup_rewrite_icmp(&packet, packet.ipv4->source,
+					  server_ip, MUP_ICMP_ECHO_REQUEST,
+					  packet.server_port,
+					  mup_read_be16((const __u8 *)&icmp->sequence));
+	} else {
+		if (complete_udp_checksum(skb, &packet))
+			return count_and_drop(skb, MUP_DROP_CHECKSUM);
+		result = mup_rewrite_udp(&packet, packet.ipv4->source, server_ip,
+					 packet.source_port,
+					 packet.destination_port);
+	}
+	if (result)
+		return count_and_drop(skb, MUP_DROP_CHECKSUM);
+	bridge_count(MUP_BRIDGE_UP_PACKETS, skb->len);
+	return bridge_send(skb, &packet);
 }
 
 SEC("tc")

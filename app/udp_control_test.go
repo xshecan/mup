@@ -452,3 +452,65 @@ func TestUDPPathsRunAndCloseConcurrently(t *testing.T) {
 		}
 	}
 }
+
+// An up path of a group with separate down paths sends the DOWN_REGISTER
+// frames before its REGISTER, and it takes its ACK from any source, because
+// the ACK can arrive on any down path.
+func TestSplitUDPPathTakesItsACKFromADownPath(t *testing.T) {
+	t.Parallel()
+
+	listener := &fakeUDPListener{}
+	sockets := newUDPControlSockets(listener.listen)
+	registration := testUDPRegistration(testServerA, 0)
+	registration.downs = newDownSet(config.ModeFallback)
+	registration.downs.set(0, config.Path{Server: testServerA.Addr(), ServerPort: 9200, Transport: protocol.TransportUDP})
+	path, err := sockets.openPath(registration, 0)
+	if err != nil {
+		t.Fatalf("openPath: %v", err)
+	}
+	conn := listener.opened()[0]
+	outcomes := runOneRound(path)
+	down := receiveSent(t, conn)
+	if frame, err := protocol.DecodeControlFrame(down.data); err != nil || frame.Type != protocol.ControlDownRegister || down.peer != testServerA {
+		t.Fatalf("first frame = %+v to %s (%v), want a DOWN_REGISTER to the server", frame, down.peer, err)
+	}
+	register := receiveSent(t, conn)
+	conn.inbox <- fakeDatagram{data: testACK(t, register.data, nil), peer: netip.MustParseAddrPort("203.0.113.4:9200")}
+	if outcome := receiveOutcome(t, outcomes); !outcome.success || outcome.sequence != 1 {
+		t.Fatalf("outcome = %+v, want success for sequence 1", outcome)
+	}
+}
+
+// A down path probe that arrives on the UDP socket goes to the handler of
+// the client, and an ordinary path never sees it.
+func TestUDPSocketPassesDownProbes(t *testing.T) {
+	t.Parallel()
+
+	listener := &fakeUDPListener{}
+	sockets := newUDPControlSockets(listener.listen)
+	probes := make(chan downProbe, 1)
+	handle := func(probe downProbe) { probes <- probe }
+	sockets.onProbe.Store(&handle)
+	socket, err := sockets.acquire(netip.AddrPortFrom(testAdvertisedIP, 51820))
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer sockets.release(socket)
+	frame := protocol.ControlFrame{
+		Type: protocol.ControlProbe, Transport: protocol.TransportUDP, Flags: protocol.ControlFlagDownPath,
+		PathID: 3, Sequence: 5, InstanceNonce: 7, AdvertisedIP: testAdvertisedIP,
+	}
+	packet := make([]byte, protocol.ControlFrameLength)
+	if err := protocol.EncodeControlFrame(packet, frame); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	listener.opened()[0].inbox <- fakeDatagram{data: packet, peer: netip.MustParseAddrPort("203.0.113.4:9300")}
+	select {
+	case probe := <-probes:
+		if probe.frame.PathID != 3 || probe.source != netip.MustParseAddr("203.0.113.4") || probe.port != 9300 || probe.transport != protocol.TransportUDP {
+			t.Fatalf("probe = %+v", probe)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the probe did not reach the handler")
+	}
+}

@@ -22,6 +22,12 @@ const usage = `usage:
   mup server -p PORT[-LAST] -r TARGET_IP:PORT [--target-ingress] [--control-socket PATH]
   mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP]" [-u ...] -s CLIENT_IP
              [-r RETURN_IP] [--mode fallback|balancer|burst] [--control-socket PATH]
+  mup client -p LISTEN_PORT --up "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp" [--up ...]
+             --down "SERVER_IP:PORT/udp|icmp [via RETURN_IP]" [--down ...] -s CLIENT_IP
+             [--up-bridge "BRIDGE_IP[%IFACE]:PORT[-LAST]/udp|icmp"] [--up-bridge ...]
+             [--down-bridge "BRIDGE_IP:PORT/udp|icmp [via RETURN_IP]"] [--down-bridge ...]
+             [--up-mode MODE] [--down-mode MODE] [--control-socket PATH]
+  mup bridge -s SERVER_IP -p PORT[-LAST] [-a CIDR] [-a ...] [--control-socket PATH]
 `
 
 type applicationRunner func(context.Context, config.App) error
@@ -74,7 +80,7 @@ func runApplication(ctx context.Context, appConfig config.App) error {
 
 func parseArgs(args []string) (config.App, error) {
 	if len(args) == 0 {
-		return config.App{}, errors.New("expected client or server subcommand")
+		return config.App{}, errors.New("expected client, server, or bridge subcommand")
 	}
 	switch args[0] {
 	case "client":
@@ -89,11 +95,17 @@ func parseArgs(args []string) (config.App, error) {
 			return config.App{}, err
 		}
 		return config.App{Server: server}, nil
+	case "bridge":
+		bridge, err := parseBridgeArgs(args[1:])
+		if err != nil {
+			return config.App{}, err
+		}
+		return config.App{Bridge: bridge}, nil
 	default:
 		if strings.HasPrefix(args[0], "-") {
 			return parseFileArgs(args)
 		}
-		return config.App{}, fmt.Errorf("unknown subcommand %q: expected client or server", args[0])
+		return config.App{}, fmt.Errorf("unknown subcommand %q: expected client, server, or bridge", args[0])
 	}
 }
 
@@ -111,7 +123,7 @@ func parseFileArgs(args []string) (config.App, error) {
 		return config.App{}, fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
 	if path == "" {
-		return config.App{}, errors.New("expected client or server subcommand, or --config")
+		return config.App{}, errors.New("expected client, server, or bridge subcommand, or --config")
 	}
 	appConfig, err := config.Load(path)
 	if err != nil {
@@ -123,11 +135,17 @@ func parseFileArgs(args []string) (config.App, error) {
 func parseClientArgs(args []string) (*config.Client, error) {
 	fs := flag.NewFlagSet("mup client", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	var rawPaths stringList
+	var rawPaths, rawUp, rawDown, rawUpBridges, rawDownBridges stringList
 	var port int
-	var advertisedText, returnIPText, modeName, controlSocket string
+	var advertisedText, returnIPText, modeName, upModeName, downModeName, controlSocket string
 	fs.IntVar(&port, "p", 0, "local WireGuard UDP listen port")
 	fs.Var(&rawPaths, "u", "server path as IPv4:PORT/udp or /icmp, where PORT can be a range FIRST-LAST")
+	fs.Var(&rawUp, "up", "up path as IPv4:PORT/udp or /icmp, for the upstream only")
+	fs.Var(&rawDown, "down", "down path as IPv4:PORT/udp or /icmp, for the downstream only")
+	fs.Var(&rawUpBridges, "up-bridge", "up path through a MUP bridge, as BRIDGE_IP:PORT/udp or /icmp")
+	fs.Var(&rawDownBridges, "down-bridge", "down path through a MUP bridge, as BRIDGE_IP:PORT/udp or /icmp")
+	fs.StringVar(&upModeName, "up-mode", "fallback", "upstream mode: fallback, balancer, or burst")
+	fs.StringVar(&downModeName, "down-mode", "fallback", "downstream mode: fallback, balancer, or burst")
 	fs.StringVar(&advertisedText, "s", "", "advertised client IPv4")
 	fs.StringVar(&returnIPText, "r", "", "return IPv4 of each -u path without its own via")
 	fs.StringVar(&modeName, "mode", "fallback", "fallback, balancer, or burst")
@@ -153,6 +171,15 @@ func parseClientArgs(args []string) (*config.Client, error) {
 			return nil, err
 		}
 	}
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	split := splitArgs{up: rawUp, down: rawDown, upBridges: rawUpBridges, downBridges: rawDownBridges, upMode: upModeName, downMode: downModeName}
+	if split.any() || set["up-mode"] || set["down-mode"] {
+		if len(rawPaths) > 0 || set["mode"] || set["r"] {
+			return nil, errors.New("use -u, -r, and --mode, or --up, --down, the bridges, --up-mode, and --down-mode, not both")
+		}
+		return parseSplitClientArgs(listenPort, advertised, controlSocket, split)
+	}
 	mode, err := config.ParseMode(modeName)
 	if err != nil {
 		return nil, fmt.Errorf("--mode: %w", err)
@@ -173,6 +200,58 @@ func parseClientArgs(args []string) (*config.Client, error) {
 		ControlSocket: controlSocket,
 		Groups:        []config.Group{{ListenPort: listenPort, Mode: mode, Paths: paths}},
 	}
+	if err := client.Validate(); err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
+// splitArgs holds the flags of a group with separate up paths and down paths.
+type splitArgs struct {
+	up, down, upBridges, downBridges []string
+	upMode, downMode                 string
+}
+
+func (s splitArgs) any() bool {
+	return len(s.up)+len(s.down)+len(s.upBridges)+len(s.downBridges) > 0
+}
+
+// parseSplitClientArgs builds a group with separate up paths and down paths.
+// The routes of each direction come first, then its bridges.
+func parseSplitClientArgs(listenPort uint16, advertised netip.Addr, controlSocket string, split splitArgs) (*config.Client, error) {
+	if len(split.up)+len(split.upBridges) == 0 || len(split.down)+len(split.downBridges) == 0 {
+		return nil, errors.New("the up paths and the down paths go together: give --up or --up-bridge, and --down or --down-bridge")
+	}
+	upMode, err := config.ParseMode(split.upMode)
+	if err != nil {
+		return nil, fmt.Errorf("--up-mode: %w", err)
+	}
+	downMode, err := config.ParseMode(split.downMode)
+	if err != nil {
+		return nil, fmt.Errorf("--down-mode: %w", err)
+	}
+	group := config.Group{ListenPort: listenPort, Mode: upMode, DownMode: downMode}
+	for _, part := range []struct {
+		flagName string
+		raws     []string
+		bridge   bool
+		into     *[]config.Path
+	}{
+		{"up", split.up, false, &group.Paths},
+		{"up-bridge", split.upBridges, true, &group.Paths},
+		{"down", split.down, false, &group.DownPaths},
+		{"down-bridge", split.downBridges, true, &group.DownPaths},
+	} {
+		for i, raw := range part.raws {
+			path, err := config.ParsePath(raw)
+			if err != nil {
+				return nil, fmt.Errorf("client --%s[%d]: %w", part.flagName, i, err)
+			}
+			path.Bridge = part.bridge
+			*part.into = append(*part.into, path)
+		}
+	}
+	client := &config.Client{AdvertisedIP: advertised, ControlSocket: controlSocket, Groups: []config.Group{group}}
 	if err := client.Validate(); err != nil {
 		return nil, err
 	}
@@ -207,6 +286,43 @@ func parseServerArgs(args []string) (*config.Server, error) {
 		return nil, err
 	}
 	return server, nil
+}
+
+func parseBridgeArgs(args []string) (*config.Bridge, error) {
+	fs := flag.NewFlagSet("mup bridge", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var serverRaw, portRaw, controlSocket string
+	var allowRaw stringList
+	fs.StringVar(&serverRaw, "s", "", "IPv4 address of the MUP server")
+	fs.StringVar(&portRaw, "p", "", "UDP ports and ICMP identifiers, as PORT or FIRST-LAST")
+	fs.Var(&allowRaw, "a", "more source ranges of the server, as IPv4 CIDR")
+	fs.StringVar(&controlSocket, "control-socket", api.DefaultBridgeSocket, "Unix socket for mupctl, or empty to disable")
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
+	if fs.NArg() != 0 {
+		return nil, fmt.Errorf("unexpected bridge argument %q", fs.Arg(0))
+	}
+	server, err := parseRequiredIPv4(serverRaw, "bridge -s")
+	if err != nil {
+		return nil, err
+	}
+	ports, err := config.ParsePortRange(portRaw)
+	if err != nil {
+		return nil, fmt.Errorf("bridge -p: %w", err)
+	}
+	bridge := &config.Bridge{Server: server, Port: ports, ControlSocket: controlSocket}
+	for i, raw := range allowRaw {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return nil, fmt.Errorf("bridge -a[%d]: %w", i, err)
+		}
+		bridge.Allow = append(bridge.Allow, prefix)
+	}
+	if err := bridge.Validate(); err != nil {
+		return nil, err
+	}
+	return bridge, nil
 }
 
 func parseRequiredIPv4(raw, flagName string) (netip.Addr, error) {

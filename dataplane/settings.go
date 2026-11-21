@@ -18,14 +18,20 @@ type ClientSettings struct {
 	HealthyMask   uint32
 	Groups        []GroupSettings
 	Paths         []PathSettings
+	// DownPaths holds the down path slots. A nil entry is an empty slot.
+	DownPaths []*DownPathSettings
 }
 
 // GroupSettings configures the peers of one listen port. PathMask holds one
-// bit for each path slot of the group.
+// bit for each path slot of the group. DownMask holds one bit for each down
+// path slot of a group with separate down paths, and DownMode is the mode that
+// the server uses for them.
 type GroupSettings struct {
 	ListenPort uint16
 	Mode       config.Mode
 	PathMask   uint8
+	DownMode   config.Mode
+	DownMask   uint8
 }
 
 type PathSettings struct {
@@ -99,6 +105,24 @@ func encodeClientSettings(settings ClientSettings) (
 	if assigned != configured {
 		return client, nil, paths, state, errors.New("each path must belong to exactly one path group")
 	}
+	if len(settings.DownPaths) > MaxDownPaths {
+		return client, nil, paths, state, fmt.Errorf("client accepts at most %d down paths", MaxDownPaths)
+	}
+	var downConfigured, downAssigned uint8
+	for slot, down := range settings.DownPaths {
+		if down != nil {
+			downConfigured |= 1 << slot
+		}
+	}
+	for _, group := range settings.Groups {
+		if downAssigned&group.DownMask != 0 {
+			return client, nil, paths, state, fmt.Errorf("path group of listen port %d shares a down path with another group", group.ListenPort)
+		}
+		downAssigned |= group.DownMask
+	}
+	if downAssigned != downConfigured {
+		return client, nil, paths, state, errors.New("each down path must belong to exactly one path group")
+	}
 	for index, path := range settings.Paths {
 		if paths[index], err = encodePathSettings(index, path); err != nil {
 			return client, nil, paths, state, err
@@ -127,8 +151,20 @@ func encodeGroupSettings(group GroupSettings) (mupPathGroupV1, error) {
 	if group.PathMask == 0 {
 		return mupPathGroupV1{}, fmt.Errorf("path group of listen port %d has no paths", group.ListenPort)
 	}
-	return mupPathGroupV1{Mode: uint8(group.Mode), PathMask: group.PathMask}, nil
+	if group.DownMode > config.ModeBurst {
+		return mupPathGroupV1{}, fmt.Errorf("invalid down mode %d for listen port %d", group.DownMode, group.ListenPort)
+	}
+	encoded := mupPathGroupV1{Mode: uint8(group.Mode), PathMask: group.PathMask, DownMask: group.DownMask}
+	// A downstream burst sends copies on several down paths, so the client
+	// drops the later copies.
+	if group.DownMask != 0 && group.DownMode == config.ModeBurst {
+		encoded.Flags = groupFlagDedup
+	}
+	return encoded, nil
 }
+
+// groupFlagDedup mirrors MUP_GROUP_FLAG_DEDUP in bpf/include/mup_abi.h.
+const groupFlagDedup uint8 = 1 << 0
 
 // encodePathReturn encodes the return IP or return pool of a path slot. A path
 // without a return IP has an empty entry.

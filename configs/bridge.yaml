@@ -1,0 +1,13 @@
+# The configuration of a MUP bridge. Replace the example addresses. The host
+# needs IPv4 forwarding, and its network must accept packets with a source
+# address that is not its own.
+bridge:
+  # The MUP server. The bridge sends the upstream of the clients to it, and it
+  # takes wrapped replies only from it.
+  server: 198.51.100.7
+  # The UDP ports and the ICMP Echo identifiers that the bridge takes. They
+  # must include the ports of the bridge entries of the clients.
+  port: 5000-5099
+  # Optional. More source ranges of the server, for a server behind NAT.
+  # allow:
+  #   - 198.51.100.0/24

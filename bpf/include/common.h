@@ -28,6 +28,14 @@ typedef __u64 __be64;
 #define AF_INET 2
 #define BPF_FIB_LOOKUP_OUTPUT (1U << 1)
 #define BPF_FIB_LKUP_RET_SUCCESS 0
+/* The lookup found the route, but the kernel has no neighbor entry yet. */
+#define BPF_FIB_LKUP_RET_NO_NEIGH 7
+
+/* An LPM trie must not preallocate its entries. */
+#define BPF_F_NO_PREALLOC (1U << 0)
+
+/* bpf_skb_adjust_room mode: the room goes between the L3 and L4 headers. */
+#define BPF_ADJ_ROOM_NET 0
 
 #define TC_ACT_OK 0
 #define TC_ACT_SHOT 2
@@ -42,6 +50,7 @@ enum bpf_map_type {
 	BPF_MAP_TYPE_PROG_ARRAY = 3,
 	BPF_MAP_TYPE_PERCPU_ARRAY = 6,
 	BPF_MAP_TYPE_LRU_HASH = 9,
+	BPF_MAP_TYPE_LPM_TRIE = 11,
 	BPF_MAP_TYPE_QUEUE = 22,
 	BPF_MAP_TYPE_RINGBUF = 27,
 };
@@ -172,6 +181,10 @@ static void (*bpf_spin_lock)(struct bpf_spin_lock *lock) = (void *)93;
 static void (*bpf_spin_unlock)(struct bpf_spin_lock *lock) = (void *)94;
 static long (*bpf_redirect_neigh)(__u32 ifindex, const void *params,
 				  int plen, __u64 flags) = (void *)152;
+static long (*bpf_skb_adjust_room)(struct __sk_buff *skb, __s32 len_diff,
+				   __u32 mode, __u64 flags) = (void *)50;
+static long (*bpf_check_mtu)(void *ctx, __u32 ifindex, __u32 *mtu_len,
+			     __s32 len_diff, __u64 flags) = (void *)163;
 static void *(*bpf_ringbuf_reserve)(const void *ringbuf, __u64 size,
 				    __u64 flags) = (void *)131;
 static void (*bpf_ringbuf_submit)(void *data, __u64 flags) = (void *)132;

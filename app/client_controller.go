@@ -46,6 +46,9 @@ type pathConn interface {
 }
 
 // pathRegistration holds the values that a path sends in its REGISTER frames.
+// An up path of a group with separate down paths has downs, and it sends the
+// DOWN_REGISTER frames of the group before each REGISTER. Its ACK can then
+// arrive on any down path.
 type pathRegistration struct {
 	advertisedIP netip.Addr
 	listenPort   uint16
@@ -53,6 +56,13 @@ type pathRegistration struct {
 	path         config.Path
 	nonce        uint64
 	pathID       uint16
+	downs        *downSet
+}
+
+// downFrames returns the DOWN_REGISTER frames to send before the REGISTER
+// with this sequence.
+func (r pathRegistration) downFrames(sequence uint32) [][]byte {
+	return r.downs.frames(r, sequence, time.Now())
 }
 
 // pathOpener opens the control socket of a path. A path that cannot open its
@@ -63,6 +73,8 @@ type clientDataplane interface {
 	UpdatePathState(healthyMask uint8, generation uint32) error
 	SetPath(slot int, path dataplane.PathSettings) error
 	ClearPath(slot int) error
+	SetDownPath(slot int, path *dataplane.DownPathSettings) error
+	DownPathsSeen() ([dataplane.MaxDownPaths]time.Duration, error)
 	SetGroup(group dataplane.GroupSettings) error
 	AttachClient(ifindexes []int) error
 	Snapshot() (dataplane.StatsSnapshot, error)
@@ -101,10 +113,23 @@ func (p *clientPath) runtimePath() config.Path {
 	return p.path.AtPort(p.port)
 }
 
-// pathGroup is the runtime state of one configured group.
+// pathGroup is the runtime state of one configured group. A group with
+// separate down paths has downs.
 type pathGroup struct {
 	settings dataplane.GroupSettings
+	downs    *downSet
 }
+
+// clientDownPath is one down path of a group. It is healthy while the probes
+// of the servers arrive on it.
+type clientDownPath struct {
+	path      config.Path
+	group     *pathGroup
+	lastProbe time.Time
+}
+
+// downInUse is how long a down path counts as in use after its latest reply.
+const downInUse = 10 * time.Second
 
 // clientController runs the paths of a client. A slot is a path ID, a bit in
 // the healthy mask, and an entry in the BPF path_config map. Paths can join
@@ -117,13 +142,15 @@ type clientController struct {
 	initial       []dataplane.PathSettings
 	dataplane     clientDataplane
 	resolver      routeResolver
-	open          pathOpener
+	controls      clientControls
 	interfaceName func(int) string
 	// pickPort chooses the next server port of a path in its range.
 	pickPort     func(ports config.PortRange, current uint16) uint16
 	logger       *log.Logger
 	health       *control.HealthEngine
 	slots        [config.MaxPaths]*clientPath
+	downSlots    [dataplane.MaxDownPaths]*clientDownPath
+	stopDown     func()
 	nextPriority int
 	nextEpoch    uint64
 	probes       chan pathProbeResult
@@ -137,13 +164,17 @@ func newClientController(
 	settings dataplane.ClientSettings,
 	plane clientDataplane,
 	resolver routeResolver,
-	open pathOpener,
+	controls clientControls,
 	startedAt time.Time,
 	logger *log.Logger,
 ) *clientController {
 	groups := make([]*pathGroup, 0, len(settings.Groups))
 	for _, group := range settings.Groups {
-		groups = append(groups, &pathGroup{settings: group})
+		current := &pathGroup{settings: group}
+		if group.DownMask != 0 {
+			current.downs = newDownSet(group.DownMode)
+		}
+		groups = append(groups, current)
 	}
 	return &clientController{
 		client:        client,
@@ -152,7 +183,7 @@ func newClientController(
 		initial:       settings.Paths,
 		dataplane:     plane,
 		resolver:      resolver,
-		open:          open,
+		controls:      controls,
 		interfaceName: interfaceName,
 		pickPort:      randomOtherPort,
 		logger:        logger,
@@ -169,6 +200,14 @@ func (c *clientController) run(ctx context.Context) error {
 	if err := c.start(ctx); err != nil {
 		return err
 	}
+	defer func() {
+		c.mu.Lock()
+		stop := c.stopDown
+		c.mu.Unlock()
+		if stop != nil {
+			stop()
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -188,12 +227,36 @@ func (c *clientController) start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ctx = ctx
+	downSlot := 0
+	var splitPorts []uint16
+	for index, group := range c.groups {
+		if group.downs == nil {
+			continue
+		}
+		splitPorts = append(splitPorts, group.settings.ListenPort)
+		for _, path := range c.client.Groups[index].DownPaths {
+			c.downSlots[downSlot] = &clientDownPath{path: path, group: group}
+			group.downs.set(uint16(downSlot), path)
+			downSlot++
+		}
+	}
+	if len(splitPorts) > 0 {
+		stop, err := c.controls.listenDown(downListen{
+			advertisedIP: c.client.AdvertisedIP,
+			nonce:        c.nonce,
+			listenPorts:  splitPorts,
+		}, c.handleDownProbe)
+		if err != nil {
+			return err
+		}
+		c.stopDown = stop
+	}
 	slot := 0
 	for index, group := range c.groups {
 		for _, path := range c.client.Groups[index].Paths {
 			settings := c.initial[slot]
 			current := &clientPath{path: path, group: group, ifindex: settings.Ifindex, priority: settings.Priority, port: path.ServerPort}
-			conn, err := c.open(c.registrationLocked(group, current.runtimePath(), slot))
+			conn, err := c.controls.open(c.registrationLocked(group, current.runtimePath(), slot))
 			if err != nil {
 				return err
 			}
@@ -218,6 +281,7 @@ func (c *clientController) registrationLocked(group *pathGroup, path config.Path
 		path:         path,
 		nonce:        c.nonce,
 		pathID:       uint16(slot),
+		downs:        group.downs,
 	}
 }
 
@@ -318,7 +382,7 @@ func (c *clientController) movePortLocked(slot int) error {
 		last:     current.last,
 		moves:    current.moves + 1,
 	}
-	conn, err := c.open(c.registrationLocked(current.group, moved.runtimePath(), slot))
+	conn, err := c.controls.open(c.registrationLocked(current.group, moved.runtimePath(), slot))
 	if err != nil {
 		// The path stays on its port, and the next misses try again.
 		c.logger.Printf("client path %d: cannot move to server port %d: %v", slot, port, err)
@@ -372,10 +436,20 @@ func (c *clientController) groupLocked(listenPort uint16) (*pathGroup, error) {
 // AddPath adds a path to a free slot in a group. The new path stays unhealthy
 // until the server answers its first REGISTER.
 func (c *clientController) AddPath(raw string, listenPort uint16) (api.Path, error) {
+	return c.addPath(raw, listenPort, false)
+}
+
+// AddBridge adds an up path through a MUP bridge to a group with down paths.
+func (c *clientController) AddBridge(raw string, listenPort uint16) (api.Path, error) {
+	return c.addPath(raw, listenPort, true)
+}
+
+func (c *clientController) addPath(raw string, listenPort uint16, bridge bool) (api.Path, error) {
 	path, err := config.ParsePath(raw)
 	if err != nil {
 		return api.Path{}, badRequest(err)
 	}
+	path.Bridge = bridge
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.ctx == nil {
@@ -384,6 +458,12 @@ func (c *clientController) AddPath(raw string, listenPort uint16) (api.Path, err
 	group, err := c.groupLocked(listenPort)
 	if err != nil {
 		return api.Path{}, err
+	}
+	if group.downs != nil && path.ReturnIP.IsValid() {
+		return api.Path{}, badRequest(errors.New("an up path of a group with down paths has no via, because the down paths carry the replies"))
+	}
+	if bridge && group.downs == nil {
+		return api.Path{}, conflict("the group of listen port %d has no down paths, and a bridge needs a group with upstream and downstream", group.settings.ListenPort)
 	}
 	slot := -1
 	for index, current := range c.slots {
@@ -413,7 +493,7 @@ func (c *clientController) AddPath(raw string, listenPort uint16) (api.Path, err
 	if ifindex <= 0 {
 		return api.Path{}, badRequest(fmt.Errorf("resolve path: invalid interface index %d", ifindex))
 	}
-	conn, err := c.open(c.registrationLocked(group, path.AtPort(path.ServerPort), slot))
+	conn, err := c.controls.open(c.registrationLocked(group, path.AtPort(path.ServerPort), slot))
 	if err != nil {
 		return api.Path{}, err
 	}
@@ -441,6 +521,178 @@ func (c *clientController) AddPath(raw string, listenPort uint16) (api.Path, err
 	c.nextPriority++
 	c.launchLocked(slot, &clientPath{path: path, group: group, ifindex: ifindex, priority: priority, port: path.ServerPort}, conn)
 	return c.pathLocked(slot, c.inUseSlotsLocked()), nil
+}
+
+// AddDownPath adds a down path to a group with separate down paths. The up
+// paths send it to the servers with their next REGISTER, and it stays
+// unhealthy until the first probe arrives on it.
+func (c *clientController) AddDownPath(raw string, listenPort uint16) (api.Path, error) {
+	return c.addDownPath(raw, listenPort, false)
+}
+
+// AddDownBridge adds a down path through a MUP bridge.
+func (c *clientController) AddDownBridge(raw string, listenPort uint16) (api.Path, error) {
+	return c.addDownPath(raw, listenPort, true)
+}
+
+func (c *clientController) addDownPath(raw string, listenPort uint16, bridge bool) (api.Path, error) {
+	path, err := config.ParsePath(raw)
+	if err != nil {
+		return api.Path{}, badRequest(err)
+	}
+	path.Bridge = bridge
+	if err := path.ValidateDown(); err != nil {
+		return api.Path{}, badRequest(err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ctx == nil {
+		return api.Path{}, unavailable("the client is still starting")
+	}
+	group, err := c.groupLocked(listenPort)
+	if err != nil {
+		return api.Path{}, err
+	}
+	if group.downs == nil {
+		return api.Path{}, conflict("the group of listen port %d has no down paths, because its paths carry both directions", group.settings.ListenPort)
+	}
+	slot := -1
+	for index, current := range c.downSlots {
+		if current == nil {
+			if slot < 0 {
+				slot = index
+			}
+			continue
+		}
+		if current.path.SameDownPath(path) {
+			return api.Path{}, conflict("down path %s is already down path %d", path, index)
+		}
+	}
+	if slot < 0 {
+		return api.Path{}, conflict("the client already has %d down paths", dataplane.MaxDownPaths)
+	}
+	settings := dataplane.DownPathFromConfig(path)
+	if err := c.dataplane.SetDownPath(slot, &settings); err != nil {
+		return api.Path{}, err
+	}
+	if err := c.setDownMaskLocked(group, group.settings.DownMask|1<<slot); err != nil {
+		_ = c.dataplane.SetDownPath(slot, nil)
+		return api.Path{}, err
+	}
+	c.downSlots[slot] = &clientDownPath{path: path, group: group}
+	group.downs.set(uint16(slot), path)
+	seen, _ := c.dataplane.DownPathsSeen()
+	return c.downPathLocked(slot, seen, time.Now()), nil
+}
+
+// RemoveDownPath removes a down path. The up paths tell the servers with a
+// lease of zero, so they stop to use it with the next REGISTER.
+func (c *clientController) RemoveDownPath(id int) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if id < 0 || id >= dataplane.MaxDownPaths || c.downSlots[id] == nil {
+		return notFound("down path %d does not exist", id)
+	}
+	group := c.downSlots[id].group
+	if bits.OnesCount8(group.settings.DownMask) == 1 {
+		return conflict("down path %d is the last down path of the group of listen port %d, add another down path first", id, group.settings.ListenPort)
+	}
+	if err := c.setDownMaskLocked(group, group.settings.DownMask&^(1<<id)); err != nil {
+		return err
+	}
+	if err := c.dataplane.SetDownPath(id, nil); err != nil {
+		return err
+	}
+	group.downs.remove(uint16(id), time.Now())
+	c.downSlots[id] = nil
+	return nil
+}
+
+// SetDownMode changes the downstream mode of a group with separate down
+// paths. The servers take it with the next REGISTER of an up path.
+func (c *clientController) SetDownMode(raw string, listenPort uint16) error {
+	mode, err := config.ParseMode(raw)
+	if err != nil {
+		return badRequest(err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	group, err := c.groupLocked(listenPort)
+	if err != nil {
+		return err
+	}
+	if group.downs == nil {
+		return conflict("the group of listen port %d has no down paths, because its paths carry both directions", group.settings.ListenPort)
+	}
+	updated := group.settings
+	updated.DownMode = mode
+	if err := c.dataplane.SetGroup(updated); err != nil {
+		return err
+	}
+	group.settings = updated
+	group.downs.setMode(mode)
+	return nil
+}
+
+func (c *clientController) setDownMaskLocked(group *pathGroup, mask uint8) error {
+	updated := group.settings
+	updated.DownMask = mask
+	if err := c.dataplane.SetGroup(updated); err != nil {
+		return err
+	}
+	group.settings = updated
+	return nil
+}
+
+// handleDownProbe answers the probe of a down path on an up path of its
+// group: the healthy up path with the lowest priority, or every up path when
+// none is healthy, so that a probe can bring the group back.
+func (c *clientController) handleDownProbe(probe downProbe) {
+	frame := probe.frame
+	c.mu.Lock()
+	if frame.AdvertisedIP != c.client.AdvertisedIP || frame.InstanceNonce != c.nonce ||
+		int(frame.PathID) >= len(c.downSlots) {
+		c.mu.Unlock()
+		return
+	}
+	down := c.downSlots[frame.PathID]
+	if down == nil || !downSourceMatches(down.path, probe.source, probe.transport, probe.port) {
+		c.mu.Unlock()
+		return
+	}
+	down.lastProbe = probe.received
+	path := down.path
+	targets := c.upTargetsLocked(down.group)
+	c.mu.Unlock()
+	for _, registration := range targets {
+		reply, err := downProbeReplyFrame(registration, probe, path)
+		if err != nil {
+			return
+		}
+		_ = c.controls.sendUp(registration, reply)
+	}
+}
+
+func (c *clientController) upTargetsLocked(group *pathGroup) []pathRegistration {
+	var all []pathRegistration
+	var best pathRegistration
+	selected := -1
+	for slot, current := range c.slots {
+		if current == nil || current.group != group {
+			continue
+		}
+		registration := c.registrationLocked(group, current.runtimePath(), slot)
+		all = append(all, registration)
+		health, _ := c.health.Path(slot)
+		if health.Healthy && (selected < 0 || current.priority < c.slots[selected].priority) {
+			selected = slot
+			best = registration
+		}
+	}
+	if selected >= 0 {
+		return []pathRegistration{best}
+	}
+	return all
 }
 
 func (c *clientController) setPathMaskLocked(group *pathGroup, mask uint8) error {
@@ -528,8 +780,18 @@ func (c *clientController) groupsLocked(paths []api.Path, routes []dataplane.Cli
 	groups := make([]api.Group, 0, len(c.groups))
 	for _, group := range c.groups {
 		converted := api.Group{ListenPort: group.settings.ListenPort, Mode: group.settings.Mode.String()}
+		if group.downs != nil {
+			converted.DownMode = group.settings.DownMode.String()
+		}
 		for _, path := range paths {
 			if path.ListenPort != converted.ListenPort {
+				continue
+			}
+			if path.Direction == directionDown {
+				converted.DownPaths++
+				if path.Healthy {
+					converted.HealthyDownPaths++
+				}
 				continue
 			}
 			converted.Paths++
@@ -571,6 +833,11 @@ func (c *clientController) Peers() (api.PeerList, error) {
 	return api.PeerList{Peers: peers}, nil
 }
 
+const (
+	directionUp   = "up"
+	directionDown = "down"
+)
+
 func (c *clientController) pathsLocked() []api.Path {
 	inUse := c.inUseSlotsLocked()
 	paths := make([]api.Path, 0, config.MaxPaths)
@@ -579,7 +846,45 @@ func (c *clientController) pathsLocked() []api.Path {
 			paths = append(paths, c.pathLocked(slot, inUse))
 		}
 	}
+	seen, err := c.dataplane.DownPathsSeen()
+	if err != nil {
+		for slot := range seen {
+			seen[slot] = -1
+		}
+	}
+	now := time.Now()
+	for slot, down := range c.downSlots {
+		if down != nil {
+			paths = append(paths, c.downPathLocked(slot, seen, now))
+		}
+	}
 	return paths
+}
+
+// downPathLocked describes a down path. It is healthy while the probes of
+// the servers arrive, and in use while the program accepts replies on it.
+func (c *clientController) downPathLocked(slot int, seen [dataplane.MaxDownPaths]time.Duration, now time.Time) api.Path {
+	down := c.downSlots[slot]
+	var returnIP string
+	switch {
+	case down.path.IsPool():
+		returnIP = netip.PrefixFrom(down.path.ReturnIP, int(down.path.ReturnPrefix)).String()
+	case down.path.ReturnIP.IsValid():
+		returnIP = down.path.ReturnIP.String()
+	}
+	return api.Path{
+		ID:         slot,
+		Direction:  directionDown,
+		Bridge:     down.path.Bridge,
+		ListenPort: down.group.settings.ListenPort,
+		Server:     down.path.Server.String(),
+		Port:       down.path.ServerPort,
+		Transport:  down.path.Transport.String(),
+		ReturnIP:   returnIP,
+		Healthy:    !down.lastProbe.IsZero() && now.Sub(down.lastProbe) < downHealthWindow,
+		InUse:      seen[slot] >= 0 && seen[slot] < downInUse,
+		LastProbe:  down.lastProbe,
+	}
 }
 
 func (c *clientController) pathLocked(slot int, inUse [config.MaxPaths]bool) api.Path {
@@ -604,8 +909,14 @@ func (c *clientController) pathLocked(slot int, inUse [config.MaxPaths]bool) api
 	if current.path.HasPortRange() {
 		firstPort, lastPort = current.path.ServerPort, current.path.LastPort
 	}
+	var direction string
+	if current.group.downs != nil {
+		direction = directionUp
+	}
 	return api.Path{
 		ID:         slot,
+		Direction:  direction,
+		Bridge:     current.path.Bridge,
 		ListenPort: current.group.settings.ListenPort,
 		Server:     current.path.Server.String(),
 		Port:       current.port,

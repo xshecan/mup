@@ -15,7 +15,29 @@
  */
 #define MUP_FLAG_RETURN_POOL (1U << 1)
 #define MUP_FLAG_BALANCE_PER_PACKET (1U << 2)
+/*
+ * A server down path with MUP_FLAG_BRIDGE goes through a MUP bridge. The
+ * server_ip field holds the bridge address, and the server wraps each reply
+ * in a UDP packet from local_ip to the bridge.
+ */
+#define MUP_FLAG_BRIDGE (1U << 4)
 #define MUP_MAX_POOL 16
+/*
+ * The bridge wrapper is a UDP header and a 12-byte bridge header between the
+ * IPv4 header and the transport header of a packet. The bridge header holds
+ * the magic "MB", the version, the inner protocol, and the inner source and
+ * destination addresses.
+ */
+#define MUP_BRIDGE_MAGIC_0 0x4d
+#define MUP_BRIDGE_MAGIC_1 0x42
+#define MUP_BRIDGE_VERSION 1
+#define MUP_BRIDGE_HEADER_LEN 12
+#define MUP_BRIDGE_OVERHEAD 20
+/*
+ * A group with MUP_GROUP_FLAG_DEDUP gets copies of each downstream packet on
+ * several down paths, so the client drops the later copies.
+ */
+#define MUP_GROUP_FLAG_DEDUP (1U << 0)
 
 enum mup_mode {
 	MUP_MODE_FALLBACK = 0,
@@ -35,6 +57,7 @@ enum mup_control_type {
 	MUP_CONTROL_PROBE_REPLY = 4,
 	MUP_CONTROL_DEREGISTER = 5,
 	MUP_CONTROL_ERROR = 6,
+	MUP_CONTROL_DOWN_REGISTER = 7,
 };
 
 enum mup_drop_reason {
@@ -61,7 +84,10 @@ enum mup_drop_reason {
 	MUP_DROP_CHECKSUM = 20,
 	MUP_DROP_SOURCE_LIMIT = 21,
 	MUP_DROP_DOWNSTREAM_SOURCE = 22,
-	MUP_DROP_REASON_COUNT = 23,
+	MUP_DROP_BRIDGE_SOURCE = 23,
+	MUP_DROP_BRIDGE_PACKET = 24,
+	MUP_DROP_BRIDGE_SIZE = 25,
+	MUP_DROP_REASON_COUNT = 26,
 };
 
 struct control_v1 {
@@ -110,13 +136,105 @@ struct client_config_v1 {
 	__u32 generation;
 };
 
-/* The peers of one listen port use only the paths in path_mask. */
+/*
+ * The peers of one listen port use only the paths in path_mask. A group with
+ * separate down paths also accepts replies from the down paths in down_mask.
+ * The return_ip field is not used.
+ */
 struct path_group_v1 {
 	__be32 return_ip;
 	__u8 mode;
 	__u8 flags;
 	__u8 path_mask;
-	__u8 padding;
+	__u8 down_mask;
+};
+
+/*
+ * client_down_path_v1 is one down path of a client, by down path ID. The
+ * client accepts a reply from server_ip, from return_ip with
+ * MUP_FLAG_RETURN_IP, or from the pool of return_ip and prefix with
+ * MUP_FLAG_RETURN_POOL. The program writes last_seen_ns for each reply.
+ */
+struct client_down_path_v1 {
+	__be32 server_ip;
+	__be32 return_ip;
+	__be16 server_port;
+	__u8 transport;
+	__u8 flags;
+	__u8 prefix;
+	__u8 padding[3];
+	__u64 last_seen_ns;
+};
+
+/* The client drops a second copy of a downstream burst packet. */
+struct client_duplicate_key_v1 {
+	__be32 peer_token;
+	__u8 identity[24];
+};
+
+/*
+ * down_group_v1 holds the down paths of one client on a server, keyed by the
+ * client key. The server program picks a down path for each reply of the
+ * listen port with mode, among the paths in path_mask & healthy_mask. The
+ * paths in icmp_mask use ICMP. Go writes it from the DOWN_REGISTER frames and
+ * the probe replies.
+ */
+struct down_group_v1 {
+	__be16 listen_port;
+	__u8 mode;
+	__u8 path_mask;
+	__u8 healthy_mask;
+	__u8 icmp_mask;
+	__u8 padding[2];
+};
+
+struct down_path_key_v1 {
+	struct client_key_v1 client;
+	__u32 path_id;
+	__u32 padding;
+};
+
+/*
+ * down_path_v1 is one down path of a client on a server. A direct path sends
+ * from server_ip. A path with MUP_FLAG_RETURN_IP returns through return_ip. A
+ * path with MUP_FLAG_RETURN_POOL returns through the first count members,
+ * which are the healthy members of the pool for this client. A path with
+ * MUP_FLAG_BRIDGE wraps the reply from local_ip to the bridge at server_ip.
+ */
+struct down_path_v1 {
+	__be32 server_ip;
+	__be32 return_ip;
+	__u32 ifindex;
+	__be16 server_port;
+	__u8 transport;
+	__u8 flags;
+	__u32 count;
+	__be32 local_ip;
+	__be32 members[MUP_MAX_POOL];
+};
+
+/*
+ * bridge_config_v1 is the configuration of a bridge: its server, and the
+ * ports and ICMP identifiers that it takes.
+ */
+struct bridge_config_v1 {
+	__be32 server_ip;
+	__u16 port_first;
+	__u16 port_last;
+};
+
+/* bridge_allow_key_v1 is the key of the LPM trie of the bridge senders. */
+struct bridge_allow_key_v1 {
+	__u32 prefixlen;
+	__be32 address;
+};
+
+enum mup_bridge_counter {
+	MUP_BRIDGE_UP_PACKETS = 0,
+	MUP_BRIDGE_UP_BYTES = 1,
+	MUP_BRIDGE_DOWN_PACKETS = 2,
+	MUP_BRIDGE_DOWN_BYTES = 3,
+	MUP_BRIDGE_COUNTERS = 4,
 };
 
 struct server_config_v1 {
@@ -293,4 +411,11 @@ _Static_assert(sizeof(struct reflector_pool_v1) == 80, "reflector_pool_v1 ABI");
 _Static_assert(sizeof(struct path_state_v1) == 8, "path_state_v1 ABI");
 _Static_assert(sizeof(struct duplicate_key_v1) == 48, "duplicate_key_v1 ABI");
 _Static_assert(sizeof(struct event_v1) == 32, "event_v1 ABI");
+_Static_assert(sizeof(struct client_down_path_v1) == 24, "client_down_path_v1 ABI");
+_Static_assert(sizeof(struct client_duplicate_key_v1) == 28, "client_duplicate_key_v1 ABI");
+_Static_assert(sizeof(struct down_group_v1) == 8, "down_group_v1 ABI");
+_Static_assert(sizeof(struct down_path_key_v1) == 24, "down_path_key_v1 ABI");
+_Static_assert(sizeof(struct down_path_v1) == 88, "down_path_v1 ABI");
+_Static_assert(sizeof(struct bridge_config_v1) == 8, "bridge_config_v1 ABI");
+_Static_assert(sizeof(struct bridge_allow_key_v1) == 8, "bridge_allow_key_v1 ABI");
 _Static_assert(sizeof(struct event_limit_v1) == 16, "event_limit_v1 ABI");

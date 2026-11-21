@@ -27,25 +27,35 @@ Usage:
 
 Commands:
   status                                 Show an overview of the daemon
-  get groups                             List the path groups of a client
-  get paths                              List the paths of a client
-  get peers                              List the peers of a client, or the peer routes of a server
-  get clients                            List the clients that are registered on a server
-  get reflectors                         List the return-pool reflectors of a server and their health
-  get drops                              List the drop counters
+  groups                                 List the path groups of a client
+  paths                                  List the paths of a client
+  peers                                  List the peers of a client, or the peer routes of a server
+  clients                                List the clients that are registered on a server
+  reflectors                             List the return-pool reflectors of a server and their health
+  drops                                  List the drop counters
+  reset drops                            Set every drop counter to zero
   add path SERVER[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP]
                                          Add a path to a group
   delete path ID                         Remove a path from a client
   set mode fallback|balancer|burst       Change the path mode of a group
   version                                Print the version of mupctl
 
+  Each list command also works after get, for example get paths.
+
+  With --down, add, delete, and set work on the down paths and the
+  downstream mode of a group with separate down paths. With --bridge, add
+  adds a path through a MUP bridge, and the address is the bridge address.
+
 Flags:
   --socket PATH       Control socket of the daemon. The default is $MUP_SOCKET,
-                      /run/mup/client.sock, or /run/mup/server.sock.
+                      /run/mup/client.sock, /run/mup/server.sock, or
+                      /run/mup/bridge.sock.
   -o, --output FORMAT table, wide, or json. The default is table.
   -w, --watch         Show the output again every second (status and get only).
   --group LISTEN_PORT The group for add and set. A client with one group does
                       not need it.
+  --down              Add, delete, or set a down path or the downstream mode.
+  --bridge            Add a path through a MUP bridge.
 `
 
 const watchInterval = time.Second
@@ -55,6 +65,8 @@ type options struct {
 	output string
 	group  uint16
 	watch  bool
+	down   bool
+	bridge bool
 	args   []string
 }
 
@@ -127,6 +139,10 @@ func parseOptions(args []string) (options, error) {
 		switch {
 		case arg == "-w" || arg == "--watch":
 			opts.watch = true
+		case arg == "--down":
+			opts.down = true
+		case arg == "--bridge":
+			opts.bridge = true
 		case name == "--socket" || name == "-o" || name == "--output" || name == "--group":
 			if !hasValue {
 				if index+1 >= len(args) {
@@ -179,11 +195,17 @@ type command func(ctx context.Context, s invocation, w io.Writer) error
 func parseCommand(opts options) (command, error) {
 	args := opts.args
 	verb := args[0]
-	if opts.watch && verb != "status" && verb != "get" {
-		return nil, fmt.Errorf("--watch works only with status and get")
+	if _, list := listCommand(verb); opts.watch && verb != "status" && verb != "get" && !list {
+		return nil, fmt.Errorf("--watch works only with status and the list commands")
 	}
 	if opts.group != 0 && verb != "add" && verb != "set" {
 		return nil, fmt.Errorf("--group works only with add and set")
+	}
+	if opts.down && verb != "add" && verb != "set" && verb != "delete" && verb != "del" && verb != "remove" && verb != "rm" {
+		return nil, fmt.Errorf("--down works only with add, delete, and set")
+	}
+	if opts.bridge && verb != "add" {
+		return nil, fmt.Errorf("--bridge works only with add")
 	}
 	switch verb {
 	case "status":
@@ -195,21 +217,18 @@ func parseCommand(opts options) (command, error) {
 		if err := expectArgs(args, 2); err != nil {
 			return nil, err
 		}
-		switch args[1] {
-		case "group", "groups":
-			return showGroups, nil
-		case "path", "paths":
-			return showPaths, nil
-		case "peer", "peers", "route", "routes":
-			return showPeers, nil
-		case "client", "clients":
-			return showClients, nil
-		case "reflector", "reflectors":
-			return showReflectors, nil
-		case "drop", "drops":
-			return showDrops, nil
+		if show, ok := listCommand(args[1]); ok {
+			return show, nil
 		}
 		return nil, fmt.Errorf("unknown resource %q: use groups, paths, peers, clients, reflectors, or drops", args[1])
+	case "reset":
+		if err := expectArgs(args, 2); err != nil {
+			return nil, err
+		}
+		if args[1] != "drop" && args[1] != "drops" {
+			return nil, fmt.Errorf("reset supports only drops")
+		}
+		return resetDrops, nil
 	case "add":
 		if len(args) != 3 && !(len(args) == 5 && args[3] == "via") &&
 			!(len(args) == 7 && args[3] == "via" && args[5] == "balance") {
@@ -220,7 +239,7 @@ func parseCommand(opts options) (command, error) {
 		}
 		spec := strings.Join(args[2:], " ")
 		return func(ctx context.Context, s invocation, w io.Writer) error {
-			return addPath(ctx, s, w, spec, opts.group)
+			return addPath(ctx, s, w, spec, opts.group, opts.down, opts.bridge)
 		}, nil
 	case "delete", "del", "remove", "rm":
 		if err := expectArgs(args, 3); err != nil {
@@ -234,7 +253,7 @@ func parseCommand(opts options) (command, error) {
 			return nil, fmt.Errorf("path ID %q is not a number", args[2])
 		}
 		return func(ctx context.Context, s invocation, w io.Writer) error {
-			return deletePath(ctx, s, w, id)
+			return deletePath(ctx, s, w, id, opts.down)
 		}, nil
 	case "set":
 		if err := expectArgs(args, 3); err != nil {
@@ -245,10 +264,44 @@ func parseCommand(opts options) (command, error) {
 		}
 		mode := args[2]
 		return func(ctx context.Context, s invocation, w io.Writer) error {
-			return setMode(ctx, s, w, mode, opts.group)
+			return setMode(ctx, s, w, mode, opts.group, opts.down)
 		}, nil
 	}
+	if show, ok := listCommand(verb); ok {
+		if err := expectArgs(args, 1); err != nil {
+			return nil, err
+		}
+		return show, nil
+	}
 	return nil, fmt.Errorf("unknown command %q", verb)
+}
+
+// listCommand returns the command that lists a resource. Each resource has a
+// singular and a plural name, and peers also has the name routes.
+func listCommand(name string) (command, bool) {
+	switch name {
+	case "group", "groups":
+		return showGroups, true
+	case "path", "paths":
+		return showPaths, true
+	case "peer", "peers", "route", "routes":
+		return showPeers, true
+	case "client", "clients":
+		return showClients, true
+	case "reflector", "reflectors":
+		return showReflectors, true
+	case "drop", "drops":
+		return showDrops, true
+	}
+	return nil, false
+}
+
+func resetDrops(ctx context.Context, s invocation, w io.Writer) error {
+	if err := s.daemon.ResetDrops(ctx); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintln(w, "drop counters reset")
+	return err
 }
 
 func isPathResource(name string) bool {
@@ -292,7 +345,7 @@ func showGroups(ctx context.Context, s invocation, w io.Writer) error {
 		return err
 	}
 	if status.Client == nil {
-		return errors.New("the daemon runs as a server, and only a client has groups")
+		return fmt.Errorf("the daemon runs as a %s, and only a client has groups", status.Role)
 	}
 	if s.output == "json" {
 		return writeJSON(w, status.Client.Groups)
@@ -365,8 +418,18 @@ func showDrops(ctx context.Context, s invocation, w io.Writer) error {
 	return nil
 }
 
-func addPath(ctx context.Context, s invocation, w io.Writer, spec string, group uint16) error {
-	path, err := s.daemon.AddPath(ctx, spec, group)
+func addPath(ctx context.Context, s invocation, w io.Writer, spec string, group uint16, down, bridge bool) error {
+	add, name, until := s.daemon.AddPath, "path", "ACK"
+	if down {
+		add, name, until = s.daemon.AddDownPath, "down path", "probe"
+	}
+	if bridge {
+		add = func(ctx context.Context, spec string, group uint16) (api.Path, error) {
+			return s.daemon.AddBridge(ctx, spec, group, down)
+		}
+		name = strings.Replace(name, "path", "bridge", 1)
+	}
+	path, err := add(ctx, spec, group)
 	if err != nil {
 		return err
 	}
@@ -377,23 +440,31 @@ func addPath(ctx context.Context, s invocation, w io.Writer, spec string, group 
 	if path.ReturnIP != "" {
 		route += " via " + path.ReturnIP
 	}
-	_, err = fmt.Fprintf(w, "path/%d created in group %d (%s, unhealthy until the first ACK)\n", path.ID, path.ListenPort, route)
+	_, err = fmt.Fprintf(w, "%s/%d created in group %d (%s, unhealthy until the first %s)\n", strings.ReplaceAll(name, " ", "-"), path.ID, path.ListenPort, route, until)
 	return err
 }
 
-func deletePath(ctx context.Context, s invocation, w io.Writer, id int) error {
-	if err := s.daemon.DeletePath(ctx, id); err != nil {
+func deletePath(ctx context.Context, s invocation, w io.Writer, id int, down bool) error {
+	remove, name := s.daemon.DeletePath, "path"
+	if down {
+		remove, name = s.daemon.DeleteDownPath, "down-path"
+	}
+	if err := remove(ctx, id); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintf(w, "path/%d deleted\n", id)
+	_, err := fmt.Fprintf(w, "%s/%d deleted\n", name, id)
 	return err
 }
 
-func setMode(ctx context.Context, s invocation, w io.Writer, mode string, group uint16) error {
-	if err := s.daemon.SetMode(ctx, mode, group); err != nil {
+func setMode(ctx context.Context, s invocation, w io.Writer, mode string, group uint16, down bool) error {
+	set, name := s.daemon.SetMode, "mode"
+	if down {
+		set, name = s.daemon.SetDownMode, "downstream mode"
+	}
+	if err := set(ctx, mode, group); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintf(w, "mode set to %s\n", mode)
+	_, err := fmt.Fprintf(w, "%s set to %s\n", name, mode)
 	return err
 }
 
@@ -431,17 +502,19 @@ func resolveSocket(flagValue string, env environment) (string, error) {
 	if value := env.getenv("MUP_SOCKET"); value != "" {
 		return value, nil
 	}
-	client := env.exists(api.DefaultClientSocket)
-	server := env.exists(api.DefaultServerSocket)
-	switch {
-	case client && server:
-		return "", fmt.Errorf("both %s and %s exist, so choose one with --socket", api.DefaultClientSocket, api.DefaultServerSocket)
-	case client:
-		return api.DefaultClientSocket, nil
-	case server:
-		return api.DefaultServerSocket, nil
+	var found []string
+	for _, socket := range []string{api.DefaultClientSocket, api.DefaultServerSocket, api.DefaultBridgeSocket} {
+		if env.exists(socket) {
+			found = append(found, socket)
+		}
 	}
-	return "", fmt.Errorf("no daemon socket at %s or %s. Start mup, or pass --socket", api.DefaultClientSocket, api.DefaultServerSocket)
+	switch len(found) {
+	case 1:
+		return found[0], nil
+	case 0:
+		return "", fmt.Errorf("no daemon socket at %s, %s, or %s. Start mup, or pass --socket", api.DefaultClientSocket, api.DefaultServerSocket, api.DefaultBridgeSocket)
+	}
+	return "", fmt.Errorf("%s exist, so choose one with --socket", strings.Join(found, " and "))
 }
 
 func socketExists(path string) bool {
