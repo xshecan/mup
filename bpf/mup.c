@@ -1438,6 +1438,15 @@ int mup_client_ingress(struct __sk_buff *skb)
 	if (!path)
 		return count_and_drop(skb, MUP_DROP_NO_PATH);
 	struct path_config_v1 selected_path = *path;
+	/*
+	 * A bridge reflect route wraps the reflected packet for its bridge, so
+	 * the bridge emits the spoofed packet that the client cannot send. The
+	 * source and the port come from before the reflect, which is the
+	 * advertised source and the server port the bridge takes.
+	 */
+	__be32 reflect_bridge = selected_path.bridge;
+	__be32 reflect_source = selected_path.source_ip;
+	__u16 reflect_port = selected_path.server_port;
 	apply_up_reflect(selected_index, &selected_path, peer_token);
 	if (mup_set_peer_token(&packet, peer_token))
 		return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
@@ -1447,6 +1456,12 @@ int mup_client_ingress(struct __sk_buff *skb)
 		return count_and_drop(skb, MUP_DROP_TRANSPORT);
 	if (result)
 		return count_and_drop(skb, MUP_DROP_CHECKSUM);
+	if (reflect_bridge) {
+		int wrap = mup_bridge_wrap(skb, reflect_source, reflect_bridge,
+					   reflect_port, selected_path.ifindex);
+		if (wrap != MUP_DROP_NONE)
+			return count_and_drop(skb, wrap);
+	}
 
 	return redirect_packet(selected_path.ifindex);
 }

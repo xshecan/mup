@@ -84,7 +84,11 @@ func (s *upReflectPathConn) registerMembers(sequence uint32, sentAt time.Time) r
 		if err != nil {
 			continue
 		}
-		if reg.path.Transport == protocol.TransportICMP {
+		if reg.path.BridgeReflect() {
+			// The client cannot send the spoofed packet, so it wraps the
+			// reflected REGISTER for the bridge, and the bridge emits it.
+			_ = s.sendViaBridge(reg, member, frame, sequence)
+		} else if reg.path.Transport == protocol.TransportICMP {
 			// The member answers the server with an Echo Reply, so the request
 			// carries the server as its source.
 			_ = s.sendICMP(reg.path.Server, member, reg.path.ServerPort, uint16(sequence), frame, sequence)
@@ -143,6 +147,72 @@ func (s *upReflectPathConn) sendUDP(source, destination netip.Addr, sourcePort, 
 	segment := buildUDPSegment(source, destination, sourcePort, destinationPort, payload)
 	packet := buildIPv4Packet(source, destination, unix.IPPROTO_UDP, segment, uint16(id))
 	return unix.Sendto(s.fd, packet, 0, &unix.SockaddrInet4{Addr: destination.As4()})
+}
+
+// The MUP bridge wrapper, mirrored from bpf/include/mup_abi.h. The wrapper is a
+// UDP header and the bridge header, inserted after the IPv4 header.
+const (
+	bridgeWrapOverhead = 20
+	bridgeWrapMagic0   = 0x4d
+	bridgeWrapMagic1   = 0x42
+	bridgeWrapVersion  = 1
+)
+
+// sendViaBridge wraps the reflected REGISTER for the bridge and sends the
+// wrapper to the bridge over the socket. The client cannot send the spoofed
+// packet, so the bridge removes the wrapper and emits the inner packet to the
+// member. The outer packet carries the advertised source, so it needs no
+// spoofing.
+func (s *upReflectPathConn) sendViaBridge(reg pathRegistration, member netip.Addr, frame []byte, id uint32) error {
+	var innerSource, innerDestination netip.Addr
+	var innerProtocol byte
+	var inner []byte
+	if reg.path.Transport == protocol.TransportICMP {
+		echo := marshalICMPEcho(icmpEchoRequest, reg.path.ServerPort, uint16(id), frame)
+		innerSource, innerDestination, innerProtocol = reg.path.Server, member, unix.IPPROTO_ICMP
+		inner = buildIPv4Packet(innerSource, innerDestination, unix.IPPROTO_ICMP, echo, uint16(id))
+	} else {
+		segment := buildUDPSegment(member, reg.path.Server, reg.listenPort, reg.path.ServerPort, frame)
+		innerSource, innerDestination, innerProtocol = member, reg.path.Server, unix.IPPROTO_UDP
+		inner = buildIPv4Packet(innerSource, innerDestination, unix.IPPROTO_UDP, segment, uint16(id))
+	}
+	packet := wrapForBridge(reg.advertisedIP, reg.path.ProxyBridge, reg.path.ServerPort, innerProtocol, innerSource, innerDestination, inner, uint16(id))
+	return unix.Sendto(s.fd, packet, 0, &unix.SockaddrInet4{Addr: reg.path.ProxyBridge.As4()})
+}
+
+// wrapForBridge wraps an inner IPv4 packet in the MUP bridge wrapper, from
+// source to the bridge. It mirrors mup_bridge_wrap in bpf/mup.c: it turns the
+// outer IPv4 header into a UDP packet to the bridge and inserts the UDP header
+// and the bridge header, which carry the inner protocol and addresses.
+func wrapForBridge(source, bridge netip.Addr, port uint16, innerProtocol byte, innerSource, innerDestination netip.Addr, inner []byte, id uint16) []byte {
+	payload := inner[20:]
+	innerTotal := len(inner)
+	total := innerTotal + bridgeWrapOverhead
+	packet := make([]byte, total)
+	packet[0] = 0x45
+	binary.BigEndian.PutUint16(packet[2:4], uint16(total))
+	binary.BigEndian.PutUint16(packet[4:6], id)
+	packet[8] = 64
+	packet[9] = unix.IPPROTO_UDP
+	source4 := source.As4()
+	bridge4 := bridge.As4()
+	copy(packet[12:16], source4[:])
+	copy(packet[16:20], bridge4[:])
+	binary.BigEndian.PutUint16(packet[10:12], internetChecksum(packet[:20]))
+	binary.BigEndian.PutUint16(packet[20:22], port)
+	binary.BigEndian.PutUint16(packet[22:24], port)
+	binary.BigEndian.PutUint16(packet[24:26], uint16(innerTotal))
+	// packet[26:28] stays zero: the bridge does not check the outer UDP checksum.
+	packet[28] = bridgeWrapMagic0
+	packet[29] = bridgeWrapMagic1
+	packet[30] = bridgeWrapVersion
+	packet[31] = innerProtocol
+	innerSource4 := innerSource.As4()
+	innerDestination4 := innerDestination.As4()
+	copy(packet[32:36], innerSource4[:])
+	copy(packet[36:40], innerDestination4[:])
+	copy(packet[40:], payload)
+	return packet
 }
 
 // upReflectFrame builds the REGISTER of one member. Each member registers as a

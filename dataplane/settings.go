@@ -44,6 +44,9 @@ type PathSettings struct {
 	ReturnIP      netip.Addr
 	ReturnPrefix  uint8
 	Balance       config.Balance
+	// ProxyBridge is set on an up reflect path that a bridge emits. The client
+	// wraps the reflected packet for the bridge instead of sending it itself.
+	ProxyBridge netip.Addr
 }
 
 type ServerSettings struct {
@@ -234,6 +237,12 @@ func encodePathSettings(index int, path PathSettings) (mupPathConfigV1, error) {
 	if path.Transport > protocol.TransportICMP {
 		return mupPathConfigV1{}, fmt.Errorf("path %d has invalid transport %d", index, path.Transport)
 	}
+	var bridge uint32
+	if path.ProxyBridge.IsValid() {
+		if bridge, err = requiredIPv4Word(path.ProxyBridge, fmt.Sprintf("path %d bridge", index)); err != nil {
+			return mupPathConfigV1{}, err
+		}
+	}
 	return mupPathConfigV1{
 		DestinationIp: destinationIP,
 		SourceIp:      sourceIP,
@@ -241,6 +250,7 @@ func encodePathSettings(index int, path PathSettings) (mupPathConfigV1, error) {
 		ServerPort:    path.ServerPort,
 		Transport:     uint8(path.Transport),
 		Priority:      path.Priority,
+		Bridge:        bridge,
 	}, nil
 }
 

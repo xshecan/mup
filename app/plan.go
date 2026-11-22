@@ -74,6 +74,12 @@ func buildPlan(appConfig config.App, nonce uint64, resolver routeResolver) (runt
 					destination = path.ReturnIP
 					upReflectMask |= 1 << slot
 				}
+				if path.BridgeReflect() {
+					// A bridge reflect route sends the wrapped packet to the
+					// bridge, so the interface comes from the route to the
+					// bridge, not to the via members.
+					destination = path.ProxyBridge
+				}
 				_, ifindex, err := resolver.Resolve(destination, path.Interface)
 				if err != nil {
 					return runtimePlan{}, fmt.Errorf("resolve client path %d: %w", slot, err)
@@ -178,5 +184,6 @@ func clientPathSettings(path config.Path, advertisedIP netip.Addr, ifindex int, 
 		ReturnIP:      path.ReturnIP,
 		ReturnPrefix:  path.ReturnPrefix,
 		Balance:       path.Balance,
+		ProxyBridge:   path.ProxyBridge,
 	}
 }

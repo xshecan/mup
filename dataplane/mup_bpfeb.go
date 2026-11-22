@@ -117,6 +117,7 @@ type mupPathConfigV1 struct {
 	ServerPort    uint16
 	Transport     uint8
 	Priority      uint8
+	Bridge        uint32
 }
 
 type mupPathGroupV1 struct {

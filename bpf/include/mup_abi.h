@@ -338,6 +338,13 @@ struct path_config_v1 {
 	__be16 server_port;
 	__u8 transport;
 	__u8 priority;
+	/*
+	 * bridge is the address of a bridge that emits the reflected upstream of
+	 * an up reflect route. The client egress wraps the reflected packet for
+	 * the bridge, because the client cannot send the spoofed packet itself.
+	 * It is zero on a route that the client sends itself.
+	 */
+	__be32 bridge;
 };
 
 /*
@@ -428,7 +435,7 @@ _Static_assert(sizeof(struct peer_token_value_v1) == 16, "peer_token_value_v1 AB
 _Static_assert(sizeof(struct peer_endpoint_value_v1) == 24, "peer_endpoint_value_v1 ABI");
 _Static_assert(sizeof(struct server_route_value_v1) == 32, "server_route_value_v1 ABI");
 _Static_assert(sizeof(struct server_reverse_value_v1) == 56, "server_reverse_value_v1 ABI");
-_Static_assert(sizeof(struct path_config_v1) == 16, "path_config_v1 ABI");
+_Static_assert(sizeof(struct path_config_v1) == 20, "path_config_v1 ABI");
 _Static_assert(sizeof(struct path_return_v1) == 8, "path_return_v1 ABI");
 _Static_assert(sizeof(struct up_reflect_v1) == 72, "up_reflect_v1 ABI");
 _Static_assert(sizeof(struct reflector_key_v1) == 8, "reflector_key_v1 ABI");

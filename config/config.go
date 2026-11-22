@@ -343,6 +343,17 @@ func (g Group) validate() error {
 		if path.Bridge && path.ReturnIP.IsValid() {
 			return fmt.Errorf("server %d: upstream route %d: an up bridge has no via, because it passes the client packets on to the server", g.ListenPort, index)
 		}
+		if path.ProxyBridge.IsValid() {
+			if path.Bridge {
+				return fmt.Errorf("server %d: route %d: a route is a bridge or a bridge reflect, not both", g.ListenPort, index)
+			}
+			if !g.Split() {
+				return fmt.Errorf("server %d: route %d: a bridge reflect needs a group with upstream and downstream", g.ListenPort, index)
+			}
+			if !path.ReturnIP.IsValid() {
+				return fmt.Errorf("server %d: route %d: a bridge reflect needs a via, because the bridge emits the reflected upstream", g.ListenPort, index)
+			}
+		}
 	}
 	if g.DownMode > ModeBurst {
 		return fmt.Errorf("server %d: invalid downstream mode %d", g.ListenPort, uint8(g.DownMode))
@@ -378,6 +389,11 @@ type Path struct {
 	ReturnPrefix uint8
 	Balance      Balance
 	Bridge       bool
+	// ProxyBridge is set on an up reflect route that a bridge emits. The client
+	// reflects the upstream to Server through the via, but it cannot send the
+	// spoofed packet, so it wraps the packet for the bridge at ProxyBridge, and
+	// the bridge emits the spoofed packet.
+	ProxyBridge netip.Addr
 }
 
 // Kind names the path type for the status output: "bridge" or "route".
@@ -399,6 +415,12 @@ func (p Path) IsPool() bool {
 // group with down paths.
 func (p Path) UpReflect(split bool) bool {
 	return split && !p.Bridge && p.ReturnIP.IsValid()
+}
+
+// BridgeReflect reports whether an up reflect route emits through a bridge,
+// because the client cannot send the spoofed packet itself.
+func (p Path) BridgeReflect() bool {
+	return p.ProxyBridge.IsValid()
 }
 
 // HasPortRange reports whether the path has more than one server port.
@@ -450,6 +472,9 @@ func (p Path) String() string {
 	} else if p.ReturnIP.IsValid() {
 		text += " via " + p.ReturnIP.String()
 	}
+	if p.ProxyBridge.IsValid() {
+		text += " bridge " + p.ProxyBridge.String()
+	}
 	return text
 }
 
@@ -481,6 +506,9 @@ func (p Path) ValidateDown() error {
 	}
 	if p.HasPortRange() {
 		return errors.New("a down route has one server port")
+	}
+	if p.ProxyBridge.IsValid() {
+		return errors.New("a down route has no bridge reflect, because the server sends the replies")
 	}
 	return nil
 }
@@ -615,8 +643,18 @@ func ParsePath(raw string) (Path, error) {
 	fields := strings.Fields(raw)
 	var returnIP netip.Addr
 	var returnPrefix uint8
+	var proxyBridge netip.Addr
 	balance := BalancePerPeer
 	usage := errors.New("path must use IPv4:PORT/udp or /icmp, with an optional via RETURN_IP, or via POOL_CIDR balance MODE")
+	// A trailing "bridge BRIDGE" names a bridge that emits the reflected upstream.
+	if n := len(fields); n >= 2 && fields[n-2] == "bridge" {
+		address, err := netip.ParseAddr(fields[n-1])
+		if err != nil || !isNonzeroIPv4(address) {
+			return Path{}, errors.New("bridge address must be a nonzero IPv4 address")
+		}
+		proxyBridge = address
+		fields = fields[:n-2]
+	}
 	switch {
 	case len(fields) == 1:
 	case (len(fields) == 3 || len(fields) == 5) && fields[1] == "via":
@@ -684,7 +722,7 @@ func ParsePath(raw string) (Path, error) {
 	if err != nil {
 		return Path{}, errors.New("server path address must be a nonzero IPv4")
 	}
-	path := Path{Server: address, ServerPort: serverPort, LastPort: lastPort, Transport: transportID, Interface: interfaceName, ReturnIP: returnIP, ReturnPrefix: returnPrefix, Balance: balance}
+	path := Path{Server: address, ServerPort: serverPort, LastPort: lastPort, Transport: transportID, Interface: interfaceName, ReturnIP: returnIP, ReturnPrefix: returnPrefix, Balance: balance, ProxyBridge: proxyBridge}
 	if err := path.validate(); err != nil {
 		return Path{}, err
 	}
