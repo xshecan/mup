@@ -511,7 +511,9 @@ At start, the loader does these steps in order:
 6. It deletes the groups that are not in the configuration, and it writes the configuration of the role.
 7. It replaces the program in each pinned link, or it attaches and pins a new link.
 
-Before step 1, the loader removes the pin of a map whose layout changed in this version. It does this only for the maps of counters and of state that the daemon or its clients write again soon after a start. v0.4.0 grew `stats`, `event_limits`, and `server_down_paths`. The program that is still attached keeps its old map until step 7 replaces it.
+Before step 1, the loader removes the pin of a map whose layout changed in this version. It does this only for the maps of counters and of state that the daemon or its clients write again soon after a start. v0.4.0 grew `stats`, `event_limits`, and `server_down_paths`, and v0.4.1 grew `path_config`. The client writes every slot of `path_config` at each start, so it loses no state. The program that is still attached keeps its old map until step 7 replaces it.
+
+Every other pinned map must keep its layout, because the BPF library refuses a pin with another layout, and the start fails. v0.4.1 grew `path_config` without this step, so v0.4.1 does not start over the pins of an earlier version. The test `TestChangedPinsAreRebuilt` compares the maps with the layouts of each release in `dataplane/testdata/released_maps.json`. After a new tag, add its layouts with `go test ./dataplane -run TestChangedPinsAreRebuilt -record-release vX.Y.Z`.
 
 A lost token or port is not free, not in a route, and not in quarantine. A crash between a pop and a route insert can lose one. Step 7 keeps forwarding active during a restart.
 

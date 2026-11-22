@@ -1,0 +1,1572 @@
+{
+  "v0.3.0": {
+    "client_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 1,
+      "flags": 0
+    },
+    "client_endpoint_by_token": {
+      "type": 1,
+      "key": 4,
+      "value": 24,
+      "entries": 4096,
+      "flags": 0
+    },
+    "client_peer_by_endpoint": {
+      "type": 1,
+      "key": 12,
+      "value": 16,
+      "entries": 4096,
+      "flags": 0
+    },
+    "client_routes_by_source": {
+      "type": 1,
+      "key": 4,
+      "value": 4,
+      "entries": 4096,
+      "flags": 0
+    },
+    "duplicate_cache": {
+      "type": 9,
+      "key": 48,
+      "value": 8,
+      "entries": 16384,
+      "flags": 0
+    },
+    "encap_programs": {
+      "type": 3,
+      "key": 4,
+      "value": 4,
+      "entries": 3,
+      "flags": 0
+    },
+    "event_limits": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 23,
+      "flags": 0
+    },
+    "events": {
+      "type": 27,
+      "key": 0,
+      "value": 0,
+      "entries": 262144,
+      "flags": 0
+    },
+    "free_peer_tokens": {
+      "type": 22,
+      "key": 0,
+      "value": 4,
+      "entries": 4095,
+      "flags": 0
+    },
+    "free_target_ports": {
+      "type": 22,
+      "key": 0,
+      "value": 2,
+      "entries": 41000,
+      "flags": 0
+    },
+    "path_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_groups": {
+      "type": 1,
+      "key": 2,
+      "value": 8,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_returns": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_state": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 1,
+      "flags": 0
+    },
+    "reflector_cursor": {
+      "type": 6,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "reflector_pools": {
+      "type": 1,
+      "key": 8,
+      "value": 80,
+      "entries": 256,
+      "flags": 0
+    },
+    "registered_paths": {
+      "type": 1,
+      "key": 12,
+      "value": 32,
+      "entries": 32768,
+      "flags": 0
+    },
+    "registration_by_key": {
+      "type": 1,
+      "key": 16,
+      "value": 16,
+      "entries": 4096,
+      "flags": 0
+    },
+    "server_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 1,
+      "flags": 0
+    },
+    "server_ports": {
+      "type": 2,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "server_route_by_key": {
+      "type": 1,
+      "key": 24,
+      "value": 32,
+      "entries": 41000,
+      "flags": 0
+    },
+    "server_route_by_port": {
+      "type": 1,
+      "key": 2,
+      "value": 56,
+      "entries": 41000,
+      "flags": 0
+    },
+    "stats": {
+      "type": 6,
+      "key": 4,
+      "value": 8,
+      "entries": 23,
+      "flags": 0
+    },
+    "target_ingress": {
+      "type": 2,
+      "key": 4,
+      "value": 12,
+      "entries": 1,
+      "flags": 0
+    }
+  },
+  "v0.3.1": {
+    "client_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 1,
+      "flags": 0
+    },
+    "client_endpoint_by_token": {
+      "type": 1,
+      "key": 4,
+      "value": 24,
+      "entries": 4096,
+      "flags": 0
+    },
+    "client_peer_by_endpoint": {
+      "type": 1,
+      "key": 12,
+      "value": 16,
+      "entries": 4096,
+      "flags": 0
+    },
+    "client_routes_by_source": {
+      "type": 1,
+      "key": 4,
+      "value": 4,
+      "entries": 4096,
+      "flags": 0
+    },
+    "duplicate_cache": {
+      "type": 9,
+      "key": 48,
+      "value": 8,
+      "entries": 16384,
+      "flags": 0
+    },
+    "encap_programs": {
+      "type": 3,
+      "key": 4,
+      "value": 4,
+      "entries": 3,
+      "flags": 0
+    },
+    "event_limits": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 23,
+      "flags": 0
+    },
+    "events": {
+      "type": 27,
+      "key": 0,
+      "value": 0,
+      "entries": 262144,
+      "flags": 0
+    },
+    "free_peer_tokens": {
+      "type": 22,
+      "key": 0,
+      "value": 4,
+      "entries": 4095,
+      "flags": 0
+    },
+    "free_target_ports": {
+      "type": 22,
+      "key": 0,
+      "value": 2,
+      "entries": 41000,
+      "flags": 0
+    },
+    "path_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_groups": {
+      "type": 1,
+      "key": 2,
+      "value": 8,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_returns": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_state": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 1,
+      "flags": 0
+    },
+    "reflector_cursor": {
+      "type": 6,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "reflector_pools": {
+      "type": 1,
+      "key": 8,
+      "value": 80,
+      "entries": 256,
+      "flags": 0
+    },
+    "registered_paths": {
+      "type": 1,
+      "key": 12,
+      "value": 32,
+      "entries": 32768,
+      "flags": 0
+    },
+    "registration_by_key": {
+      "type": 1,
+      "key": 16,
+      "value": 16,
+      "entries": 4096,
+      "flags": 0
+    },
+    "server_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 1,
+      "flags": 0
+    },
+    "server_ports": {
+      "type": 2,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "server_route_by_key": {
+      "type": 1,
+      "key": 24,
+      "value": 32,
+      "entries": 41000,
+      "flags": 0
+    },
+    "server_route_by_port": {
+      "type": 1,
+      "key": 2,
+      "value": 56,
+      "entries": 41000,
+      "flags": 0
+    },
+    "stats": {
+      "type": 6,
+      "key": 4,
+      "value": 8,
+      "entries": 23,
+      "flags": 0
+    },
+    "target_ingress": {
+      "type": 2,
+      "key": 4,
+      "value": 12,
+      "entries": 1,
+      "flags": 0
+    }
+  },
+  "v0.3.2": {
+    "client_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 1,
+      "flags": 0
+    },
+    "client_endpoint_by_token": {
+      "type": 1,
+      "key": 4,
+      "value": 24,
+      "entries": 4096,
+      "flags": 0
+    },
+    "client_peer_by_endpoint": {
+      "type": 1,
+      "key": 12,
+      "value": 16,
+      "entries": 4096,
+      "flags": 0
+    },
+    "client_routes_by_source": {
+      "type": 1,
+      "key": 4,
+      "value": 4,
+      "entries": 4096,
+      "flags": 0
+    },
+    "duplicate_cache": {
+      "type": 9,
+      "key": 48,
+      "value": 8,
+      "entries": 16384,
+      "flags": 0
+    },
+    "encap_programs": {
+      "type": 3,
+      "key": 4,
+      "value": 4,
+      "entries": 3,
+      "flags": 0
+    },
+    "event_limits": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 23,
+      "flags": 0
+    },
+    "events": {
+      "type": 27,
+      "key": 0,
+      "value": 0,
+      "entries": 262144,
+      "flags": 0
+    },
+    "free_peer_tokens": {
+      "type": 22,
+      "key": 0,
+      "value": 4,
+      "entries": 4095,
+      "flags": 0
+    },
+    "free_target_ports": {
+      "type": 22,
+      "key": 0,
+      "value": 2,
+      "entries": 41000,
+      "flags": 0
+    },
+    "path_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_groups": {
+      "type": 1,
+      "key": 2,
+      "value": 8,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_returns": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_state": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 1,
+      "flags": 0
+    },
+    "reflector_cursor": {
+      "type": 6,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "reflector_pools": {
+      "type": 1,
+      "key": 8,
+      "value": 80,
+      "entries": 256,
+      "flags": 0
+    },
+    "registered_paths": {
+      "type": 1,
+      "key": 12,
+      "value": 32,
+      "entries": 32768,
+      "flags": 0
+    },
+    "registration_by_key": {
+      "type": 1,
+      "key": 16,
+      "value": 16,
+      "entries": 4096,
+      "flags": 0
+    },
+    "server_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 1,
+      "flags": 0
+    },
+    "server_ports": {
+      "type": 2,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "server_route_by_key": {
+      "type": 1,
+      "key": 24,
+      "value": 32,
+      "entries": 41000,
+      "flags": 0
+    },
+    "server_route_by_port": {
+      "type": 1,
+      "key": 2,
+      "value": 56,
+      "entries": 41000,
+      "flags": 0
+    },
+    "stats": {
+      "type": 6,
+      "key": 4,
+      "value": 8,
+      "entries": 23,
+      "flags": 0
+    },
+    "target_ingress": {
+      "type": 2,
+      "key": 4,
+      "value": 12,
+      "entries": 1,
+      "flags": 0
+    }
+  },
+  "v0.3.3": {
+    "client_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 1,
+      "flags": 0
+    },
+    "client_endpoint_by_token": {
+      "type": 1,
+      "key": 4,
+      "value": 24,
+      "entries": 4096,
+      "flags": 0
+    },
+    "client_peer_by_endpoint": {
+      "type": 1,
+      "key": 12,
+      "value": 16,
+      "entries": 4096,
+      "flags": 0
+    },
+    "client_routes_by_source": {
+      "type": 1,
+      "key": 4,
+      "value": 4,
+      "entries": 4096,
+      "flags": 0
+    },
+    "duplicate_cache": {
+      "type": 9,
+      "key": 48,
+      "value": 8,
+      "entries": 16384,
+      "flags": 0
+    },
+    "encap_programs": {
+      "type": 3,
+      "key": 4,
+      "value": 4,
+      "entries": 3,
+      "flags": 0
+    },
+    "event_limits": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 23,
+      "flags": 0
+    },
+    "events": {
+      "type": 27,
+      "key": 0,
+      "value": 0,
+      "entries": 262144,
+      "flags": 0
+    },
+    "free_peer_tokens": {
+      "type": 22,
+      "key": 0,
+      "value": 4,
+      "entries": 4095,
+      "flags": 0
+    },
+    "free_target_ports": {
+      "type": 22,
+      "key": 0,
+      "value": 2,
+      "entries": 41000,
+      "flags": 0
+    },
+    "path_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_groups": {
+      "type": 1,
+      "key": 2,
+      "value": 8,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_returns": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_state": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 1,
+      "flags": 0
+    },
+    "reflector_cursor": {
+      "type": 6,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "reflector_pools": {
+      "type": 1,
+      "key": 8,
+      "value": 80,
+      "entries": 256,
+      "flags": 0
+    },
+    "registered_paths": {
+      "type": 1,
+      "key": 12,
+      "value": 32,
+      "entries": 32768,
+      "flags": 0
+    },
+    "registration_by_key": {
+      "type": 1,
+      "key": 16,
+      "value": 16,
+      "entries": 4096,
+      "flags": 0
+    },
+    "server_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 1,
+      "flags": 0
+    },
+    "server_ports": {
+      "type": 2,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "server_route_by_key": {
+      "type": 1,
+      "key": 24,
+      "value": 32,
+      "entries": 41000,
+      "flags": 0
+    },
+    "server_route_by_port": {
+      "type": 1,
+      "key": 2,
+      "value": 56,
+      "entries": 41000,
+      "flags": 0
+    },
+    "stats": {
+      "type": 6,
+      "key": 4,
+      "value": 8,
+      "entries": 23,
+      "flags": 0
+    },
+    "target_ingress": {
+      "type": 2,
+      "key": 4,
+      "value": 12,
+      "entries": 1,
+      "flags": 0
+    }
+  },
+  "v0.3.4": {
+    "client_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 1,
+      "flags": 0
+    },
+    "client_endpoint_by_token": {
+      "type": 1,
+      "key": 4,
+      "value": 24,
+      "entries": 4096,
+      "flags": 0
+    },
+    "client_peer_by_endpoint": {
+      "type": 1,
+      "key": 12,
+      "value": 16,
+      "entries": 4096,
+      "flags": 0
+    },
+    "client_routes_by_source": {
+      "type": 1,
+      "key": 4,
+      "value": 4,
+      "entries": 4096,
+      "flags": 0
+    },
+    "duplicate_cache": {
+      "type": 9,
+      "key": 48,
+      "value": 8,
+      "entries": 16384,
+      "flags": 0
+    },
+    "encap_programs": {
+      "type": 3,
+      "key": 4,
+      "value": 4,
+      "entries": 3,
+      "flags": 0
+    },
+    "event_limits": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 23,
+      "flags": 0
+    },
+    "events": {
+      "type": 27,
+      "key": 0,
+      "value": 0,
+      "entries": 262144,
+      "flags": 0
+    },
+    "free_peer_tokens": {
+      "type": 22,
+      "key": 0,
+      "value": 4,
+      "entries": 4095,
+      "flags": 0
+    },
+    "free_target_ports": {
+      "type": 22,
+      "key": 0,
+      "value": 2,
+      "entries": 41000,
+      "flags": 0
+    },
+    "path_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_groups": {
+      "type": 1,
+      "key": 2,
+      "value": 8,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_returns": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_state": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 1,
+      "flags": 0
+    },
+    "reflector_cursor": {
+      "type": 6,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "reflector_pools": {
+      "type": 1,
+      "key": 8,
+      "value": 80,
+      "entries": 256,
+      "flags": 0
+    },
+    "registered_paths": {
+      "type": 1,
+      "key": 12,
+      "value": 32,
+      "entries": 32768,
+      "flags": 0
+    },
+    "registration_by_key": {
+      "type": 1,
+      "key": 16,
+      "value": 16,
+      "entries": 4096,
+      "flags": 0
+    },
+    "server_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 1,
+      "flags": 0
+    },
+    "server_ports": {
+      "type": 2,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "server_route_by_key": {
+      "type": 1,
+      "key": 24,
+      "value": 32,
+      "entries": 41000,
+      "flags": 0
+    },
+    "server_route_by_port": {
+      "type": 1,
+      "key": 2,
+      "value": 56,
+      "entries": 41000,
+      "flags": 0
+    },
+    "stats": {
+      "type": 6,
+      "key": 4,
+      "value": 8,
+      "entries": 23,
+      "flags": 0
+    },
+    "target_ingress": {
+      "type": 2,
+      "key": 4,
+      "value": 12,
+      "entries": 1,
+      "flags": 0
+    }
+  },
+  "v0.4.0": {
+    "bridge_addresses": {
+      "type": 1,
+      "key": 4,
+      "value": 1,
+      "entries": 64,
+      "flags": 0
+    },
+    "bridge_allow": {
+      "type": 11,
+      "key": 8,
+      "value": 1,
+      "entries": 64,
+      "flags": 1
+    },
+    "bridge_config": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 1,
+      "flags": 0
+    },
+    "bridge_counters": {
+      "type": 6,
+      "key": 4,
+      "value": 8,
+      "entries": 4,
+      "flags": 0
+    },
+    "client_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 1,
+      "flags": 0
+    },
+    "client_down_paths": {
+      "type": 2,
+      "key": 4,
+      "value": 24,
+      "entries": 8,
+      "flags": 0
+    },
+    "client_duplicate_cache": {
+      "type": 9,
+      "key": 28,
+      "value": 8,
+      "entries": 16384,
+      "flags": 0
+    },
+    "client_endpoint_by_token": {
+      "type": 1,
+      "key": 4,
+      "value": 24,
+      "entries": 4096,
+      "flags": 0
+    },
+    "client_peer_by_endpoint": {
+      "type": 1,
+      "key": 12,
+      "value": 16,
+      "entries": 4096,
+      "flags": 0
+    },
+    "client_routes_by_source": {
+      "type": 1,
+      "key": 4,
+      "value": 4,
+      "entries": 4096,
+      "flags": 0
+    },
+    "duplicate_cache": {
+      "type": 9,
+      "key": 48,
+      "value": 8,
+      "entries": 16384,
+      "flags": 0
+    },
+    "encap_programs": {
+      "type": 3,
+      "key": 4,
+      "value": 4,
+      "entries": 3,
+      "flags": 0
+    },
+    "event_limits": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 26,
+      "flags": 0
+    },
+    "events": {
+      "type": 27,
+      "key": 0,
+      "value": 0,
+      "entries": 262144,
+      "flags": 0
+    },
+    "free_peer_tokens": {
+      "type": 22,
+      "key": 0,
+      "value": 4,
+      "entries": 4095,
+      "flags": 0
+    },
+    "free_target_ports": {
+      "type": 22,
+      "key": 0,
+      "value": 2,
+      "entries": 41000,
+      "flags": 0
+    },
+    "path_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_groups": {
+      "type": 1,
+      "key": 2,
+      "value": 8,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_returns": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_state": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 1,
+      "flags": 0
+    },
+    "reflector_cursor": {
+      "type": 6,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "reflector_pools": {
+      "type": 1,
+      "key": 8,
+      "value": 80,
+      "entries": 256,
+      "flags": 0
+    },
+    "registered_paths": {
+      "type": 1,
+      "key": 12,
+      "value": 32,
+      "entries": 32768,
+      "flags": 0
+    },
+    "registration_by_key": {
+      "type": 1,
+      "key": 16,
+      "value": 16,
+      "entries": 4096,
+      "flags": 0
+    },
+    "server_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 1,
+      "flags": 0
+    },
+    "server_down_groups": {
+      "type": 1,
+      "key": 16,
+      "value": 8,
+      "entries": 4096,
+      "flags": 0
+    },
+    "server_down_paths": {
+      "type": 1,
+      "key": 24,
+      "value": 88,
+      "entries": 32768,
+      "flags": 0
+    },
+    "server_ports": {
+      "type": 2,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "server_route_by_key": {
+      "type": 1,
+      "key": 24,
+      "value": 32,
+      "entries": 41000,
+      "flags": 0
+    },
+    "server_route_by_port": {
+      "type": 1,
+      "key": 2,
+      "value": 56,
+      "entries": 41000,
+      "flags": 0
+    },
+    "stats": {
+      "type": 6,
+      "key": 4,
+      "value": 8,
+      "entries": 26,
+      "flags": 0
+    },
+    "target_ingress": {
+      "type": 2,
+      "key": 4,
+      "value": 12,
+      "entries": 1,
+      "flags": 0
+    },
+    "up_reflect_cursor": {
+      "type": 6,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "up_reflect_members": {
+      "type": 2,
+      "key": 4,
+      "value": 72,
+      "entries": 8,
+      "flags": 0
+    }
+  },
+  "v0.4.1": {
+    "bridge_addresses": {
+      "type": 1,
+      "key": 4,
+      "value": 1,
+      "entries": 64,
+      "flags": 0
+    },
+    "bridge_allow": {
+      "type": 11,
+      "key": 8,
+      "value": 1,
+      "entries": 64,
+      "flags": 1
+    },
+    "bridge_config": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 1,
+      "flags": 0
+    },
+    "bridge_counters": {
+      "type": 6,
+      "key": 4,
+      "value": 8,
+      "entries": 4,
+      "flags": 0
+    },
+    "client_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 1,
+      "flags": 0
+    },
+    "client_down_paths": {
+      "type": 2,
+      "key": 4,
+      "value": 24,
+      "entries": 8,
+      "flags": 0
+    },
+    "client_duplicate_cache": {
+      "type": 9,
+      "key": 28,
+      "value": 8,
+      "entries": 16384,
+      "flags": 0
+    },
+    "client_endpoint_by_token": {
+      "type": 1,
+      "key": 4,
+      "value": 24,
+      "entries": 4096,
+      "flags": 0
+    },
+    "client_peer_by_endpoint": {
+      "type": 1,
+      "key": 12,
+      "value": 16,
+      "entries": 4096,
+      "flags": 0
+    },
+    "client_routes_by_source": {
+      "type": 1,
+      "key": 4,
+      "value": 4,
+      "entries": 4096,
+      "flags": 0
+    },
+    "duplicate_cache": {
+      "type": 9,
+      "key": 48,
+      "value": 8,
+      "entries": 16384,
+      "flags": 0
+    },
+    "encap_programs": {
+      "type": 3,
+      "key": 4,
+      "value": 4,
+      "entries": 3,
+      "flags": 0
+    },
+    "event_limits": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 26,
+      "flags": 0
+    },
+    "events": {
+      "type": 27,
+      "key": 0,
+      "value": 0,
+      "entries": 262144,
+      "flags": 0
+    },
+    "free_peer_tokens": {
+      "type": 22,
+      "key": 0,
+      "value": 4,
+      "entries": 4095,
+      "flags": 0
+    },
+    "free_target_ports": {
+      "type": 22,
+      "key": 0,
+      "value": 2,
+      "entries": 41000,
+      "flags": 0
+    },
+    "path_config": {
+      "type": 2,
+      "key": 4,
+      "value": 20,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_groups": {
+      "type": 1,
+      "key": 2,
+      "value": 8,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_returns": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_state": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 1,
+      "flags": 0
+    },
+    "reflector_cursor": {
+      "type": 6,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "reflector_pools": {
+      "type": 1,
+      "key": 8,
+      "value": 80,
+      "entries": 256,
+      "flags": 0
+    },
+    "registered_paths": {
+      "type": 1,
+      "key": 12,
+      "value": 32,
+      "entries": 32768,
+      "flags": 0
+    },
+    "registration_by_key": {
+      "type": 1,
+      "key": 16,
+      "value": 16,
+      "entries": 4096,
+      "flags": 0
+    },
+    "server_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 1,
+      "flags": 0
+    },
+    "server_down_groups": {
+      "type": 1,
+      "key": 16,
+      "value": 8,
+      "entries": 4096,
+      "flags": 0
+    },
+    "server_down_paths": {
+      "type": 1,
+      "key": 24,
+      "value": 88,
+      "entries": 32768,
+      "flags": 0
+    },
+    "server_ports": {
+      "type": 2,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "server_route_by_key": {
+      "type": 1,
+      "key": 24,
+      "value": 32,
+      "entries": 41000,
+      "flags": 0
+    },
+    "server_route_by_port": {
+      "type": 1,
+      "key": 2,
+      "value": 56,
+      "entries": 41000,
+      "flags": 0
+    },
+    "stats": {
+      "type": 6,
+      "key": 4,
+      "value": 8,
+      "entries": 26,
+      "flags": 0
+    },
+    "target_ingress": {
+      "type": 2,
+      "key": 4,
+      "value": 12,
+      "entries": 1,
+      "flags": 0
+    },
+    "up_reflect_cursor": {
+      "type": 6,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "up_reflect_members": {
+      "type": 2,
+      "key": 4,
+      "value": 72,
+      "entries": 8,
+      "flags": 0
+    }
+  },
+  "v0.4.2": {
+    "bridge_addresses": {
+      "type": 1,
+      "key": 4,
+      "value": 1,
+      "entries": 64,
+      "flags": 0
+    },
+    "bridge_allow": {
+      "type": 11,
+      "key": 8,
+      "value": 1,
+      "entries": 64,
+      "flags": 1
+    },
+    "bridge_config": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 1,
+      "flags": 0
+    },
+    "bridge_counters": {
+      "type": 6,
+      "key": 4,
+      "value": 8,
+      "entries": 4,
+      "flags": 0
+    },
+    "client_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 1,
+      "flags": 0
+    },
+    "client_down_paths": {
+      "type": 2,
+      "key": 4,
+      "value": 24,
+      "entries": 8,
+      "flags": 0
+    },
+    "client_duplicate_cache": {
+      "type": 9,
+      "key": 28,
+      "value": 8,
+      "entries": 16384,
+      "flags": 0
+    },
+    "client_endpoint_by_token": {
+      "type": 1,
+      "key": 4,
+      "value": 24,
+      "entries": 4096,
+      "flags": 0
+    },
+    "client_peer_by_endpoint": {
+      "type": 1,
+      "key": 12,
+      "value": 16,
+      "entries": 4096,
+      "flags": 0
+    },
+    "client_routes_by_source": {
+      "type": 1,
+      "key": 4,
+      "value": 4,
+      "entries": 4096,
+      "flags": 0
+    },
+    "duplicate_cache": {
+      "type": 9,
+      "key": 48,
+      "value": 8,
+      "entries": 16384,
+      "flags": 0
+    },
+    "encap_programs": {
+      "type": 3,
+      "key": 4,
+      "value": 4,
+      "entries": 3,
+      "flags": 0
+    },
+    "event_limits": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 26,
+      "flags": 0
+    },
+    "events": {
+      "type": 27,
+      "key": 0,
+      "value": 0,
+      "entries": 262144,
+      "flags": 0
+    },
+    "free_peer_tokens": {
+      "type": 22,
+      "key": 0,
+      "value": 4,
+      "entries": 4095,
+      "flags": 0
+    },
+    "free_target_ports": {
+      "type": 22,
+      "key": 0,
+      "value": 2,
+      "entries": 41000,
+      "flags": 0
+    },
+    "path_config": {
+      "type": 2,
+      "key": 4,
+      "value": 20,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_groups": {
+      "type": 1,
+      "key": 2,
+      "value": 8,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_returns": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 8,
+      "flags": 0
+    },
+    "path_state": {
+      "type": 2,
+      "key": 4,
+      "value": 8,
+      "entries": 1,
+      "flags": 0
+    },
+    "reflector_cursor": {
+      "type": 6,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "reflector_pools": {
+      "type": 1,
+      "key": 8,
+      "value": 80,
+      "entries": 256,
+      "flags": 0
+    },
+    "registered_paths": {
+      "type": 1,
+      "key": 12,
+      "value": 32,
+      "entries": 32768,
+      "flags": 0
+    },
+    "registration_by_key": {
+      "type": 1,
+      "key": 16,
+      "value": 16,
+      "entries": 4096,
+      "flags": 0
+    },
+    "server_config": {
+      "type": 2,
+      "key": 4,
+      "value": 16,
+      "entries": 1,
+      "flags": 0
+    },
+    "server_down_groups": {
+      "type": 1,
+      "key": 16,
+      "value": 8,
+      "entries": 4096,
+      "flags": 0
+    },
+    "server_down_paths": {
+      "type": 1,
+      "key": 24,
+      "value": 88,
+      "entries": 32768,
+      "flags": 0
+    },
+    "server_ports": {
+      "type": 2,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "server_route_by_key": {
+      "type": 1,
+      "key": 24,
+      "value": 32,
+      "entries": 41000,
+      "flags": 0
+    },
+    "server_route_by_port": {
+      "type": 1,
+      "key": 2,
+      "value": 56,
+      "entries": 41000,
+      "flags": 0
+    },
+    "stats": {
+      "type": 6,
+      "key": 4,
+      "value": 8,
+      "entries": 26,
+      "flags": 0
+    },
+    "target_ingress": {
+      "type": 2,
+      "key": 4,
+      "value": 12,
+      "entries": 1,
+      "flags": 0
+    },
+    "up_reflect_cursor": {
+      "type": 6,
+      "key": 4,
+      "value": 4,
+      "entries": 1,
+      "flags": 0
+    },
+    "up_reflect_members": {
+      "type": 2,
+      "key": 4,
+      "value": 72,
+      "entries": 8,
+      "flags": 0
+    }
+  }
+}

@@ -107,14 +107,6 @@ func Load(cfg Config) (runtime *Runtime, err error) {
 	return runtime, nil
 }
 
-// rebuiltPins are the maps whose content the daemon can lose: counters, and
-// state that the daemon or its clients write again soon after a start. v0.4.0
-// grew the drop counters and the down path entries.
-var rebuiltPins = []string{
-	"stats", "event_limits", "server_down_groups", "server_down_paths",
-	"bridge_config", "bridge_addresses", "bridge_allow", "bridge_counters",
-}
-
 // removeChangedPins removes the pin of a rebuilt map whose layout changed in
 // this version, so the new program gets an empty map. A program that is still
 // attached keeps its old map until the new program replaces it.
