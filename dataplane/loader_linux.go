@@ -3,12 +3,16 @@
 package dataplane
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +50,9 @@ func Load(cfg Config) (runtime *Runtime, err error) {
 	}
 	if err := os.MkdirAll(cfg.PinRoot, 0o755); err != nil {
 		return nil, fmt.Errorf("create BPF pin root: %w", err)
+	}
+	if err := reconcilePinGeneration(cfg.PinRoot); err != nil {
+		return nil, err
 	}
 	peerPoolIsNew, err := pinDoesNotExist(filepath.Join(cfg.PinRoot, "free_peer_tokens"))
 	if err != nil {
@@ -140,6 +147,57 @@ func removeChangedPins(pinRoot string) error {
 		}
 	}
 	return nil
+}
+
+// reconcilePinGeneration removes every pin when the daemon build that wrote
+// them differs from this one. removeChangedPins rebuilds only the maps whose
+// layout changed, so a map that keeps its layout but holds stale state survives
+// an upgrade and can carry wrong state into the new build. A marker directory
+// names the build that owns the pins. The same build keeps its pins, so a
+// restart of the same version does not disturb the running tunnels. A different
+// build, or a pin root that no build has marked, starts over with empty maps.
+func reconcilePinGeneration(pinRoot string) error {
+	marker := "generation-" + pinGeneration()
+	entries, err := os.ReadDir(pinRoot)
+	if err != nil {
+		return fmt.Errorf("list pin root: %w", err)
+	}
+	current, stale := false, false
+	for _, entry := range entries {
+		switch {
+		case entry.Name() == marker:
+			current = true
+		case strings.HasPrefix(entry.Name(), "generation-"):
+			stale = true
+		}
+	}
+	if current && !stale {
+		return nil
+	}
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(pinRoot, entry.Name())); err != nil {
+			return fmt.Errorf("remove pin %s of an old build: %w", entry.Name(), err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(pinRoot, marker), 0o755); err != nil {
+		return fmt.Errorf("mark the pin generation: %w", err)
+	}
+	return nil
+}
+
+// pinGeneration identifies the build of the data plane. It changes when the
+// compiled BPF object changes, and when the module version changes, so an
+// upgrade that keeps the same object still writes a new value. When mup runs
+// inside another program, the version is that program's version, which also
+// changes when it takes a new mup.
+func pinGeneration() string {
+	digest := sha256.New()
+	digest.Write(_MupBytes)
+	digest.Write([]byte{0})
+	if info, ok := debug.ReadBuildInfo(); ok {
+		digest.Write([]byte(info.Main.Version))
+	}
+	return hex.EncodeToString(digest.Sum(nil)[:8])
 }
 
 func pinDoesNotExist(path string) (bool, error) {
