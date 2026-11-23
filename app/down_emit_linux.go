@@ -13,28 +13,28 @@ import (
 	"github.com/xshecan/mup/protocol"
 )
 
-// rawDownSender sends control frames on down paths from a raw socket. The
+// rawEgressSender sends control frames on egress paths from a raw socket. The
 // source is the server address of a direct path, the reflector of a UDP path
 // with a return IP or pool, and the client of an ICMP path that reflects.
-type rawDownSender struct {
+type rawEgressSender struct {
 	fd int
 }
 
-func openDownSender() (*rawDownSender, error) {
+func openEgressSender() (*rawEgressSender, error) {
 	fd, err := openSpoofSocket()
 	if err != nil {
 		return nil, err
 	}
-	return &rawDownSender{fd: fd}, nil
+	return &rawEgressSender{fd: fd}, nil
 }
 
-func (s *rawDownSender) Close() error {
+func (s *rawEgressSender) Close() error {
 	return unix.Close(s.fd)
 }
 
-func (s *rawDownSender) send(target downTarget, frame []byte, sequence uint16) error {
-	packet, destination := downPacket(target, frame, sequence)
-	// A down path through a bridge sends the packet in the bridge wrapper,
+func (s *rawEgressSender) send(target egressTarget, frame []byte, sequence uint16) error {
+	packet, destination := egressPacket(target, frame, sequence)
+	// An egress path through a bridge sends the packet in the bridge wrapper,
 	// as the server program does.
 	if target.bridge {
 		packet = protocol.WrapForBridge(packet, target.localIP, target.server, target.port)
@@ -45,9 +45,9 @@ func (s *rawDownSender) send(target downTarget, frame []byte, sequence uint16) e
 	return unix.Sendto(s.fd, packet, 0, &address)
 }
 
-// downPacket builds the IPv4 packet of a frame on a down path, and returns its
+// egressPacket builds the IPv4 packet of a frame on an egress path, and returns its
 // destination.
-func downPacket(target downTarget, frame []byte, sequence uint16) ([]byte, netip.Addr) {
+func egressPacket(target egressTarget, frame []byte, sequence uint16) ([]byte, netip.Addr) {
 	client := target.client.AdvertisedIP
 	switch {
 	case target.transport == protocol.TransportUDP:
@@ -82,13 +82,13 @@ func buildIPv4ICMP(source, destination netip.Addr, message []byte) []byte {
 	return packet
 }
 
-// locateDownInterface finds the interface of a down path: the interface that
+// locateEgressInterface finds the interface of an egress path: the interface that
 // holds its server address. An address on a loopback or a tunnel interface
 // sends through the route to the destination.
-func locateDownInterface(server, destination netip.Addr) (int, error) {
+func locateEgressInterface(server, destination netip.Addr) (int, error) {
 	networkInterface, err := interfaceForAddress(server)
 	if err != nil {
-		return 0, fmt.Errorf("%w: %s", errDownNotLocal, server)
+		return 0, fmt.Errorf("%w: %s", errEgressNotLocal, server)
 	}
 	if networkInterface.Flags&net.FlagLoopback == 0 && hasEthernetHeader(networkInterface.Name) {
 		return networkInterface.Index, nil

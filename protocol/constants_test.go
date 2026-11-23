@@ -28,7 +28,7 @@ func TestDropReasonABI(t *testing.T) {
 		DropTailCall,
 		DropChecksum,
 		DropSourceLimit,
-		DropDownstreamSource,
+		DropEgressSource,
 	}
 	for number, reason := range want {
 		if got := uint32(reason); got != uint32(number) {
@@ -40,8 +40,8 @@ func TestDropReasonABI(t *testing.T) {
 func TestDropReasonNamesMatchTheABI(t *testing.T) {
 	t.Parallel()
 
-	if got := DropDownstreamSource.String(); got != "DOWNSTREAM_SOURCE" {
-		t.Fatalf("DropDownstreamSource = %q", got)
+	if got := DropEgressSource.String(); got != "EGRESS_SOURCE" {
+		t.Fatalf("DropEgressSource = %q", got)
 	}
 	if got := DropNoPath.String(); got != "NO_PATH" {
 		t.Fatalf("DropNoPath = %q", got)
@@ -49,7 +49,7 @@ func TestDropReasonNamesMatchTheABI(t *testing.T) {
 	if got := DropReason(99).String(); got != "REASON_99" {
 		t.Fatalf("unknown reason = %q", got)
 	}
-	for reason := DropNone; reason <= DropDownstreamSource; reason++ {
+	for reason := DropNone; reason <= DropEgressSource; reason++ {
 		if reason.String() == "" {
 			t.Fatalf("reason %d has no name", reason)
 		}

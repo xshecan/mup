@@ -351,7 +351,7 @@ func TestPrivilegedPingPassesThePrograms(t *testing.T) {
 }
 
 // TestPrivilegedReturnPool drives a UDP return pool end to end. The server
-// reflects the downstream with a source from the pool, and the client must
+// reflects the egress with a source from the pool, and the client must
 // accept any source in the pool range. A successful exchange proves the pool.
 func TestPrivilegedReturnPool(t *testing.T) {
 	requirePrivilegedLinux(t)
@@ -426,8 +426,8 @@ func TestPrivilegedReturnPool(t *testing.T) {
 			if err != nil {
 				t.Fatalf("client status: %v\n%s", err, logs())
 			}
-			if refused := dropCount(status.Drops, "DOWNSTREAM_SOURCE"); refused != 0 {
-				t.Fatalf("client refused %d pool-source downstream packets\n%s\n%s", refused, dropText(t, clientAPI), logs())
+			if refused := dropCount(status.Drops, "EGRESS_SOURCE"); refused != 0 {
+				t.Fatalf("client refused %d pool-source egress packets\n%s\n%s", refused, dropText(t, clientAPI), logs())
 			}
 		})
 	}

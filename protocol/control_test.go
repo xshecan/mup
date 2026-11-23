@@ -43,13 +43,13 @@ func TestControlFrameRoundTrip(t *testing.T) {
 	}
 }
 
-func TestUpReflectRoundTrip(t *testing.T) {
+func TestIngressReflectRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	want := ControlFrame{
 		Type:          ControlRegister,
 		Transport:     TransportICMP,
-		Flags:         ControlFlagUpReflect | ControlFlagReturnPool | ControlFlagBalancePerPacket,
+		Flags:         ControlFlagIngressReflect | ControlFlagReturnPool | ControlFlagBalancePerPacket,
 		PathID:        2,
 		ListenPort:    51820,
 		ServerPort:    9000,
@@ -137,10 +137,10 @@ func TestEncodeControlFrameRejectsInvalidPolicy(t *testing.T) {
 		{name: "return IP without flag", alter: func(frame *ControlFrame) { frame.ReturnIP = netip.MustParseAddr("198.51.100.1") }, err: ErrControlFlags},
 		{name: "flag without return IP", alter: func(frame *ControlFrame) { frame.Flags = ControlFlagReturnIP }, err: ErrControlAddress},
 		{name: "unknown status", alter: func(frame *ControlFrame) { frame.Status = ControlStatusNoReflector + 1 }, err: ErrControlStatus},
-		{name: "up reflect without return", alter: func(frame *ControlFrame) { frame.Flags = ControlFlagUpReflect }, err: ErrControlFlags},
-		{name: "up reflect on a probe", alter: func(frame *ControlFrame) {
+		{name: "ingress reflect without return", alter: func(frame *ControlFrame) { frame.Flags = ControlFlagIngressReflect }, err: ErrControlFlags},
+		{name: "ingress reflect on a probe", alter: func(frame *ControlFrame) {
 			frame.Type = ControlProbe
-			frame.Flags = ControlFlagUpReflect | ControlFlagReturnIP
+			frame.Flags = ControlFlagIngressReflect | ControlFlagReturnIP
 			frame.ReturnIP = netip.MustParseAddr("198.51.100.1")
 		}, err: ErrControlFlags},
 	}
@@ -156,11 +156,11 @@ func TestEncodeControlFrameRejectsInvalidPolicy(t *testing.T) {
 	}
 }
 
-func TestDownRegisterRoundTrip(t *testing.T) {
+func TestEgressRegisterRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	want := ControlFrame{
-		Type:          ControlDownRegister,
+		Type:          ControlEgressRegister,
 		Transport:     TransportICMP,
 		Flags:         ControlFlagReturnPool | ControlFlagBalancePerPacket,
 		PathID:        2,
@@ -172,15 +172,15 @@ func TestDownRegisterRoundTrip(t *testing.T) {
 		InstanceNonce: 7,
 		Sequence:      3,
 		LeaseSeconds:  30,
-		DownMode:      2,
-		DownServer:    netip.MustParseAddr("203.0.113.5"),
+		EgressMode:    2,
+		EgressServer:  netip.MustParseAddr("203.0.113.5"),
 	}
 	buf := make([]byte, ControlFrameLength)
 	if err := EncodeControlFrame(buf, want); err != nil {
 		t.Fatalf("EncodeControlFrame: %v", err)
 	}
 	if buf[18] != 2 || !bytes.Equal(buf[44:48], []byte{203, 0, 113, 5}) {
-		t.Fatalf("down mode byte = %d, server bytes = %v", buf[18], buf[44:48])
+		t.Fatalf("egress mode byte = %d, server bytes = %v", buf[18], buf[44:48])
 	}
 	got, err := DecodeControlFrame(buf)
 	if err != nil {
@@ -191,9 +191,9 @@ func TestDownRegisterRoundTrip(t *testing.T) {
 	}
 }
 
-// A server before v0.4.0 must ignore a DOWN_REGISTER. Its decoder rejects the
+// A server before v0.4.0 must ignore a EGRESS_REGISTER. Its decoder rejects the
 // type and the reserved bytes, so the frame never reaches its registry.
-func TestDownFieldsStayReservedInOtherFrames(t *testing.T) {
+func TestEgressFieldsStayReservedInOtherFrames(t *testing.T) {
 	t.Parallel()
 
 	frame := ControlFrame{
@@ -201,12 +201,12 @@ func TestDownFieldsStayReservedInOtherFrames(t *testing.T) {
 		Transport:     TransportUDP,
 		AdvertisedIP:  netip.MustParseAddr("192.0.2.10"),
 		InstanceNonce: 1,
-		DownServer:    netip.MustParseAddr("203.0.113.5"),
+		EgressServer:  netip.MustParseAddr("203.0.113.5"),
 	}
 	if err := EncodeControlFrame(make([]byte, ControlFrameLength), frame); !errors.Is(err, ErrControlReserved) {
 		t.Fatalf("EncodeControlFrame error = %v, want %v", err, ErrControlReserved)
 	}
-	frame.DownServer = netip.Addr{}
+	frame.EgressServer = netip.Addr{}
 	buf := make([]byte, ControlFrameLength)
 	if err := EncodeControlFrame(buf, frame); err != nil {
 		t.Fatalf("EncodeControlFrame: %v", err)
@@ -217,40 +217,40 @@ func TestDownFieldsStayReservedInOtherFrames(t *testing.T) {
 	}
 }
 
-func TestDownPathFlagAndModeRules(t *testing.T) {
+func TestEgressPathFlagAndModeRules(t *testing.T) {
 	t.Parallel()
 
 	base := ControlFrame{
-		Type:          ControlDownRegister,
+		Type:          ControlEgressRegister,
 		Transport:     TransportUDP,
 		AdvertisedIP:  netip.MustParseAddr("192.0.2.10"),
 		InstanceNonce: 1,
-		DownServer:    netip.MustParseAddr("203.0.113.5"),
+		EgressServer:  netip.MustParseAddr("203.0.113.5"),
 	}
 	tests := []struct {
 		name  string
 		alter func(*ControlFrame)
 		err   error
 	}{
-		{name: "no down server", alter: func(frame *ControlFrame) { frame.DownServer = netip.Addr{} }, err: ErrControlAddress},
-		{name: "unknown down mode", alter: func(frame *ControlFrame) { frame.DownMode = MaxDownMode + 1 }, err: ErrControlMode},
-		{name: "down flag on a register", alter: func(frame *ControlFrame) {
+		{name: "no egress server", alter: func(frame *ControlFrame) { frame.EgressServer = netip.Addr{} }, err: ErrControlAddress},
+		{name: "unknown egress mode", alter: func(frame *ControlFrame) { frame.EgressMode = MaxEgressMode + 1 }, err: ErrControlMode},
+		{name: "egress flag on a register", alter: func(frame *ControlFrame) {
 			frame.Type = ControlRegister
-			frame.DownServer = netip.Addr{}
-			frame.Flags = ControlFlagDownPath
+			frame.EgressServer = netip.Addr{}
+			frame.Flags = ControlFlagEgressPath
 		}, err: ErrControlFlags},
-		{name: "down flag on a probe", alter: func(frame *ControlFrame) {
+		{name: "egress flag on a probe", alter: func(frame *ControlFrame) {
 			frame.Type = ControlProbe
-			frame.DownServer = netip.Addr{}
-			frame.Flags = ControlFlagDownPath
+			frame.EgressServer = netip.Addr{}
+			frame.Flags = ControlFlagEgressPath
 		}},
-		{name: "bridge flag on a down register", alter: func(frame *ControlFrame) {
+		{name: "bridge flag on an egress register", alter: func(frame *ControlFrame) {
 			frame.Flags = ControlFlagBridge | ControlFlagReturnIP
 			frame.ReturnIP = netip.MustParseAddr("198.51.100.7")
 		}},
 		{name: "bridge flag on a register", alter: func(frame *ControlFrame) {
 			frame.Type = ControlRegister
-			frame.DownServer = netip.Addr{}
+			frame.EgressServer = netip.Addr{}
 			frame.Flags = ControlFlagBridge
 		}, err: ErrControlFlags},
 	}

@@ -12,12 +12,12 @@ import (
 	"github.com/xshecan/mup/api"
 )
 
-// TestPrivilegedUpReflect runs a group whose up path reflects the upstream
+// TestPrivilegedIngressReflect runs a group whose ingress path reflects the ingress
 // through a reflector at 10.210.1.3. The client sends each REGISTER and each
-// upstream packet to the reflector with the server as the source, so the
-// reflector answers the server. The up path is healthy while the reflector
-// reflects, and the upstream stops when the reflector fails.
-func TestPrivilegedUpReflect(t *testing.T) {
+// ingress packet to the reflector with the server as the source, so the
+// reflector answers the server. The ingress path is healthy while the reflector
+// reflects, and the ingress stops when the reflector fails.
+func TestPrivilegedIngressReflect(t *testing.T) {
 	requirePrivilegedLinux(t)
 	binaryPath := buildDaemon(t)
 
@@ -61,10 +61,10 @@ func TestPrivilegedUpReflect(t *testing.T) {
   control_socket: %s
   servers:
     - port: 51820
-      upstream:
+      ingress:
         routes:
           - "10.210.1.2:5000/icmp via 10.210.1.3"
-      downstream:
+      egress:
         routes:
           - 10.210.1.2:5010/udp
 `, clientSocket)
@@ -82,35 +82,35 @@ func TestPrivilegedUpReflect(t *testing.T) {
 	state := func() string {
 		return fmt.Sprintf("%s\nclient %s\nserver %s\n%s", pathText(t, clientAPI), dropText(t, clientAPI), dropText(t, serverAPI), logs())
 	}
-	upHealthy := func() (bool, error) {
+	ingressHealthy := func() (bool, error) {
 		paths, err := clientAPI.Paths(context.Background())
 		if err != nil {
 			return false, err
 		}
 		for _, path := range paths {
-			if path.Direction == "up" {
+			if path.Direction == "ingress" {
 				return path.Healthy, nil
 			}
 		}
 		return false, nil
 	}
 
-	// The reflector registers the up path, so the server sees one registered
-	// path from the reflector source, and the up path becomes healthy.
+	// The reflector registers the ingress path, so the server sees one registered
+	// path from the reflector source, and the ingress path becomes healthy.
 	waitForRegisteredPaths(t, serverAPI, 1, logs)
-	waitFor(t, 30*time.Second, "the up reflect path to become healthy", state, upHealthy)
+	waitFor(t, 30*time.Second, "the ingress reflect path to become healthy", state, ingressHealthy)
 	exchange(t, peerNS, "10.210.3.1:51820", 3, state)
 
-	// Without the reflector, no member answers, so the up path becomes
-	// unhealthy and the upstream stops.
+	// Without the reflector, no member answers, so the ingress path becomes
+	// unhealthy and the ingress stops.
 	runIP(t, "-n", reflectorNS, "link", "set", "mr"+suffix, "down")
-	waitFor(t, 30*time.Second, "the up reflect path to become unhealthy", state, func() (bool, error) {
-		healthy, err := upHealthy()
+	waitFor(t, 30*time.Second, "the ingress reflect path to become unhealthy", state, func() (bool, error) {
+		healthy, err := ingressHealthy()
 		return err == nil && !healthy, err
 	})
 
-	// With the reflector back, the up path recovers and the upstream flows.
+	// With the reflector back, the ingress path recovers and the ingress flows.
 	runIP(t, "-n", reflectorNS, "link", "set", "mr"+suffix, "up")
-	waitFor(t, 30*time.Second, "the up reflect path to recover", state, upHealthy)
+	waitFor(t, 30*time.Second, "the ingress reflect path to recover", state, ingressHealthy)
 	exchange(t, peerNS, "10.210.3.1:51820", 3, state)
 }

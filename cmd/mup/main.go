@@ -22,11 +22,11 @@ const usage = `usage:
   mup server -p PORT[-LAST] -r TARGET_IP:PORT [--target-ingress] [--control-socket PATH]
   mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP]" [-u ...] -s CLIENT_IP
              [-r RETURN_IP] [--mode fallback|balancer|burst] [--control-socket PATH]
-  mup client -p LISTEN_PORT --up "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp" [--up ...]
-             --down "SERVER_IP:PORT/udp|icmp [via RETURN_IP]" [--down ...] -s CLIENT_IP
-             [--up-bridge "BRIDGE_IP[%IFACE]:PORT[-LAST]/udp|icmp"] [--up-bridge ...]
-             [--down-bridge "BRIDGE_IP:PORT/udp|icmp [via RETURN_IP]"] [--down-bridge ...]
-             [--up-mode MODE] [--down-mode MODE] [--control-socket PATH]
+  mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp" [--ingress ...]
+             --egress "SERVER_IP:PORT/udp|icmp [via RETURN_IP]" [--egress ...] -s CLIENT_IP
+             [--ingress-bridge "BRIDGE_IP[%IFACE]:PORT[-LAST]/udp|icmp"] [--ingress-bridge ...]
+             [--egress-bridge "BRIDGE_IP:PORT/udp|icmp [via RETURN_IP]"] [--egress-bridge ...]
+             [--ingress-mode MODE] [--egress-mode MODE] [--control-socket PATH]
   mup bridge -s SERVER_IP -p PORT[-LAST] [-a CIDR] [-a ...] [--control-socket PATH]
 `
 
@@ -135,17 +135,24 @@ func parseFileArgs(args []string) (config.App, error) {
 func parseClientArgs(args []string) (*config.Client, error) {
 	fs := flag.NewFlagSet("mup client", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	var rawPaths, rawUp, rawDown, rawUpBridges, rawDownBridges stringList
+	var rawPaths, rawIngress, rawEgress, rawIngressBridges, rawEgressBridges stringList
 	var port int
-	var advertisedText, returnIPText, modeName, upModeName, downModeName, controlSocket string
+	var advertisedText, returnIPText, modeName, ingressModeName, egressModeName, controlSocket string
 	fs.IntVar(&port, "p", 0, "local WireGuard UDP listen port")
 	fs.Var(&rawPaths, "u", "server path as IPv4:PORT/udp or /icmp, where PORT can be a range FIRST-LAST")
-	fs.Var(&rawUp, "up", "up path as IPv4:PORT/udp or /icmp, for the upstream only")
-	fs.Var(&rawDown, "down", "down path as IPv4:PORT/udp or /icmp, for the downstream only")
-	fs.Var(&rawUpBridges, "up-bridge", "up path through a MUP bridge, as BRIDGE_IP:PORT/udp or /icmp")
-	fs.Var(&rawDownBridges, "down-bridge", "down path through a MUP bridge, as BRIDGE_IP:PORT/udp or /icmp")
-	fs.StringVar(&upModeName, "up-mode", "fallback", "upstream mode: fallback, balancer, or burst")
-	fs.StringVar(&downModeName, "down-mode", "fallback", "downstream mode: fallback, balancer, or burst")
+	fs.Var(&rawIngress, "ingress", "ingress path as IPv4:PORT/udp or /icmp, for the ingress only")
+	fs.Var(&rawEgress, "egress", "egress path as IPv4:PORT/udp or /icmp, for the egress only")
+	fs.Var(&rawIngressBridges, "ingress-bridge", "ingress path through a MUP bridge, as BRIDGE_IP:PORT/udp or /icmp")
+	fs.Var(&rawEgressBridges, "egress-bridge", "egress path through a MUP bridge, as BRIDGE_IP:PORT/udp or /icmp")
+	fs.StringVar(&ingressModeName, "ingress-mode", "fallback", "ingress mode: fallback, balancer, or burst")
+	fs.StringVar(&egressModeName, "egress-mode", "fallback", "egress mode: fallback, balancer, or burst")
+	// The old flag names still work.
+	fs.Var(&rawIngress, "up", "old name of --ingress")
+	fs.Var(&rawEgress, "down", "old name of --egress")
+	fs.Var(&rawIngressBridges, "up-bridge", "old name of --ingress-bridge")
+	fs.Var(&rawEgressBridges, "down-bridge", "old name of --egress-bridge")
+	fs.StringVar(&ingressModeName, "up-mode", "fallback", "old name of --ingress-mode")
+	fs.StringVar(&egressModeName, "down-mode", "fallback", "old name of --egress-mode")
 	fs.StringVar(&advertisedText, "s", "", "advertised client IPv4")
 	fs.StringVar(&returnIPText, "r", "", "return IPv4 of each -u path without its own via")
 	fs.StringVar(&modeName, "mode", "fallback", "fallback, balancer, or burst")
@@ -173,10 +180,10 @@ func parseClientArgs(args []string) (*config.Client, error) {
 	}
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
-	split := splitArgs{up: rawUp, down: rawDown, upBridges: rawUpBridges, downBridges: rawDownBridges, upMode: upModeName, downMode: downModeName}
-	if split.any() || set["up-mode"] || set["down-mode"] {
+	split := splitArgs{ingress: rawIngress, egress: rawEgress, ingressBridges: rawIngressBridges, egressBridges: rawEgressBridges, ingressMode: ingressModeName, egressMode: egressModeName}
+	if split.any() || set["ingress-mode"] || set["egress-mode"] || set["up-mode"] || set["down-mode"] {
 		if len(rawPaths) > 0 || set["mode"] || set["r"] {
-			return nil, errors.New("use -u, -r, and --mode, or --up, --down, the bridges, --up-mode, and --down-mode, not both")
+			return nil, errors.New("use -u, -r, and --mode, or --ingress, --egress, the bridges, --ingress-mode, and --egress-mode, not both")
 		}
 		return parseSplitClientArgs(listenPort, advertised, controlSocket, split)
 	}
@@ -206,41 +213,41 @@ func parseClientArgs(args []string) (*config.Client, error) {
 	return client, nil
 }
 
-// splitArgs holds the flags of a group with separate up paths and down paths.
+// splitArgs holds the flags of a group with separate ingress paths and egress paths.
 type splitArgs struct {
-	up, down, upBridges, downBridges []string
-	upMode, downMode                 string
+	ingress, egress, ingressBridges, egressBridges []string
+	ingressMode, egressMode                        string
 }
 
 func (s splitArgs) any() bool {
-	return len(s.up)+len(s.down)+len(s.upBridges)+len(s.downBridges) > 0
+	return len(s.ingress)+len(s.egress)+len(s.ingressBridges)+len(s.egressBridges) > 0
 }
 
-// parseSplitClientArgs builds a group with separate up paths and down paths.
+// parseSplitClientArgs builds a group with separate ingress paths and egress paths.
 // The routes of each direction come first, then its bridges.
 func parseSplitClientArgs(listenPort uint16, advertised netip.Addr, controlSocket string, split splitArgs) (*config.Client, error) {
-	if len(split.up)+len(split.upBridges) == 0 || len(split.down)+len(split.downBridges) == 0 {
-		return nil, errors.New("the up paths and the down paths go together: give --up or --up-bridge, and --down or --down-bridge")
+	if len(split.ingress)+len(split.ingressBridges) == 0 || len(split.egress)+len(split.egressBridges) == 0 {
+		return nil, errors.New("the ingress paths and the egress paths go together: give --ingress or --ingress-bridge, and --egress or --egress-bridge")
 	}
-	upMode, err := config.ParseMode(split.upMode)
+	ingressMode, err := config.ParseMode(split.ingressMode)
 	if err != nil {
-		return nil, fmt.Errorf("--up-mode: %w", err)
+		return nil, fmt.Errorf("--ingress-mode: %w", err)
 	}
-	downMode, err := config.ParseMode(split.downMode)
+	egressMode, err := config.ParseMode(split.egressMode)
 	if err != nil {
-		return nil, fmt.Errorf("--down-mode: %w", err)
+		return nil, fmt.Errorf("--egress-mode: %w", err)
 	}
-	group := config.Group{ListenPort: listenPort, Mode: upMode, DownMode: downMode}
+	group := config.Group{ListenPort: listenPort, Mode: ingressMode, EgressMode: egressMode}
 	for _, part := range []struct {
 		flagName string
 		raws     []string
 		bridge   bool
 		into     *[]config.Path
 	}{
-		{"up", split.up, false, &group.Paths},
-		{"up-bridge", split.upBridges, true, &group.Paths},
-		{"down", split.down, false, &group.DownPaths},
-		{"down-bridge", split.downBridges, true, &group.DownPaths},
+		{"ingress", split.ingress, false, &group.Paths},
+		{"ingress-bridge", split.ingressBridges, true, &group.Paths},
+		{"egress", split.egress, false, &group.EgressPaths},
+		{"egress-bridge", split.egressBridges, true, &group.EgressPaths},
 	} {
 		for i, raw := range part.raws {
 			path, err := config.ParsePath(raw)

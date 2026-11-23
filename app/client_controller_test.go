@@ -61,7 +61,7 @@ func (f *fakeClientDataplane) ClearPath(slot int) error {
 	return nil
 }
 
-func (f *fakeClientDataplane) SetUpReflect(slot int, members []netip.Addr, perPacket bool) error {
+func (f *fakeClientDataplane) SetIngressReflect(slot int, members []netip.Addr, perPacket bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record(fmt.Sprintf("reflect %d %d", slot, len(members)))
@@ -72,19 +72,19 @@ func (f *fakeClientDataplane) SetUpReflect(slot int, members []netip.Addr, perPa
 	return nil
 }
 
-func (f *fakeClientDataplane) SetDownPath(slot int, path *dataplane.DownPathSettings) error {
+func (f *fakeClientDataplane) SetEgressPath(slot int, path *dataplane.EgressPathSettings) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if path == nil {
-		f.record(fmt.Sprintf("down %d clear", slot))
+		f.record(fmt.Sprintf("egress %d clear", slot))
 		return nil
 	}
-	f.record(fmt.Sprintf("down %d %s:%d", slot, path.Server, path.ServerPort))
+	f.record(fmt.Sprintf("egress %d %s:%d", slot, path.Server, path.ServerPort))
 	return nil
 }
 
-func (f *fakeClientDataplane) DownPathsSeen() ([dataplane.MaxDownPaths]time.Duration, error) {
-	var seen [dataplane.MaxDownPaths]time.Duration
+func (f *fakeClientDataplane) EgressPathsSeen() ([dataplane.MaxEgressPaths]time.Duration, error) {
+	var seen [dataplane.MaxEgressPaths]time.Duration
 	for slot := range seen {
 		seen[slot] = -1
 	}
@@ -210,7 +210,7 @@ func (f controllerFixture) reply(t *testing.T, slot int, sequence uint32) {
 	}
 }
 
-// An up reflect path reports after its whole reply window, so the round-trip
+// An ingress reflect path reports after its whole reply window, so the round-trip
 // time comes from the time of the first answer, not from the time of the
 // report.
 func TestRoundTripTimeUsesTheTimeOfTheFirstAnswer(t *testing.T) {

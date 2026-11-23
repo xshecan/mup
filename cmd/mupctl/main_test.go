@@ -61,11 +61,11 @@ func fakeDaemon(t *testing.T, status api.Status) *api.DaemonClient {
 			return
 		}
 		if request.Bridge {
-			reply(w, http.StatusCreated, api.Path{ID: 5, Bridge: true, Direction: map[bool]string{true: "down", false: "up"}[request.Down], ListenPort: request.ListenPort, Server: "5.6.7.8", Port: 9600, Transport: "udp"})
+			reply(w, http.StatusCreated, api.Path{ID: 5, Bridge: true, Direction: map[bool]string{true: "egress", false: "ingress"}[request.Egress], ListenPort: request.ListenPort, Server: "5.6.7.8", Port: 9600, Transport: "udp"})
 			return
 		}
-		if request.Down {
-			reply(w, http.StatusCreated, api.Path{ID: 4, Direction: "down", ListenPort: request.ListenPort, Server: "203.0.113.8", Port: 9300, Transport: "udp", ReturnIP: "198.51.100.0/28"})
+		if request.Egress {
+			reply(w, http.StatusCreated, api.Path{ID: 4, Direction: "egress", ListenPort: request.ListenPort, Server: "203.0.113.8", Port: 9300, Transport: "udp", ReturnIP: "198.51.100.0/28"})
 			return
 		}
 		reply(w, http.StatusCreated, api.Path{ID: 3, ListenPort: request.ListenPort, Server: "203.0.113.8", Port: 5000, Transport: "icmp"})
@@ -81,7 +81,7 @@ func fakeDaemon(t *testing.T, status api.Status) *api.DaemonClient {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("DELETE /v1/paths/{id}", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("direction") == "down" && r.PathValue("id") == "1" {
+		if r.URL.Query().Get("direction") == "egress" && r.PathValue("id") == "1" {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}

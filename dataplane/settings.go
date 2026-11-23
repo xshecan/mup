@@ -18,19 +18,19 @@ type ClientSettings struct {
 	HealthyMask   uint32
 	Groups        []GroupSettings
 	Paths         []PathSettings
-	// DownPaths holds the down path slots. A nil entry is an empty slot.
-	DownPaths []*DownPathSettings
+	// EgressPaths holds the egress path slots. A nil entry is an empty slot.
+	EgressPaths []*EgressPathSettings
 }
 
 // GroupSettings configures the peers of one listen port. PathMask holds one
-// bit for each path slot of the group. DownMask holds one bit for each down
-// path slot of a group with separate down paths, and DownMode is the mode that
+// bit for each path slot of the group. DownMask holds one bit for each egress
+// path slot of a group with separate egress paths, and EgressMode is the mode that
 // the server uses for them.
 type GroupSettings struct {
 	ListenPort uint16
 	Mode       config.Mode
 	PathMask   uint8
-	DownMode   config.Mode
+	EgressMode config.Mode
 	DownMask   uint8
 }
 
@@ -44,7 +44,7 @@ type PathSettings struct {
 	ReturnIP      netip.Addr
 	ReturnPrefix  uint8
 	Balance       config.Balance
-	// ProxyBridge is set on an up reflect path that a bridge emits. The client
+	// ProxyBridge is set on an ingress reflect path that a bridge emits. The client
 	// wraps the reflected packet for the bridge instead of sending it itself.
 	ProxyBridge netip.Addr
 }
@@ -108,23 +108,23 @@ func encodeClientSettings(settings ClientSettings) (
 	if assigned != configured {
 		return client, nil, paths, state, errors.New("each path must belong to exactly one path group")
 	}
-	if len(settings.DownPaths) > MaxDownPaths {
-		return client, nil, paths, state, fmt.Errorf("client accepts at most %d down paths", MaxDownPaths)
+	if len(settings.EgressPaths) > MaxEgressPaths {
+		return client, nil, paths, state, fmt.Errorf("client accepts at most %d egress paths", MaxEgressPaths)
 	}
-	var downConfigured, downAssigned uint8
-	for slot, down := range settings.DownPaths {
-		if down != nil {
-			downConfigured |= 1 << slot
+	var egressConfigured, egressAssigned uint8
+	for slot, egress := range settings.EgressPaths {
+		if egress != nil {
+			egressConfigured |= 1 << slot
 		}
 	}
 	for _, group := range settings.Groups {
-		if downAssigned&group.DownMask != 0 {
-			return client, nil, paths, state, fmt.Errorf("path group of listen port %d shares a down path with another group", group.ListenPort)
+		if egressAssigned&group.DownMask != 0 {
+			return client, nil, paths, state, fmt.Errorf("path group of listen port %d shares an egress path with another group", group.ListenPort)
 		}
-		downAssigned |= group.DownMask
+		egressAssigned |= group.DownMask
 	}
-	if downAssigned != downConfigured {
-		return client, nil, paths, state, errors.New("each down path must belong to exactly one path group")
+	if egressAssigned != egressConfigured {
+		return client, nil, paths, state, errors.New("each egress path must belong to exactly one path group")
 	}
 	for index, path := range settings.Paths {
 		if paths[index], err = encodePathSettings(index, path); err != nil {
@@ -154,13 +154,13 @@ func encodeGroupSettings(group GroupSettings) (mupPathGroupV1, error) {
 	if group.PathMask == 0 {
 		return mupPathGroupV1{}, fmt.Errorf("path group of listen port %d has no paths", group.ListenPort)
 	}
-	if group.DownMode > config.ModeBurst {
-		return mupPathGroupV1{}, fmt.Errorf("invalid down mode %d for listen port %d", group.DownMode, group.ListenPort)
+	if group.EgressMode > config.ModeBurst {
+		return mupPathGroupV1{}, fmt.Errorf("invalid egress mode %d for listen port %d", group.EgressMode, group.ListenPort)
 	}
 	encoded := mupPathGroupV1{Mode: uint8(group.Mode), PathMask: group.PathMask, DownMask: group.DownMask}
-	// A downstream burst sends copies on several down paths, so the client
+	// An egress burst sends copies on several egress paths, so the client
 	// drops the later copies.
-	if group.DownMask != 0 && group.DownMode == config.ModeBurst {
+	if group.DownMask != 0 && group.EgressMode == config.ModeBurst {
 		encoded.Flags = groupFlagDedup
 	}
 	return encoded, nil
@@ -193,17 +193,17 @@ func encodePathReturn(index int, path PathSettings) (mupPathReturnV1, error) {
 	return mupPathReturnV1{ReturnIp: returnIP, Flags: protocol.ControlFlagReturnIP}, nil
 }
 
-// encodeUpReflect encodes the reflect members of an up reflect path slot. The
-// client reflects the upstream through these members. An empty list is an empty
+// encodeIngressReflect encodes the reflect members of an ingress reflect path slot. The
+// client reflects the ingress through these members. An empty list is an empty
 // entry, so the client egress leaves the slot as a direct path. perPacket picks
 // the per-packet balance mode, and false picks the per-peer mode.
-func encodeUpReflect(members []netip.Addr, perPacket bool) (mupUpReflectV1, error) {
+func encodeIngressReflect(members []netip.Addr, perPacket bool) (mupUpReflectV1, error) {
 	var reflect mupUpReflectV1
 	if len(members) > len(reflect.Members) {
-		return reflect, fmt.Errorf("up reflect path has %d members, at most %d", len(members), len(reflect.Members))
+		return reflect, fmt.Errorf("ingress reflect path has %d members, at most %d", len(members), len(reflect.Members))
 	}
 	for position, member := range members {
-		word, err := requiredIPv4Word(member, fmt.Sprintf("up reflect member %d", position))
+		word, err := requiredIPv4Word(member, fmt.Sprintf("ingress reflect member %d", position))
 		if err != nil {
 			return reflect, err
 		}

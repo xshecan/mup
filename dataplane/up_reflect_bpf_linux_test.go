@@ -14,18 +14,18 @@ import (
 )
 
 var (
-	upAdvertised = netip.MustParseAddr("192.0.2.30")
-	upServer     = netip.MustParseAddr("198.51.100.9")
-	upPeer       = netip.MustParseAddr("203.0.113.7")
-	upVia        = netip.MustParseAddr("203.0.113.9")
-	upViaA       = netip.MustParseAddr("198.51.100.40")
-	upViaB       = netip.MustParseAddr("198.51.100.41")
+	ingressAdvertised = netip.MustParseAddr("192.0.2.30")
+	ingressServer     = netip.MustParseAddr("198.51.100.9")
+	ingressPeer       = netip.MustParseAddr("203.0.113.7")
+	ingressVia        = netip.MustParseAddr("203.0.113.9")
+	ingressViaA       = netip.MustParseAddr("198.51.100.40")
+	ingressViaB       = netip.MustParseAddr("198.51.100.41")
 )
 
-// upReflectClientCollection loads a client with one up reflect path in group
+// ingressReflectClientCollection loads a client with one ingress reflect path in group
 // 51820 on slot 0, through the given transport and reflect members. Token 5 is
 // free, so a fresh peer takes it.
-func upReflectClientCollection(t *testing.T, transport protocol.TransportID, members []netip.Addr, perPacket bool) *ebpf.Collection {
+func ingressReflectClientCollection(t *testing.T, transport protocol.TransportID, members []netip.Addr, perPacket bool) *ebpf.Collection {
 	t.Helper()
 	collection := loadTestCollection(t)
 	put := func(name string, key, value any) {
@@ -34,11 +34,11 @@ func upReflectClientCollection(t *testing.T, transport protocol.TransportID, mem
 			t.Fatalf("update %s: %v", name, err)
 		}
 	}
-	advertised := mustTestWord(t, upAdvertised)
+	advertised := mustTestWord(t, ingressAdvertised)
 	put("client_config", uint32(0), mupClientConfigV1{InstanceNonce: 7, AdvertisedIp: advertised})
 	put("path_groups", uint16(51820), mupPathGroupV1{Mode: 0, PathMask: 1})
 	put("path_config", uint32(0), mupPathConfigV1{
-		DestinationIp: mustTestWord(t, upServer), SourceIp: advertised,
+		DestinationIp: mustTestWord(t, ingressServer), SourceIp: advertised,
 		Ifindex: 1, ServerPort: 9000, Transport: uint8(transport),
 	})
 	put("path_state", uint32(0), mupPathStateV1{HealthyMask: 1})
@@ -56,9 +56,9 @@ func upReflectClientCollection(t *testing.T, transport protocol.TransportID, mem
 	return collection
 }
 
-// assertUpReflectICMP checks that a frame is an Echo Request from the server to
+// assertIngressReflectICMP checks that a frame is an Echo Request from the server to
 // one of the wanted members, with the server port as its identifier.
-func assertUpReflectICMP(t *testing.T, frame []byte, wanted ...netip.Addr) {
+func assertIngressReflectICMP(t *testing.T, frame []byte, wanted ...netip.Addr) {
 	t.Helper()
 	ip := frame[14:]
 	l4 := ip[20:binary.BigEndian.Uint16(ip[2:4])]
@@ -68,8 +68,8 @@ func assertUpReflectICMP(t *testing.T, frame []byte, wanted ...netip.Addr) {
 	if identifier := binary.BigEndian.Uint16(l4[4:6]); identifier != 9000 {
 		t.Fatalf("ICMP identifier = %d, want the server port 9000", identifier)
 	}
-	if source := netip.AddrFrom4([4]byte(ip[12:16])); source != upServer {
-		t.Fatalf("source = %s, want the server %s", source, upServer)
+	if source := netip.AddrFrom4([4]byte(ip[12:16])); source != ingressServer {
+		t.Fatalf("source = %s, want the server %s", source, ingressServer)
 	}
 	destination := netip.AddrFrom4([4]byte(ip[16:20]))
 	found := false
@@ -86,12 +86,12 @@ func assertUpReflectICMP(t *testing.T, frame []byte, wanted ...netip.Addr) {
 	}
 }
 
-// A client egress reflects an ICMP upstream through the via host: it sends an
+// A client egress reflects an ICMP ingress through the via host: it sends an
 // Echo Request to the via with the server as the source.
-func TestClientReflectsICMPUpstream(t *testing.T) {
-	collection := upReflectClientCollection(t, protocol.TransportICMP, []netip.Addr{upVia}, false)
+func TestClientReflectsICMPIngress(t *testing.T) {
+	collection := ingressReflectClientCollection(t, protocol.TransportICMP, []netip.Addr{ingressVia}, false)
 	defer collection.Close()
-	frame := udpWireGuardFrame(t, upPeer, upAdvertised, 40000, 51820, 0)
+	frame := udpWireGuardFrame(t, ingressPeer, ingressAdvertised, 40000, 51820, 0)
 	result, output, err := collection.Programs["mup_client_ingress"].Test(frame)
 	if err != nil {
 		t.Fatalf("program test: %v", err)
@@ -99,15 +99,15 @@ func TestClientReflectsICMPUpstream(t *testing.T) {
 	if result != tcActRedirect {
 		t.Fatalf("return value = %d, want the redirect %d", int32(result), tcActRedirect)
 	}
-	assertUpReflectICMP(t, output, upVia)
+	assertIngressReflectICMP(t, output, ingressVia)
 }
 
-// A client egress forges the source of a UDP upstream: it sends to the server
+// A client egress forges the source of a UDP ingress: it sends to the server
 // with the via as the source.
-func TestClientForgesUDPUpstream(t *testing.T) {
-	collection := upReflectClientCollection(t, protocol.TransportUDP, []netip.Addr{upVia}, false)
+func TestClientForgesUDPIngress(t *testing.T) {
+	collection := ingressReflectClientCollection(t, protocol.TransportUDP, []netip.Addr{ingressVia}, false)
 	defer collection.Close()
-	frame := udpWireGuardFrame(t, upPeer, upAdvertised, 40000, 51820, 0)
+	frame := udpWireGuardFrame(t, ingressPeer, ingressAdvertised, 40000, 51820, 0)
 	result, output, err := collection.Programs["mup_client_ingress"].Test(frame)
 	if err != nil {
 		t.Fatalf("program test: %v", err)
@@ -115,14 +115,14 @@ func TestClientForgesUDPUpstream(t *testing.T) {
 	if result != tcActRedirect {
 		t.Fatalf("return value = %d, want the redirect %d", int32(result), tcActRedirect)
 	}
-	assertUDPHeader(t, output, upVia, upServer, 51820, 9000)
+	assertUDPHeader(t, output, ingressVia, ingressServer, 51820, 9000)
 }
 
-// A client egress spreads an ICMP upstream over the members of a reflect pool.
+// A client egress spreads an ICMP ingress over the members of a reflect pool.
 func TestClientReflectsThroughAPool(t *testing.T) {
-	collection := upReflectClientCollection(t, protocol.TransportICMP, []netip.Addr{upViaA, upViaB}, false)
+	collection := ingressReflectClientCollection(t, protocol.TransportICMP, []netip.Addr{ingressViaA, ingressViaB}, false)
 	defer collection.Close()
-	frame := udpWireGuardFrame(t, upPeer, upAdvertised, 40000, 51820, 0)
+	frame := udpWireGuardFrame(t, ingressPeer, ingressAdvertised, 40000, 51820, 0)
 	result, output, err := collection.Programs["mup_client_ingress"].Test(frame)
 	if err != nil {
 		t.Fatalf("program test: %v", err)
@@ -130,14 +130,14 @@ func TestClientReflectsThroughAPool(t *testing.T) {
 	if result != tcActRedirect {
 		t.Fatalf("return value = %d, want the redirect %d", int32(result), tcActRedirect)
 	}
-	assertUpReflectICMP(t, output, upViaA, upViaB)
+	assertIngressReflectICMP(t, output, ingressViaA, ingressViaB)
 }
 
-// Without reflect members, an up path stays a direct path.
+// Without reflect members, an ingress path stays a direct path.
 func TestClientWithoutMembersStaysDirect(t *testing.T) {
-	collection := upReflectClientCollection(t, protocol.TransportUDP, nil, false)
+	collection := ingressReflectClientCollection(t, protocol.TransportUDP, nil, false)
 	defer collection.Close()
-	frame := udpWireGuardFrame(t, upPeer, upAdvertised, 40000, 51820, 0)
+	frame := udpWireGuardFrame(t, ingressPeer, ingressAdvertised, 40000, 51820, 0)
 	result, output, err := collection.Programs["mup_client_ingress"].Test(frame)
 	if err != nil {
 		t.Fatalf("program test: %v", err)
@@ -145,20 +145,20 @@ func TestClientWithoutMembersStaysDirect(t *testing.T) {
 	if result != tcActRedirect {
 		t.Fatalf("return value = %d, want the redirect %d", int32(result), tcActRedirect)
 	}
-	assertUDPHeader(t, output, upAdvertised, upServer, 51820, 9000)
+	assertUDPHeader(t, output, ingressAdvertised, ingressServer, 51820, 9000)
 }
 
-// A server accepts a reflected upstream: an ICMP Echo Reply from the via of an
-// up reflect registered path. The same reply on a path without the up reflect
+// A server accepts a reflected ingress: an ICMP Echo Reply from the via of an
+// ingress reflect registered path. The same reply on a path without the ingress reflect
 // flag goes on to the kernel.
-func TestServerAcceptsAReflectedUpstream(t *testing.T) {
+func TestServerAcceptsAReflectedIngress(t *testing.T) {
 	collection, client := targetIngressCollection(t)
 	defer collection.Close()
 	if err := collection.Maps["free_target_ports"].Update(nil, uint16(20000), ebpf.UpdateAny); err != nil {
 		t.Fatalf("push a target port: %v", err)
 	}
 	pathKey := mupRegisteredPathKeyV1{
-		SourceIp: mustTestWord(t, upVia), LocalIp: mustTestWord(t, ingressTarget),
+		SourceIp: mustTestWord(t, ingressVia), LocalIp: mustTestWord(t, ingressTarget),
 		ServerPort: 5000, Transport: uint8(protocol.TransportICMP),
 	}
 	put := func(flags uint8) {
@@ -168,10 +168,10 @@ func TestServerAcceptsAReflectedUpstream(t *testing.T) {
 			t.Fatalf("update registered path: %v", err)
 		}
 	}
-	reply := icmpWireGuardFrame(t, upVia, ingressTarget, 0, 5000, 9)
+	reply := icmpWireGuardFrame(t, ingressVia, ingressTarget, 0, 5000, 9)
 
-	// With the up reflect flag, the Echo Reply is a reflected upstream.
-	put(protocol.ControlFlagUpReflect)
+	// With the ingress reflect flag, the Echo Reply is a reflected ingress.
+	put(protocol.ControlFlagIngressReflect)
 	result, _, err := collection.Programs["mup_server_ingress"].Test(reply)
 	if err != nil {
 		t.Fatalf("program test: %v", err)

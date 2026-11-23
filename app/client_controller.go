@@ -48,9 +48,9 @@ type pathConn interface {
 }
 
 // pathRegistration holds the values that a path sends in its REGISTER frames.
-// An up path of a group with separate down paths has downs, and it sends the
-// DOWN_REGISTER frames of the group before each REGISTER. Its ACK can then
-// arrive on any down path.
+// An ingress path of a group with separate egress paths has egresses, and it sends the
+// EGRESS_REGISTER frames of the group before each REGISTER. Its ACK can then
+// arrive on any egress path.
 type pathRegistration struct {
 	advertisedIP netip.Addr
 	listenPort   uint16
@@ -58,21 +58,21 @@ type pathRegistration struct {
 	path         config.Path
 	nonce        uint64
 	pathID       uint16
-	downs        *downSet
-	// upReflect marks a path that reflects the upstream through its members.
+	egresses     *egressSet
+	// ingressReflect marks a path that reflects the ingress through its members.
 	// The control loop sends a REGISTER through each member and keeps the
 	// healthy ones. writeMembers publishes the healthy members to the
 	// dataplane, and perPacket picks the per-packet balance mode.
-	upReflect    bool
-	members      []netip.Addr
-	perPacket    bool
-	writeMembers func(members []netip.Addr) error
+	ingressReflect bool
+	members        []netip.Addr
+	perPacket      bool
+	writeMembers   func(members []netip.Addr) error
 }
 
-// downFrames returns the DOWN_REGISTER frames to send before the REGISTER
+// egressFrames returns the EGRESS_REGISTER frames to send before the REGISTER
 // with this sequence.
-func (r pathRegistration) downFrames(sequence uint32) [][]byte {
-	return r.downs.frames(r, sequence, time.Now())
+func (r pathRegistration) egressFrames(sequence uint32) [][]byte {
+	return r.egresses.frames(r, sequence, time.Now())
 }
 
 // pathOpener opens the control socket of a path. A path that cannot open its
@@ -82,10 +82,10 @@ type pathOpener func(pathRegistration) (pathConn, error)
 type clientDataplane interface {
 	UpdatePathState(healthyMask uint8, generation uint32) error
 	SetPath(slot int, path dataplane.PathSettings) error
-	SetUpReflect(slot int, members []netip.Addr, perPacket bool) error
+	SetIngressReflect(slot int, members []netip.Addr, perPacket bool) error
 	ClearPath(slot int) error
-	SetDownPath(slot int, path *dataplane.DownPathSettings) error
-	DownPathsSeen() ([dataplane.MaxDownPaths]time.Duration, error)
+	SetEgressPath(slot int, path *dataplane.EgressPathSettings) error
+	EgressPathsSeen() ([dataplane.MaxEgressPaths]time.Duration, error)
 	SetGroup(group dataplane.GroupSettings) error
 	AttachClient(ifindexes []int) error
 	Snapshot() (dataplane.StatsSnapshot, error)
@@ -128,22 +128,22 @@ func (p *clientPath) runtimePath() config.Path {
 }
 
 // pathGroup is the runtime state of one configured group. A group with
-// separate down paths has downs.
+// separate egress paths has egresses.
 type pathGroup struct {
 	settings dataplane.GroupSettings
-	downs    *downSet
+	egresses *egressSet
 }
 
-// clientDownPath is one down path of a group. It is healthy while the probes
+// clientEgressPath is one egress path of a group. It is healthy while the probes
 // of the servers arrive on it.
-type clientDownPath struct {
+type clientEgressPath struct {
 	path      config.Path
 	group     *pathGroup
 	lastProbe time.Time
 }
 
-// downInUse is how long a down path counts as in use after its latest reply.
-const downInUse = 10 * time.Second
+// egressInUse is how long an egress path counts as in use after its latest reply.
+const egressInUse = 10 * time.Second
 
 // clientController runs the paths of a client. A slot is a path ID, a bit in
 // the healthy mask, and an entry in the BPF path_config map. Paths can join
@@ -163,8 +163,8 @@ type clientController struct {
 	logger       *log.Logger
 	health       *control.HealthEngine
 	slots        [config.MaxPaths]*clientPath
-	downSlots    [dataplane.MaxDownPaths]*clientDownPath
-	stopDown     func()
+	egressSlots  [dataplane.MaxEgressPaths]*clientEgressPath
+	stopEgress   func()
 	nextPriority int
 	nextEpoch    uint64
 	probes       chan pathProbeResult
@@ -186,7 +186,7 @@ func newClientController(
 	for _, group := range settings.Groups {
 		current := &pathGroup{settings: group}
 		if group.DownMask != 0 {
-			current.downs = newDownSet(group.DownMode)
+			current.egresses = newEgressSet(group.EgressMode)
 		}
 		groups = append(groups, current)
 	}
@@ -216,7 +216,7 @@ func (c *clientController) run(ctx context.Context) error {
 	}
 	defer func() {
 		c.mu.Lock()
-		stop := c.stopDown
+		stop := c.stopEgress
 		c.mu.Unlock()
 		if stop != nil {
 			stop()
@@ -241,29 +241,29 @@ func (c *clientController) start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ctx = ctx
-	downSlot := 0
+	egressSlot := 0
 	var splitPorts []uint16
 	for index, group := range c.groups {
-		if group.downs == nil {
+		if group.egresses == nil {
 			continue
 		}
 		splitPorts = append(splitPorts, group.settings.ListenPort)
-		for _, path := range c.client.Groups[index].DownPaths {
-			c.downSlots[downSlot] = &clientDownPath{path: path, group: group}
-			group.downs.set(uint16(downSlot), path)
-			downSlot++
+		for _, path := range c.client.Groups[index].EgressPaths {
+			c.egressSlots[egressSlot] = &clientEgressPath{path: path, group: group}
+			group.egresses.set(uint16(egressSlot), path)
+			egressSlot++
 		}
 	}
 	if len(splitPorts) > 0 {
-		stop, err := c.controls.listenDown(downListen{
+		stop, err := c.controls.listenEgress(egressListen{
 			advertisedIP: c.client.AdvertisedIP,
 			nonce:        c.nonce,
 			listenPorts:  splitPorts,
-		}, c.handleDownProbe)
+		}, c.handleEgressProbe)
 		if err != nil {
 			return err
 		}
-		c.stopDown = stop
+		c.stopEgress = stop
 	}
 	slot := 0
 	for index, group := range c.groups {
@@ -295,20 +295,20 @@ func (c *clientController) registrationLocked(group *pathGroup, path config.Path
 		path:         path,
 		nonce:        c.nonce,
 		pathID:       uint16(slot),
-		downs:        group.downs,
+		egresses:     group.egresses,
 	}
-	if path.UpReflect(group.downs != nil) {
-		registration.upReflect = true
+	if path.IngressReflect(group.egresses != nil) {
+		registration.ingressReflect = true
 		registration.members = candidateMembers(path)
 		registration.perPacket = path.Balance == config.BalancePerPacket
 		registration.writeMembers = func(members []netip.Addr) error {
-			return c.dataplane.SetUpReflect(slot, members, registration.perPacket)
+			return c.dataplane.SetIngressReflect(slot, members, registration.perPacket)
 		}
 	}
 	return registration
 }
 
-// candidateMembers returns the via hosts of an up reflect path: the single
+// candidateMembers returns the via hosts of an ingress reflect path: the single
 // return IP, or the first addresses of the return pool. The cap matches the
 // pool size MUP_MAX_POOL in bpf/include/mup_abi.h.
 func candidateMembers(path config.Path) []netip.Addr {
@@ -319,15 +319,15 @@ func candidateMembers(path config.Path) []netip.Addr {
 		return []netip.Addr{path.ReturnIP}
 	}
 	prefix := netip.PrefixFrom(path.ReturnIP, int(path.ReturnPrefix)).Masked()
-	members := make([]netip.Addr, 0, maxUpReflectMembers)
-	for address := prefix.Addr(); prefix.Contains(address) && len(members) < maxUpReflectMembers; address = address.Next() {
+	members := make([]netip.Addr, 0, maxIngressReflectMembers)
+	for address := prefix.Addr(); prefix.Contains(address) && len(members) < maxIngressReflectMembers; address = address.Next() {
 		members = append(members, address)
 	}
 	return members
 }
 
-// maxUpReflectMembers matches MUP_MAX_POOL in bpf/include/mup_abi.h.
-const maxUpReflectMembers = 16
+// maxIngressReflectMembers matches MUP_MAX_POOL in bpf/include/mup_abi.h.
+const maxIngressReflectMembers = 16
 
 func (c *clientController) launchLocked(slot int, current *clientPath, conn pathConn) {
 	c.nextEpoch++
@@ -382,7 +382,7 @@ func (c *clientController) handleProbe(probe pathProbeResult) error {
 	// A path without a healthy reflector counts as missed, because the
 	// server cannot return replies on it.
 	if probe.result == registerAcked {
-		// An up reflect path collects the answers of its members for a whole
+		// An ingress reflect path collects the answers of its members for a whole
 		// reply window before it reports, so it names the time of the first
 		// answer. Without it, the round-trip time would be the window.
 		repliedAt := probe.repliedAt
@@ -490,7 +490,7 @@ func (c *clientController) AddPath(raw string, listenPort uint16) (api.Path, err
 	return c.addPath(raw, listenPort, false)
 }
 
-// AddBridge adds an up path through a MUP bridge to a group with down paths.
+// AddBridge adds an ingress path through a MUP bridge to a group with egress paths.
 func (c *clientController) AddBridge(raw string, listenPort uint16) (api.Path, error) {
 	return c.addPath(raw, listenPort, true)
 }
@@ -511,10 +511,10 @@ func (c *clientController) addPath(raw string, listenPort uint16, bridge bool) (
 		return api.Path{}, err
 	}
 	if bridge && path.ReturnIP.IsValid() {
-		return api.Path{}, badRequest(errors.New("an up bridge has no via, because it passes the client packets on to the server"))
+		return api.Path{}, badRequest(errors.New("an ingress bridge has no via, because it passes the client packets on to the server"))
 	}
-	if bridge && group.downs == nil {
-		return api.Path{}, conflict("the group of listen port %d has no down paths, and a bridge needs a group with upstream and downstream", group.settings.ListenPort)
+	if bridge && group.egresses == nil {
+		return api.Path{}, conflict("the group of listen port %d has no egress paths, and a bridge needs a group with ingress and egress", group.settings.ListenPort)
 	}
 	slot := -1
 	for index, current := range c.slots {
@@ -574,25 +574,25 @@ func (c *clientController) addPath(raw string, listenPort uint16, bridge bool) (
 	return c.pathLocked(slot, c.inUseSlotsLocked()), nil
 }
 
-// AddDownPath adds a down path to a group with separate down paths. The up
+// AddEgressPath adds an egress path to a group with separate egress paths. The ingress
 // paths send it to the servers with their next REGISTER, and it stays
 // unhealthy until the first probe arrives on it.
-func (c *clientController) AddDownPath(raw string, listenPort uint16) (api.Path, error) {
-	return c.addDownPath(raw, listenPort, false)
+func (c *clientController) AddEgressPath(raw string, listenPort uint16) (api.Path, error) {
+	return c.addEgressPath(raw, listenPort, false)
 }
 
-// AddDownBridge adds a down path through a MUP bridge.
-func (c *clientController) AddDownBridge(raw string, listenPort uint16) (api.Path, error) {
-	return c.addDownPath(raw, listenPort, true)
+// AddEgressBridge adds an egress path through a MUP bridge.
+func (c *clientController) AddEgressBridge(raw string, listenPort uint16) (api.Path, error) {
+	return c.addEgressPath(raw, listenPort, true)
 }
 
-func (c *clientController) addDownPath(raw string, listenPort uint16, bridge bool) (api.Path, error) {
+func (c *clientController) addEgressPath(raw string, listenPort uint16, bridge bool) (api.Path, error) {
 	path, err := config.ParsePath(raw)
 	if err != nil {
 		return api.Path{}, badRequest(err)
 	}
 	path.Bridge = bridge
-	if err := path.ValidateDown(); err != nil {
+	if err := path.ValidateEgress(); err != nil {
 		return api.Path{}, badRequest(err)
 	}
 	c.mu.Lock()
@@ -604,64 +604,64 @@ func (c *clientController) addDownPath(raw string, listenPort uint16, bridge boo
 	if err != nil {
 		return api.Path{}, err
 	}
-	if group.downs == nil {
-		return api.Path{}, conflict("the group of listen port %d has no down paths, because its paths carry both directions", group.settings.ListenPort)
+	if group.egresses == nil {
+		return api.Path{}, conflict("the group of listen port %d has no egress paths, because its paths carry both directions", group.settings.ListenPort)
 	}
 	slot := -1
-	for index, current := range c.downSlots {
+	for index, current := range c.egressSlots {
 		if current == nil {
 			if slot < 0 {
 				slot = index
 			}
 			continue
 		}
-		if current.path.SameDownPath(path) {
-			return api.Path{}, conflict("down path %s is already down path %d", path, index)
+		if current.path.SameEgressPath(path) {
+			return api.Path{}, conflict("egress path %s is already egress path %d", path, index)
 		}
 	}
 	if slot < 0 {
-		return api.Path{}, conflict("the client already has %d down paths", dataplane.MaxDownPaths)
+		return api.Path{}, conflict("the client already has %d egress paths", dataplane.MaxEgressPaths)
 	}
-	settings := dataplane.DownPathFromConfig(path)
-	if err := c.dataplane.SetDownPath(slot, &settings); err != nil {
+	settings := dataplane.EgressPathFromConfig(path)
+	if err := c.dataplane.SetEgressPath(slot, &settings); err != nil {
 		return api.Path{}, err
 	}
-	if err := c.setDownMaskLocked(group, group.settings.DownMask|1<<slot); err != nil {
-		_ = c.dataplane.SetDownPath(slot, nil)
+	if err := c.setEgressMaskLocked(group, group.settings.DownMask|1<<slot); err != nil {
+		_ = c.dataplane.SetEgressPath(slot, nil)
 		return api.Path{}, err
 	}
-	c.downSlots[slot] = &clientDownPath{path: path, group: group}
-	group.downs.set(uint16(slot), path)
-	seen, _ := c.dataplane.DownPathsSeen()
-	return c.downPathLocked(slot, seen, time.Now()), nil
+	c.egressSlots[slot] = &clientEgressPath{path: path, group: group}
+	group.egresses.set(uint16(slot), path)
+	seen, _ := c.dataplane.EgressPathsSeen()
+	return c.egressPathLocked(slot, seen, time.Now()), nil
 }
 
-// RemoveDownPath removes a down path. The up paths tell the servers with a
+// RemoveEgressPath removes an egress path. The ingress paths tell the servers with a
 // lease of zero, so they stop to use it with the next REGISTER.
-func (c *clientController) RemoveDownPath(id int) error {
+func (c *clientController) RemoveEgressPath(id int) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if id < 0 || id >= dataplane.MaxDownPaths || c.downSlots[id] == nil {
-		return notFound("down path %d does not exist", id)
+	if id < 0 || id >= dataplane.MaxEgressPaths || c.egressSlots[id] == nil {
+		return notFound("egress path %d does not exist", id)
 	}
-	group := c.downSlots[id].group
+	group := c.egressSlots[id].group
 	if bits.OnesCount8(group.settings.DownMask) == 1 {
-		return conflict("down path %d is the last down path of the group of listen port %d, add another down path first", id, group.settings.ListenPort)
+		return conflict("egress path %d is the last egress path of the group of listen port %d, add another egress path first", id, group.settings.ListenPort)
 	}
-	if err := c.setDownMaskLocked(group, group.settings.DownMask&^(1<<id)); err != nil {
+	if err := c.setEgressMaskLocked(group, group.settings.DownMask&^(1<<id)); err != nil {
 		return err
 	}
-	if err := c.dataplane.SetDownPath(id, nil); err != nil {
+	if err := c.dataplane.SetEgressPath(id, nil); err != nil {
 		return err
 	}
-	group.downs.remove(uint16(id), time.Now())
-	c.downSlots[id] = nil
+	group.egresses.remove(uint16(id), time.Now())
+	c.egressSlots[id] = nil
 	return nil
 }
 
-// SetDownMode changes the downstream mode of a group with separate down
-// paths. The servers take it with the next REGISTER of an up path.
-func (c *clientController) SetDownMode(raw string, listenPort uint16) error {
+// SetEgressMode changes the egress mode of a group with separate egress
+// paths. The servers take it with the next REGISTER of an ingress path.
+func (c *clientController) SetEgressMode(raw string, listenPort uint16) error {
 	mode, err := config.ParseMode(raw)
 	if err != nil {
 		return badRequest(err)
@@ -672,20 +672,20 @@ func (c *clientController) SetDownMode(raw string, listenPort uint16) error {
 	if err != nil {
 		return err
 	}
-	if group.downs == nil {
-		return conflict("the group of listen port %d has no down paths, because its paths carry both directions", group.settings.ListenPort)
+	if group.egresses == nil {
+		return conflict("the group of listen port %d has no egress paths, because its paths carry both directions", group.settings.ListenPort)
 	}
 	updated := group.settings
-	updated.DownMode = mode
+	updated.EgressMode = mode
 	if err := c.dataplane.SetGroup(updated); err != nil {
 		return err
 	}
 	group.settings = updated
-	group.downs.setMode(mode)
+	group.egresses.setMode(mode)
 	return nil
 }
 
-func (c *clientController) setDownMaskLocked(group *pathGroup, mask uint8) error {
+func (c *clientController) setEgressMaskLocked(group *pathGroup, mask uint8) error {
 	updated := group.settings
 	updated.DownMask = mask
 	if err := c.dataplane.SetGroup(updated); err != nil {
@@ -695,36 +695,36 @@ func (c *clientController) setDownMaskLocked(group *pathGroup, mask uint8) error
 	return nil
 }
 
-// handleDownProbe answers the probe of a down path on an up path of its
-// group: the healthy up path with the lowest priority, or every up path when
+// handleEgressProbe answers the probe of an egress path on an ingress path of its
+// group: the healthy ingress path with the lowest priority, or every ingress path when
 // none is healthy, so that a probe can bring the group back.
-func (c *clientController) handleDownProbe(probe downProbe) {
+func (c *clientController) handleEgressProbe(probe egressProbe) {
 	frame := probe.frame
 	c.mu.Lock()
 	if frame.AdvertisedIP != c.client.AdvertisedIP || frame.InstanceNonce != c.nonce ||
-		int(frame.PathID) >= len(c.downSlots) {
+		int(frame.PathID) >= len(c.egressSlots) {
 		c.mu.Unlock()
 		return
 	}
-	down := c.downSlots[frame.PathID]
-	if down == nil || !downSourceMatches(down.path, probe.source, probe.transport, probe.port) {
+	egress := c.egressSlots[frame.PathID]
+	if egress == nil || !egressSourceMatches(egress.path, probe.source, probe.transport, probe.port) {
 		c.mu.Unlock()
 		return
 	}
-	down.lastProbe = probe.received
-	path := down.path
-	targets := c.upTargetsLocked(down.group)
+	egress.lastProbe = probe.received
+	path := egress.path
+	targets := c.ingressTargetsLocked(egress.group)
 	c.mu.Unlock()
 	for _, registration := range targets {
-		reply, err := downProbeReplyFrame(registration, probe, path)
+		reply, err := egressProbeReplyFrame(registration, probe, path)
 		if err != nil {
 			return
 		}
-		_ = c.controls.sendUp(registration, reply)
+		_ = c.controls.sendIngress(registration, reply)
 	}
 }
 
-func (c *clientController) upTargetsLocked(group *pathGroup) []pathRegistration {
+func (c *clientController) ingressTargetsLocked(group *pathGroup) []pathRegistration {
 	var all []pathRegistration
 	var best pathRegistration
 	selected := -1
@@ -831,17 +831,17 @@ func (c *clientController) groupsLocked(paths []api.Path, routes []dataplane.Cli
 	groups := make([]api.Group, 0, len(c.groups))
 	for _, group := range c.groups {
 		converted := api.Group{ListenPort: group.settings.ListenPort, Mode: group.settings.Mode.String()}
-		if group.downs != nil {
-			converted.DownMode = group.settings.DownMode.String()
+		if group.egresses != nil {
+			converted.EgressMode = group.settings.EgressMode.String()
 		}
 		for _, path := range paths {
 			if path.ListenPort != converted.ListenPort {
 				continue
 			}
-			if path.Direction == directionDown {
-				converted.DownPaths++
+			if path.Direction == directionEgress {
+				converted.EgressPaths++
 				if path.Healthy {
-					converted.HealthyDownPaths++
+					converted.HealthyEgressPaths++
 				}
 				continue
 			}
@@ -885,8 +885,8 @@ func (c *clientController) Peers() (api.PeerList, error) {
 }
 
 const (
-	directionUp   = "up"
-	directionDown = "down"
+	directionIngress = "ingress"
+	directionEgress  = "egress"
 )
 
 func (c *clientController) pathsLocked() []api.Path {
@@ -897,44 +897,44 @@ func (c *clientController) pathsLocked() []api.Path {
 			paths = append(paths, c.pathLocked(slot, inUse))
 		}
 	}
-	seen, err := c.dataplane.DownPathsSeen()
+	seen, err := c.dataplane.EgressPathsSeen()
 	if err != nil {
 		for slot := range seen {
 			seen[slot] = -1
 		}
 	}
 	now := time.Now()
-	for slot, down := range c.downSlots {
-		if down != nil {
-			paths = append(paths, c.downPathLocked(slot, seen, now))
+	for slot, egress := range c.egressSlots {
+		if egress != nil {
+			paths = append(paths, c.egressPathLocked(slot, seen, now))
 		}
 	}
 	return paths
 }
 
-// downPathLocked describes a down path. It is healthy while the probes of
+// egressPathLocked describes an egress path. It is healthy while the probes of
 // the servers arrive, and in use while the program accepts replies on it.
-func (c *clientController) downPathLocked(slot int, seen [dataplane.MaxDownPaths]time.Duration, now time.Time) api.Path {
-	down := c.downSlots[slot]
+func (c *clientController) egressPathLocked(slot int, seen [dataplane.MaxEgressPaths]time.Duration, now time.Time) api.Path {
+	egress := c.egressSlots[slot]
 	var returnIP string
 	switch {
-	case down.path.IsPool():
-		returnIP = netip.PrefixFrom(down.path.ReturnIP, int(down.path.ReturnPrefix)).String()
-	case down.path.ReturnIP.IsValid():
-		returnIP = down.path.ReturnIP.String()
+	case egress.path.IsPool():
+		returnIP = netip.PrefixFrom(egress.path.ReturnIP, int(egress.path.ReturnPrefix)).String()
+	case egress.path.ReturnIP.IsValid():
+		returnIP = egress.path.ReturnIP.String()
 	}
 	return api.Path{
 		ID:         slot,
-		Direction:  directionDown,
-		Bridge:     down.path.Bridge,
-		ListenPort: down.group.settings.ListenPort,
-		Server:     down.path.Server.String(),
-		Port:       down.path.ServerPort,
-		Transport:  down.path.Transport.String(),
+		Direction:  directionEgress,
+		Bridge:     egress.path.Bridge,
+		ListenPort: egress.group.settings.ListenPort,
+		Server:     egress.path.Server.String(),
+		Port:       egress.path.ServerPort,
+		Transport:  egress.path.Transport.String(),
 		ReturnIP:   returnIP,
-		Healthy:    !down.lastProbe.IsZero() && now.Sub(down.lastProbe) < downHealthWindow,
-		InUse:      seen[slot] >= 0 && seen[slot] < downInUse,
-		LastProbe:  down.lastProbe,
+		Healthy:    !egress.lastProbe.IsZero() && now.Sub(egress.lastProbe) < egressHealthWindow,
+		InUse:      seen[slot] >= 0 && seen[slot] < egressInUse,
+		LastProbe:  egress.lastProbe,
 	}
 }
 
@@ -961,8 +961,8 @@ func (c *clientController) pathLocked(slot int, inUse [config.MaxPaths]bool) api
 		firstPort, lastPort = current.path.ServerPort, current.path.LastPort
 	}
 	var direction string
-	if current.group.downs != nil {
-		direction = directionUp
+	if current.group.egresses != nil {
+		direction = directionIngress
 	}
 	return api.Path{
 		ID:         slot,

@@ -14,30 +14,30 @@ import (
 	"github.com/xshecan/mup/protocol"
 )
 
-// upReflectPathConn registers an up reflect path. Each cycle it sends a REGISTER
+// ingressReflectPathConn registers an ingress reflect path. Each cycle it sends a REGISTER
 // reflected through every candidate member, collects the ACKs that come back on
-// the down paths, and publishes the members that answered to the dataplane. The
+// the egress paths, and publishes the members that answered to the dataplane. The
 // path is healthy while at least one member answers. The socket includes the
 // IPv4 header, so the reflected packets carry a spoofed source.
-type upReflectPathConn struct {
+type ingressReflectPathConn struct {
 	fd           int
 	registration pathRegistration
 	router       *ackRouter
 	routed       *ackWaiter
 }
 
-func openUpReflectPathConn(registration pathRegistration, router *ackRouter) (*upReflectPathConn, error) {
+func openIngressReflectPathConn(registration pathRegistration, router *ackRouter) (*ingressReflectPathConn, error) {
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_RAW)
 	if err != nil {
-		return nil, fmt.Errorf("open raw socket of up reflect path %d: %w", registration.pathID, err)
+		return nil, fmt.Errorf("open raw socket of ingress reflect path %d: %w", registration.pathID, err)
 	}
 	if registration.path.Interface != "" {
 		if err := unix.BindToDevice(fd, registration.path.Interface); err != nil {
 			_ = unix.Close(fd)
-			return nil, fmt.Errorf("bind up reflect path %d to %s: %w", registration.pathID, registration.path.Interface, err)
+			return nil, fmt.Errorf("bind ingress reflect path %d to %s: %w", registration.pathID, registration.path.Interface, err)
 		}
 	}
-	return &upReflectPathConn{
+	return &ingressReflectPathConn{
 		fd:           fd,
 		registration: registration,
 		router:       router,
@@ -45,14 +45,14 @@ func openUpReflectPathConn(registration pathRegistration, router *ackRouter) (*u
 	}, nil
 }
 
-func (s *upReflectPathConn) Close() error {
+func (s *ingressReflectPathConn) Close() error {
 	if s.routed != nil {
 		s.router.unsubscribe(s.routed)
 	}
 	return unix.Close(s.fd)
 }
 
-func (s *upReflectPathConn) Run(ctx context.Context, report probeReporter) error {
+func (s *ingressReflectPathConn) Run(ctx context.Context, report probeReporter) error {
 	defer s.Close()
 	var sequence uint32
 	for {
@@ -68,19 +68,19 @@ func (s *upReflectPathConn) Run(ctx context.Context, report probeReporter) error
 	}
 }
 
-// registerMembers sends the down registrations to the server, a REGISTER
+// registerMembers sends the egress registrations to the server, a REGISTER
 // reflected through each member, and returns whether any member answered, with
 // the time of the first answer. It publishes the members that answered.
-func (s *upReflectPathConn) registerMembers(sequence uint32, sentAt time.Time) (registerResult, time.Time) {
+func (s *ingressReflectPathConn) registerMembers(sequence uint32, sentAt time.Time) (registerResult, time.Time) {
 	reg := s.registration
-	if reg.downs != nil {
-		for _, down := range reg.downFrames(sequence) {
-			s.sendDownRegister(reg, down, sequence)
+	if reg.egresses != nil {
+		for _, egress := range reg.egressFrames(sequence) {
+			s.sendEgressRegister(reg, egress, sequence)
 		}
 	}
 	drainRouted(s.routed)
 	for _, member := range reg.members {
-		frame, err := upReflectFrame(reg, member, sequence)
+		frame, err := ingressReflectFrame(reg, member, sequence)
 		if err != nil {
 			continue
 		}
@@ -107,12 +107,12 @@ func (s *upReflectPathConn) registerMembers(sequence uint32, sentAt time.Time) (
 	return registerAcked, repliedAt
 }
 
-// collectHealthy reads the REGISTER_ACK frames that arrive on the down paths
+// collectHealthy reads the REGISTER_ACK frames that arrive on the egress paths
 // until the reply window ends. Each ACK names the member that answered in its
 // return IP, because the member reflected the REGISTER to the server. The
 // function also returns the time of the first ACK, which gives the round-trip
 // time of the path. The wait for the other members is not part of it.
-func (s *upReflectPathConn) collectHealthy(sequence uint32, sentAt time.Time) ([]netip.Addr, time.Time) {
+func (s *ingressReflectPathConn) collectHealthy(sequence uint32, sentAt time.Time) ([]netip.Addr, time.Time) {
 	seen := make(map[netip.Addr]bool)
 	var healthy []netip.Addr
 	var repliedAt time.Time
@@ -143,13 +143,13 @@ func (s *upReflectPathConn) collectHealthy(sequence uint32, sentAt time.Time) ([
 	}
 }
 
-func (s *upReflectPathConn) sendICMP(source, destination netip.Addr, identifier, echoSequence uint16, payload []byte, id uint32) error {
+func (s *ingressReflectPathConn) sendICMP(source, destination netip.Addr, identifier, echoSequence uint16, payload []byte, id uint32) error {
 	echo := marshalICMPEcho(icmpEchoRequest, identifier, echoSequence, payload)
 	packet := buildIPv4Packet(source, destination, unix.IPPROTO_ICMP, echo, uint16(id))
 	return unix.Sendto(s.fd, packet, 0, &unix.SockaddrInet4{Addr: destination.As4()})
 }
 
-func (s *upReflectPathConn) sendUDP(source, destination netip.Addr, sourcePort, destinationPort uint16, payload []byte, id uint32) error {
+func (s *ingressReflectPathConn) sendUDP(source, destination netip.Addr, sourcePort, destinationPort uint16, payload []byte, id uint32) error {
 	segment := buildUDPSegment(source, destination, sourcePort, destinationPort, payload)
 	packet := buildIPv4Packet(source, destination, unix.IPPROTO_UDP, segment, uint16(id))
 	return unix.Sendto(s.fd, packet, 0, &unix.SockaddrInet4{Addr: destination.As4()})
@@ -169,7 +169,7 @@ const (
 // packet, so the bridge removes the wrapper and emits the inner packet to the
 // member. The outer packet carries the advertised source, so it needs no
 // spoofing.
-func (s *upReflectPathConn) sendViaBridge(reg pathRegistration, member netip.Addr, frame []byte, id uint32) error {
+func (s *ingressReflectPathConn) sendViaBridge(reg pathRegistration, member netip.Addr, frame []byte, id uint32) error {
 	var innerSource, innerDestination netip.Addr
 	var innerProtocol byte
 	var inner []byte
@@ -186,32 +186,32 @@ func (s *upReflectPathConn) sendViaBridge(reg pathRegistration, member netip.Add
 	return unix.Sendto(s.fd, packet, 0, &unix.SockaddrInet4{Addr: reg.path.ProxyBridge.As4()})
 }
 
-// sendDownRegister sends one DOWN_REGISTER to the server. The server keeps a
-// down path only when the frame reaches it from the advertised IP, so a direct
+// sendEgressRegister sends one EGRESS_REGISTER to the server. The server keeps a
+// egress path only when the frame reaches it from the advertised IP, so a direct
 // reflect path sends it from that address itself. A bridge path cannot reach
 // the server directly, which is the reason it reflects at all, so it routes the
 // frame through the bridge, and the bridge emits it with the advertised source.
-func (s *upReflectPathConn) sendDownRegister(reg pathRegistration, frame []byte, id uint32) {
+func (s *ingressReflectPathConn) sendEgressRegister(reg pathRegistration, frame []byte, id uint32) {
 	if reg.path.BridgeReflect() {
-		_ = s.sendDownViaBridge(reg, frame, id)
+		_ = s.sendEgressViaBridge(reg, frame, id)
 		return
 	}
 	_ = s.sendICMP(reg.advertisedIP, reg.path.Server, reg.path.ServerPort, uint16(id), frame, id)
 }
 
-// sendDownViaBridge wraps a DOWN_REGISTER for the bridge with the advertised IP
+// sendEgressViaBridge wraps a EGRESS_REGISTER for the bridge with the advertised IP
 // as its inner source, so the bridge emits it to the server from that address.
-// The frame travels on the transport of the up path, because the server reads
-// the control frames of the path on the port of the up path.
-func (s *upReflectPathConn) sendDownViaBridge(reg pathRegistration, frame []byte, id uint32) error {
+// The frame travels on the transport of the ingress path, because the server reads
+// the control frames of the path on the port of the ingress path.
+func (s *ingressReflectPathConn) sendEgressViaBridge(reg pathRegistration, frame []byte, id uint32) error {
 	return unix.Sendto(s.fd, bridgeControlPacket(reg, frame, id), 0, &unix.SockaddrInet4{Addr: reg.path.ProxyBridge.As4()})
 }
 
 // bridgeControlPacket wraps a control frame of the client itself for the
-// bridge of an up path. The inner packet goes from the advertised IP to the
+// bridge of an ingress path. The inner packet goes from the advertised IP to the
 // server of the path, on the transport of the path, so the server sees the
-// frame from the client address, as it requires for a DOWN_REGISTER and for
-// the PROBE_REPLY of a down path.
+// frame from the client address, as it requires for a EGRESS_REGISTER and for
+// the PROBE_REPLY of an egress path.
 func bridgeControlPacket(reg pathRegistration, frame []byte, id uint32) []byte {
 	var innerProtocol byte
 	var inner []byte
@@ -262,14 +262,14 @@ func wrapForBridge(source, bridge netip.Addr, port uint16, innerProtocol byte, i
 	return packet
 }
 
-// upReflectFrame builds the REGISTER of one member. Each member registers as a
-// single up reflect path, so a pool is a set of one-member registrations on the
+// ingressReflectFrame builds the REGISTER of one member. Each member registers as a
+// single ingress reflect path, so a pool is a set of one-member registrations on the
 // server.
-func upReflectFrame(reg pathRegistration, member netip.Addr, sequence uint32) ([]byte, error) {
+func ingressReflectFrame(reg pathRegistration, member netip.Addr, sequence uint32) ([]byte, error) {
 	frame := protocol.ControlFrame{
 		Type:          protocol.ControlRegister,
 		Transport:     reg.path.Transport,
-		Flags:         protocol.ControlFlagUpReflect | protocol.ControlFlagReturnIP,
+		Flags:         protocol.ControlFlagIngressReflect | protocol.ControlFlagReturnIP,
 		PathID:        reg.pathID,
 		Sequence:      sequence,
 		ListenPort:    reg.listenPort,

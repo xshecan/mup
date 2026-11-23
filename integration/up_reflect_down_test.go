@@ -12,14 +12,14 @@ import (
 	"github.com/xshecan/mup/api"
 )
 
-// TestPrivilegedUpReflectDownReflect mirrors the production split group that
-// failed: the up routes reflect through a bridge over a UDP pool, and the down
-// path reflects the replies through the same pool as ICMP. The up path is
-// healthy only when its member ACKs come back on the down path, so a down path
-// that the server never probes keeps the up path unhealthy. One reflector owns
-// the whole pool 10.210.1.8/29, so it answers both the UDP up members and the
-// ICMP down probes.
-func TestPrivilegedUpReflectDownReflect(t *testing.T) {
+// TestPrivilegedIngressReflectEgressReflect mirrors the production split group that
+// failed: the ingress routes reflect through a bridge over a UDP pool, and the egress
+// path reflects the replies through the same pool as ICMP. The ingress path is
+// healthy only when its member ACKs come back on the egress path, so an egress path
+// that the server never probes keeps the ingress path unhealthy. One reflector owns
+// the whole pool 10.210.1.8/29, so it answers both the UDP ingress members and the
+// ICMP egress probes.
+func TestPrivilegedIngressReflectEgressReflect(t *testing.T) {
 	requirePrivilegedLinux(t)
 	binaryPath := buildDaemon(t)
 
@@ -42,13 +42,13 @@ func TestPrivilegedUpReflectDownReflect(t *testing.T) {
 	}
 	addressLink(t, clientNS, "mc"+suffix, "10.210.1.1/24")
 	addressLink(t, serverNS, "ms"+suffix, "10.210.1.2/24")
-	// The down path names a second server address (10.210.1.20), different from
-	// the up server (10.210.1.2), as production does (.99 down vs .33 up).
+	// The egress path names a second server address (10.210.1.20), different from
+	// the ingress server (10.210.1.2), as production does (.99 egress vs .33 ingress).
 	runIP(t, "-n", serverNS, "addr", "add", "10.210.1.20/24", "dev", "ms"+suffix)
 	addressLink(t, reflectorNS, "mr"+suffix, "10.210.1.3/24")
 	addressLink(t, bridgeNS, "mb"+suffix, "10.210.1.4/24")
 	// The reflector owns the whole pool 10.210.1.8/29, members 10.210.1.9-.14,
-	// so it answers both the UDP up registrations and the ICMP down probes.
+	// so it answers both the UDP ingress registrations and the ICMP egress probes.
 	for member := 9; member <= 14; member++ {
 		runIP(t, "-n", reflectorNS, "addr", "add", fmt.Sprintf("10.210.1.%d/24", member), "dev", "mr"+suffix)
 	}
@@ -86,10 +86,10 @@ func TestPrivilegedUpReflectDownReflect(t *testing.T) {
       routes:
         - "10.210.1.2:5020/icmp via 10.210.1.8/29 balance per-packet"
     - port: 51820
-      upstream:
+      ingress:
         routes:
           - "10.210.1.2:5000/udp via 10.210.1.8/29 balance per-packet bridge 10.210.1.4"
-      downstream:
+      egress:
         routes:
           - "10.210.1.20:5010/icmp via 10.210.1.8/29 balance per-packet"
 `, clientSocket)
@@ -97,10 +97,10 @@ func TestPrivilegedUpReflectDownReflect(t *testing.T) {
 		t.Fatalf("write client configuration: %v", err)
 	}
 	// Production reaches the server only through the reflection, never directly,
-	// which is the reason the up path uses a bridge. The switch drops every
-	// IPv4 packet from the port of the client to the up server, so a control
+	// which is the reason the ingress path uses a bridge. The switch drops every
+	// IPv4 packet from the port of the client to the ingress server, so a control
 	// frame that the client sends straight to the server is lost in transit,
-	// whatever socket sends it. The down registration and the probe replies
+	// whatever socket sends it. The egress registration and the probe replies
 	// must travel through the bridge to arrive.
 	runInNamespace(t, switchNS, "nft", "add", "table", "bridge", "mup")
 	runInNamespace(t, switchNS, "nft", "add", "chain", "bridge", "mup", "forward", "{ type filter hook forward priority 0 ; }")
@@ -134,23 +134,23 @@ func TestPrivilegedUpReflectDownReflect(t *testing.T) {
 		}
 	}
 
-	// The down path reflects, so it becomes healthy once the server reflects a
+	// The egress path reflects, so it becomes healthy once the server reflects a
 	// probe through the pool to the client.
-	waitFor(t, 30*time.Second, "the reflected down path to become healthy", state, directionHealthy("down"))
-	// The up path becomes healthy once its member ACK returns on the down path.
-	waitFor(t, 30*time.Second, "the up bridge reflect path to become healthy", state, directionHealthy("up"))
+	waitFor(t, 30*time.Second, "the reflected egress path to become healthy", state, directionHealthy("egress"))
+	// The ingress path becomes healthy once its member ACK returns on the egress path.
+	waitFor(t, 30*time.Second, "the ingress bridge reflect path to become healthy", state, directionHealthy("ingress"))
 
-	// The server takes a new down path as healthy for its first 6 seconds.
+	// The server takes a new egress path as healthy for its first 6 seconds.
 	// After that it sends a reply only through a member that a probe reply of
 	// the client confirmed, and that reply reaches the server only through the
 	// bridge. The wait passes the first window, so the exchange needs it.
 	time.Sleep(8 * time.Second)
 	exchange(t, peerNS, "10.210.3.1:51820", 3, state)
 	waitFor(t, 5*time.Second, "the paths to stay healthy after the exchange", state, func() (bool, error) {
-		up, err := directionHealthy("up")()
-		if err != nil || !up {
+		ingress, err := directionHealthy("ingress")()
+		if err != nil || !ingress {
 			return false, err
 		}
-		return directionHealthy("down")()
+		return directionHealthy("egress")()
 	})
 }

@@ -42,8 +42,8 @@ Commands:
 
   Each list command also works after get, for example get paths.
 
-  With --down, add, delete, and set work on the down paths and the
-  downstream mode of a group with separate down paths. With --bridge, add
+  With --egress, add, delete, and set work on the egress paths and the
+  egress mode of a group with separate egress paths. With --bridge, add
   adds a path through a MUP bridge, and the address is the bridge address.
 
 Flags:
@@ -54,7 +54,8 @@ Flags:
   -w, --watch         Show the output again every second (status and get only).
   --group LISTEN_PORT The group for add and set. A client with one group does
                       not need it.
-  --down              Add, delete, or set a down path or the downstream mode.
+  --egress            Add, delete, or set an egress path or the egress mode.
+  --down              Old name of --egress.
   --bridge            Add a path through a MUP bridge.
 `
 
@@ -65,7 +66,7 @@ type options struct {
 	output string
 	group  uint16
 	watch  bool
-	down   bool
+	egress bool
 	bridge bool
 	args   []string
 }
@@ -139,8 +140,8 @@ func parseOptions(args []string) (options, error) {
 		switch {
 		case arg == "-w" || arg == "--watch":
 			opts.watch = true
-		case arg == "--down":
-			opts.down = true
+		case arg == "--egress" || arg == "--down":
+			opts.egress = true
 		case arg == "--bridge":
 			opts.bridge = true
 		case name == "--socket" || name == "-o" || name == "--output" || name == "--group":
@@ -201,8 +202,8 @@ func parseCommand(opts options) (command, error) {
 	if opts.group != 0 && verb != "add" && verb != "set" {
 		return nil, fmt.Errorf("--group works only with add and set")
 	}
-	if opts.down && verb != "add" && verb != "set" && verb != "delete" && verb != "del" && verb != "remove" && verb != "rm" {
-		return nil, fmt.Errorf("--down works only with add, delete, and set")
+	if opts.egress && verb != "add" && verb != "set" && verb != "delete" && verb != "del" && verb != "remove" && verb != "rm" {
+		return nil, fmt.Errorf("--egress works only with add, delete, and set")
 	}
 	if opts.bridge && verb != "add" {
 		return nil, fmt.Errorf("--bridge works only with add")
@@ -239,7 +240,7 @@ func parseCommand(opts options) (command, error) {
 		}
 		spec := strings.Join(args[2:], " ")
 		return func(ctx context.Context, s invocation, w io.Writer) error {
-			return addPath(ctx, s, w, spec, opts.group, opts.down, opts.bridge)
+			return addPath(ctx, s, w, spec, opts.group, opts.egress, opts.bridge)
 		}, nil
 	case "delete", "del", "remove", "rm":
 		if err := expectArgs(args, 3); err != nil {
@@ -253,7 +254,7 @@ func parseCommand(opts options) (command, error) {
 			return nil, fmt.Errorf("path ID %q is not a number", args[2])
 		}
 		return func(ctx context.Context, s invocation, w io.Writer) error {
-			return deletePath(ctx, s, w, id, opts.down)
+			return deletePath(ctx, s, w, id, opts.egress)
 		}, nil
 	case "set":
 		if err := expectArgs(args, 3); err != nil {
@@ -264,7 +265,7 @@ func parseCommand(opts options) (command, error) {
 		}
 		mode := args[2]
 		return func(ctx context.Context, s invocation, w io.Writer) error {
-			return setMode(ctx, s, w, mode, opts.group, opts.down)
+			return setMode(ctx, s, w, mode, opts.group, opts.egress)
 		}, nil
 	}
 	if show, ok := listCommand(verb); ok {
@@ -418,14 +419,14 @@ func showDrops(ctx context.Context, s invocation, w io.Writer) error {
 	return nil
 }
 
-func addPath(ctx context.Context, s invocation, w io.Writer, spec string, group uint16, down, bridge bool) error {
+func addPath(ctx context.Context, s invocation, w io.Writer, spec string, group uint16, egress, bridge bool) error {
 	add, name, until := s.daemon.AddPath, "path", "ACK"
-	if down {
-		add, name, until = s.daemon.AddDownPath, "down path", "probe"
+	if egress {
+		add, name, until = s.daemon.AddEgressPath, "egress path", "probe"
 	}
 	if bridge {
 		add = func(ctx context.Context, spec string, group uint16) (api.Path, error) {
-			return s.daemon.AddBridge(ctx, spec, group, down)
+			return s.daemon.AddBridge(ctx, spec, group, egress)
 		}
 		name = strings.Replace(name, "path", "bridge", 1)
 	}
@@ -444,10 +445,10 @@ func addPath(ctx context.Context, s invocation, w io.Writer, spec string, group 
 	return err
 }
 
-func deletePath(ctx context.Context, s invocation, w io.Writer, id int, down bool) error {
+func deletePath(ctx context.Context, s invocation, w io.Writer, id int, egress bool) error {
 	remove, name := s.daemon.DeletePath, "path"
-	if down {
-		remove, name = s.daemon.DeleteDownPath, "down-path"
+	if egress {
+		remove, name = s.daemon.DeleteEgressPath, "egress-path"
 	}
 	if err := remove(ctx, id); err != nil {
 		return err
@@ -456,10 +457,10 @@ func deletePath(ctx context.Context, s invocation, w io.Writer, id int, down boo
 	return err
 }
 
-func setMode(ctx context.Context, s invocation, w io.Writer, mode string, group uint16, down bool) error {
+func setMode(ctx context.Context, s invocation, w io.Writer, mode string, group uint16, egress bool) error {
 	set, name := s.daemon.SetMode, "mode"
-	if down {
-		set, name = s.daemon.SetDownMode, "downstream mode"
+	if egress {
+		set, name = s.daemon.SetEgressMode, "egress mode"
 	}
 	if err := set(ctx, mode, group); err != nil {
 		return err

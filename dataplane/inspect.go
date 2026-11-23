@@ -93,7 +93,7 @@ func decodeClientRoute(endpoint mupPeerEndpointKeyV1, route mupPeerTokenValueV1,
 }
 
 // decodeServerRoute reads the return path from the reverse entry, which the
-// downstream direction uses.
+// egress direction uses.
 func decodeServerRoute(reverse mupServerReverseValueV1, nowNS uint64) ServerRoute {
 	value := reverse.RouteValue
 	route := ServerRoute{

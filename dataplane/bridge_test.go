@@ -8,25 +8,25 @@ import (
 	"github.com/xshecan/mup/protocol"
 )
 
-func TestEncodeDownPathEntryOfABridge(t *testing.T) {
+func TestEncodeEgressPathEntryOfABridge(t *testing.T) {
 	t.Parallel()
 
 	client := ClientKey{AdvertisedIP: netip.MustParseAddr("192.0.2.10"), InstanceNonce: 7}
-	entry := DownPathEntry{
+	entry := EgressPathEntry{
 		Client: client, PathID: 1, Server: netip.MustParseAddr("5.6.7.8"), ServerPort: 9200,
 		Transport: protocol.TransportICMP, Ifindex: 3, ReturnIP: netip.MustParseAddr("198.51.100.9"),
 		Bridge: true, LocalIP: netip.MustParseAddr("203.0.113.5"),
 	}
-	_, value, err := encodeDownPathEntry(entry)
+	_, value, err := encodeEgressPathEntry(entry)
 	if err != nil {
-		t.Fatalf("encodeDownPathEntry: %v", err)
+		t.Fatalf("encodeEgressPathEntry: %v", err)
 	}
 	if value.Flags != protocol.ControlFlagReturnIP|protocol.ControlFlagBridge || ipv4FromWord(value.LocalIp) != entry.LocalIP ||
 		ipv4FromWord(value.ServerIp) != entry.Server {
 		t.Fatalf("value = %#v", value)
 	}
 	entry.LocalIP = netip.Addr{}
-	if _, _, err := encodeDownPathEntry(entry); err == nil {
+	if _, _, err := encodeEgressPathEntry(entry); err == nil {
 		t.Fatal("a bridge without a source encoded")
 	}
 }

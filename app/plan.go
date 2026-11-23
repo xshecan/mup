@@ -60,19 +60,19 @@ func buildPlan(appConfig config.App, nonce uint64, resolver routeResolver) (runt
 			Groups:        make([]dataplane.GroupSettings, 0, len(client.Groups)),
 			Paths:         make([]dataplane.PathSettings, 0, config.MaxPaths),
 		}
-		var upReflectMask uint32
+		var ingressReflectMask uint32
 		for _, group := range client.Groups {
 			var pathMask uint8
 			for _, path := range group.Paths {
 				slot := len(settings.Paths)
-				// An up reflect path sends to the via host, so the interface
+				// An ingress reflect path sends to the via host, so the interface
 				// comes from the route to the via, not to the server. The path
 				// starts unhealthy, because the control plane finds the healthy
-				// members before it carries the upstream.
+				// members before it carries the ingress.
 				destination := path.Server
-				if path.UpReflect(group.Split()) {
+				if path.IngressReflect(group.Split()) {
 					destination = path.ReturnIP
-					upReflectMask |= 1 << slot
+					ingressReflectMask |= 1 << slot
 				}
 				if path.BridgeReflect() {
 					// A bridge reflect route sends the wrapped packet to the
@@ -91,21 +91,21 @@ func buildPlan(appConfig config.App, nonce uint64, resolver routeResolver) (runt
 				settings.Paths = append(settings.Paths, clientPathSettings(path, client.AdvertisedIP, ifindex, uint8(slot)))
 				pathMask |= 1 << slot
 			}
-			var downMask uint8
-			for _, down := range group.DownPaths {
-				downSettings := dataplane.DownPathFromConfig(down)
-				downMask |= 1 << len(settings.DownPaths)
-				settings.DownPaths = append(settings.DownPaths, &downSettings)
+			var egressMask uint8
+			for _, egress := range group.EgressPaths {
+				egressSettings := dataplane.EgressPathFromConfig(egress)
+				egressMask |= 1 << len(settings.EgressPaths)
+				settings.EgressPaths = append(settings.EgressPaths, &egressSettings)
 			}
 			settings.Groups = append(settings.Groups, dataplane.GroupSettings{
 				ListenPort: group.ListenPort,
 				Mode:       group.Mode,
 				PathMask:   pathMask,
-				DownMode:   group.DownMode,
-				DownMask:   downMask,
+				EgressMode: group.EgressMode,
+				DownMask:   egressMask,
 			})
 		}
-		settings.HealthyMask = (uint32(1)<<len(settings.Paths) - 1) &^ upReflectMask
+		settings.HealthyMask = (uint32(1)<<len(settings.Paths) - 1) &^ ingressReflectMask
 		return runtimePlan{
 			pinRoot:         defaultPinRoot + "/client",
 			attachIfindexes: uniqueSortedPositive(attachIfindexes),

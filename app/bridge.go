@@ -55,13 +55,13 @@ func (b *bridgeInspector) Status() (api.Status, error) {
 		return api.Status{}, err
 	}
 	status := &api.BridgeStatus{
-		Server:      b.bridge.Server.String(),
-		Port:        b.bridge.Port.First,
-		PortLast:    b.bridge.Port.Last,
-		UpPackets:   counters.UpPackets,
-		UpBytes:     counters.UpBytes,
-		DownPackets: counters.DownPackets,
-		DownBytes:   counters.DownBytes,
+		Server:         b.bridge.Server.String(),
+		Port:           b.bridge.Port.First,
+		PortLast:       b.bridge.Port.Last,
+		IngressPackets: counters.IngressPackets,
+		IngressBytes:   counters.IngressBytes,
+		EgressPackets:  counters.EgressPackets,
+		EgressBytes:    counters.EgressBytes,
 	}
 	for _, prefix := range b.bridge.Allow {
 		status.Allow = append(status.Allow, prefix.String())

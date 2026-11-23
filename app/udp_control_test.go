@@ -453,26 +453,26 @@ func TestUDPPathsRunAndCloseConcurrently(t *testing.T) {
 	}
 }
 
-// An up path of a group with separate down paths sends the DOWN_REGISTER
+// An ingress path of a group with separate egress paths sends the EGRESS_REGISTER
 // frames before its REGISTER, and it takes its ACK from any source, because
-// the ACK can arrive on any down path.
-func TestSplitUDPPathTakesItsACKFromADownPath(t *testing.T) {
+// the ACK can arrive on any egress path.
+func TestSplitUDPPathTakesItsACKFromAEgressPath(t *testing.T) {
 	t.Parallel()
 
 	listener := &fakeUDPListener{}
 	sockets := newUDPControlSockets(listener.listen)
 	registration := testUDPRegistration(testServerA, 0)
-	registration.downs = newDownSet(config.ModeFallback)
-	registration.downs.set(0, config.Path{Server: testServerA.Addr(), ServerPort: 9200, Transport: protocol.TransportUDP})
+	registration.egresses = newEgressSet(config.ModeFallback)
+	registration.egresses.set(0, config.Path{Server: testServerA.Addr(), ServerPort: 9200, Transport: protocol.TransportUDP})
 	path, err := sockets.openPath(registration, 0)
 	if err != nil {
 		t.Fatalf("openPath: %v", err)
 	}
 	conn := listener.opened()[0]
 	outcomes := runOneRound(path)
-	down := receiveSent(t, conn)
-	if frame, err := protocol.DecodeControlFrame(down.data); err != nil || frame.Type != protocol.ControlDownRegister || down.peer != testServerA {
-		t.Fatalf("first frame = %+v to %s (%v), want a DOWN_REGISTER to the server", frame, down.peer, err)
+	egress := receiveSent(t, conn)
+	if frame, err := protocol.DecodeControlFrame(egress.data); err != nil || frame.Type != protocol.ControlEgressRegister || egress.peer != testServerA {
+		t.Fatalf("first frame = %+v to %s (%v), want a EGRESS_REGISTER to the server", frame, egress.peer, err)
 	}
 	register := receiveSent(t, conn)
 	conn.inbox <- fakeDatagram{data: testACK(t, register.data, nil), peer: netip.MustParseAddrPort("203.0.113.4:9200")}
@@ -481,15 +481,15 @@ func TestSplitUDPPathTakesItsACKFromADownPath(t *testing.T) {
 	}
 }
 
-// A down path probe that arrives on the UDP socket goes to the handler of
+// An egress path probe that arrives on the UDP socket goes to the handler of
 // the client, and an ordinary path never sees it.
-func TestUDPSocketPassesDownProbes(t *testing.T) {
+func TestUDPSocketPassesEgressProbes(t *testing.T) {
 	t.Parallel()
 
 	listener := &fakeUDPListener{}
 	sockets := newUDPControlSockets(listener.listen)
-	probes := make(chan downProbe, 1)
-	handle := func(probe downProbe) { probes <- probe }
+	probes := make(chan egressProbe, 1)
+	handle := func(probe egressProbe) { probes <- probe }
 	sockets.onProbe.Store(&handle)
 	socket, err := sockets.acquire(netip.AddrPortFrom(testAdvertisedIP, 51820))
 	if err != nil {
@@ -497,7 +497,7 @@ func TestUDPSocketPassesDownProbes(t *testing.T) {
 	}
 	defer sockets.release(socket)
 	frame := protocol.ControlFrame{
-		Type: protocol.ControlProbe, Transport: protocol.TransportUDP, Flags: protocol.ControlFlagDownPath,
+		Type: protocol.ControlProbe, Transport: protocol.TransportUDP, Flags: protocol.ControlFlagEgressPath,
 		PathID: 3, Sequence: 5, InstanceNonce: 7, AdvertisedIP: testAdvertisedIP,
 	}
 	packet := make([]byte, protocol.ControlFrameLength)

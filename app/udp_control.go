@@ -49,10 +49,10 @@ func (r udpControlReply) answer(registration pathRegistration, ifindex int, sequ
 
 type udpControlSockets struct {
 	listen udpControlListener
-	// router passes the REGISTER_ACK frames of the up paths of groups with
-	// separate down paths, and onProbe takes the probes of down paths.
+	// router passes the REGISTER_ACK frames of the ingress paths of groups with
+	// separate egress paths, and onProbe takes the probes of egress paths.
 	router  *ackRouter
-	onProbe atomic.Pointer[func(downProbe)]
+	onProbe atomic.Pointer[func(egressProbe)]
 
 	mu      sync.Mutex
 	sockets map[netip.AddrPort]*udpControlSocket
@@ -131,9 +131,9 @@ func (s *udpControlSocket) read() {
 		if err != nil {
 			continue
 		}
-		if frame.Type == protocol.ControlProbe && frame.Flags&protocol.ControlFlagDownPath != 0 {
+		if frame.Type == protocol.ControlProbe && frame.Flags&protocol.ControlFlagEgressPath != 0 {
 			if handle := s.owner.onProbe.Load(); handle != nil {
-				(*handle)(downProbe{
+				(*handle)(egressProbe{
 					frame:     frame,
 					source:    source.Addr().Unmap(),
 					transport: protocol.TransportUDP,
@@ -238,8 +238,8 @@ type udpPathConn struct {
 	sockets      *udpControlSockets
 	socket       *udpControlSocket
 	waiter       *udpControlWaiter
-	// routed takes the ACK of an up path of a group with separate down
-	// paths, which can arrive on any down path.
+	// routed takes the ACK of an ingress path of a group with separate egress
+	// paths, which can arrive on any egress path.
 	routed *ackWaiter
 
 	closeOnce sync.Once
@@ -272,7 +272,7 @@ func (s *udpControlSockets) openPath(registration pathRegistration, ifindex int)
 		waiter:       socket.subscribe(registration, ifindex),
 		closed:       make(chan struct{}),
 	}
-	if registration.downs != nil {
+	if registration.egresses != nil {
 		conn.routed = s.router.subscribe(registration.pathID)
 	}
 	return conn, nil
@@ -320,8 +320,8 @@ func (s *udpPathConn) register(ctx context.Context, frame []byte, sentAt time.Ti
 	default:
 	}
 	s.drain()
-	for _, down := range s.registration.downFrames(sequence) {
-		_ = s.socket.conn.writeControl(down, s.destination, s.ifindex)
+	for _, egress := range s.registration.egressFrames(sequence) {
+		_ = s.socket.conn.writeControl(egress, s.destination, s.ifindex)
 	}
 	if err := s.socket.conn.writeControl(frame, s.destination, s.ifindex); err != nil {
 		return registerMissed, nil

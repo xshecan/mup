@@ -51,28 +51,28 @@ func (f *fakeClientAPI) SetMode(raw string, listenPort uint16) error {
 	return nil
 }
 
-func (f *fakeClientAPI) AddDownPath(raw string, listenPort uint16) (api.Path, error) {
+func (f *fakeClientAPI) AddEgressPath(raw string, listenPort uint16) (api.Path, error) {
 	f.group = listenPort
-	return api.Path{ID: 1, Direction: "down", Server: raw}, nil
+	return api.Path{ID: 1, Direction: "egress", Server: raw}, nil
 }
 
 func (f *fakeClientAPI) AddBridge(raw string, listenPort uint16) (api.Path, error) {
 	f.group = listenPort
-	return api.Path{ID: 2, Direction: "up", Bridge: true, Server: raw}, nil
+	return api.Path{ID: 2, Direction: "ingress", Bridge: true, Server: raw}, nil
 }
 
-func (f *fakeClientAPI) AddDownBridge(raw string, listenPort uint16) (api.Path, error) {
+func (f *fakeClientAPI) AddEgressBridge(raw string, listenPort uint16) (api.Path, error) {
 	f.group = listenPort
-	return api.Path{ID: 4, Direction: "down", Bridge: true, Server: raw}, nil
+	return api.Path{ID: 4, Direction: "egress", Bridge: true, Server: raw}, nil
 }
 
-func (f *fakeClientAPI) RemoveDownPath(id int) error {
+func (f *fakeClientAPI) RemoveEgressPath(id int) error {
 	f.removed = id + 100
 	return nil
 }
 
-func (f *fakeClientAPI) SetDownMode(raw string, listenPort uint16) error {
-	f.mode = "down " + raw
+func (f *fakeClientAPI) SetEgressMode(raw string, listenPort uint16) error {
+	f.mode = "egress " + raw
 	f.group = listenPort
 	return nil
 }

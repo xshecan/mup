@@ -70,7 +70,7 @@ func TestBridgeReflectNeedsSplit(t *testing.T) {
 		Paths:      []Path{mustParsePath(t, "160.119.74.33:9000/icmp via 5.6.7.8/28 bridge 203.0.113.9")},
 	}
 	if err := group.validate(); err == nil {
-		t.Fatal("a bridge reflect without down paths was accepted")
+		t.Fatal("a bridge reflect without egress paths was accepted")
 	}
 }
 
@@ -78,9 +78,9 @@ func TestBridgeReflectNeedsVia(t *testing.T) {
 	t.Parallel()
 	// A bridge suffix with no via is an emit with nothing to reflect.
 	group := Group{
-		ListenPort: 51820,
-		Paths:      []Path{mustParsePath(t, "160.119.74.33:9000/icmp bridge 203.0.113.9")},
-		DownPaths:  []Path{mustParsePath(t, "160.119.74.33:9200/icmp")},
+		ListenPort:  51820,
+		Paths:       []Path{mustParsePath(t, "160.119.74.33:9000/icmp bridge 203.0.113.9")},
+		EgressPaths: []Path{mustParsePath(t, "160.119.74.33:9200/icmp")},
 	}
 	if err := group.validate(); err == nil {
 		t.Fatal("a bridge reflect without a via was accepted")
@@ -90,19 +90,19 @@ func TestBridgeReflectNeedsVia(t *testing.T) {
 func TestBridgeReflectInSplitGroup(t *testing.T) {
 	t.Parallel()
 	group := Group{
-		ListenPort: 51820,
-		Paths:      []Path{mustParsePath(t, "160.119.74.33:9000/icmp via 5.6.7.8/28 bridge 203.0.113.9")},
-		DownPaths:  []Path{mustParsePath(t, "160.119.74.33:9200/icmp")},
+		ListenPort:  51820,
+		Paths:       []Path{mustParsePath(t, "160.119.74.33:9000/icmp via 5.6.7.8/28 bridge 203.0.113.9")},
+		EgressPaths: []Path{mustParsePath(t, "160.119.74.33:9200/icmp")},
 	}
 	if err := group.validate(); err != nil {
 		t.Fatalf("split group with a bridge reflect: %v", err)
 	}
 }
 
-func TestBridgeReflectRejectedOnDownPath(t *testing.T) {
+func TestBridgeReflectRejectedOnEgressPath(t *testing.T) {
 	t.Parallel()
 	path := mustParsePath(t, "160.119.74.33:9200/icmp via 5.6.7.8/28 bridge 203.0.113.9")
-	if err := path.ValidateDown(); err == nil {
-		t.Fatal("a down route with a bridge reflect was accepted")
+	if err := path.ValidateEgress(); err == nil {
+		t.Fatal("an egress route with a bridge reflect was accepted")
 	}
 }

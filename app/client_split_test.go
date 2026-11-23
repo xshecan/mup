@@ -23,8 +23,8 @@ type sentFrame struct {
 type fakeControls struct {
 	mu            sync.Mutex
 	registrations map[int]pathRegistration
-	listened      []downListen
-	handle        func(downProbe)
+	listened      []egressListen
+	handle        func(egressProbe)
 	sent          []sentFrame
 	stopped       bool
 }
@@ -36,7 +36,7 @@ func (f *fakeControls) open(registration pathRegistration) (pathConn, error) {
 	return newFakePathConn(), nil
 }
 
-func (f *fakeControls) listenDown(listen downListen, handle func(downProbe)) (func(), error) {
+func (f *fakeControls) listenEgress(listen egressListen, handle func(egressProbe)) (func(), error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.listened = append(f.listened, listen)
@@ -48,7 +48,7 @@ func (f *fakeControls) listenDown(listen downListen, handle func(downProbe)) (fu
 	}, nil
 }
 
-func (f *fakeControls) sendUp(registration pathRegistration, packet []byte) error {
+func (f *fakeControls) sendIngress(registration pathRegistration, packet []byte) error {
 	frame, err := protocol.DecodeControlFrame(packet)
 	if err != nil {
 		return err
@@ -75,9 +75,9 @@ type splitFixture struct {
 func newSplitFixture(t *testing.T) splitFixture {
 	t.Helper()
 	group := testGroup(t, 51820, config.ModeFallback, "198.51.100.1:9000/udp", "198.51.100.2:9100/icmp")
-	group.DownMode = config.ModeBalancer
+	group.EgressMode = config.ModeBalancer
 	for _, raw := range []string{"198.51.100.1:9200/icmp via 203.0.113.0/28", "198.51.100.1:9300/udp"} {
-		group.DownPaths = append(group.DownPaths, mustParsePath(t, raw))
+		group.EgressPaths = append(group.EgressPaths, mustParsePath(t, raw))
 	}
 	paired := testGroup(t, 51821, config.ModeFallback, "198.51.100.3:5000/udp")
 	client := config.Client{AdvertisedIP: netip.MustParseAddr("192.0.2.10"), Groups: []config.Group{group, paired}}
@@ -88,8 +88,8 @@ func newSplitFixture(t *testing.T) splitFixture {
 	if err != nil {
 		t.Fatalf("buildPlan: %v", err)
 	}
-	if len(plan.client.DownPaths) != 2 || plan.client.Groups[0].DownMask != 0b11 || plan.client.Groups[1].DownMask != 0 {
-		t.Fatalf("plan down paths = %d, groups = %#v", len(plan.client.DownPaths), plan.client.Groups)
+	if len(plan.client.EgressPaths) != 2 || plan.client.Groups[0].DownMask != 0b11 || plan.client.Groups[1].DownMask != 0 {
+		t.Fatalf("plan egress paths = %d, groups = %#v", len(plan.client.EgressPaths), plan.client.Groups)
 	}
 	fake := &fakeClientDataplane{paths: map[int]dataplane.PathSettings{}, groups: map[uint16]dataplane.GroupSettings{}}
 	controls := &fakeControls{registrations: map[int]pathRegistration{}}
@@ -129,25 +129,25 @@ func decodeFrames(t *testing.T, packets [][]byte) []protocol.ControlFrame {
 	return frames
 }
 
-func TestSplitGroupSendsItsDownPaths(t *testing.T) {
+func TestSplitGroupSendsItsEgressPaths(t *testing.T) {
 	t.Parallel()
 
 	fixture := newSplitFixture(t)
 	if len(fixture.controls.listened) != 1 || !slices.Equal(fixture.controls.listened[0].listenPorts, []uint16{51820}) ||
 		fixture.controls.listened[0].nonce != 42 {
-		t.Fatalf("listenDown = %#v, want the split group only", fixture.controls.listened)
+		t.Fatalf("listenEgress = %#v, want the split group only", fixture.controls.listened)
 	}
-	if fixture.registrations[2].downs != nil {
-		t.Fatal("the up path of the paired group sends down paths")
+	if fixture.registrations[2].egresses != nil {
+		t.Fatal("the ingress path of the paired group sends egress paths")
 	}
-	frames := decodeFrames(t, fixture.registrations[1].downFrames(9))
+	frames := decodeFrames(t, fixture.registrations[1].egressFrames(9))
 	if len(frames) != 2 {
-		t.Fatalf("DOWN_REGISTER frames = %d, want 2", len(frames))
+		t.Fatalf("EGRESS_REGISTER frames = %d, want 2", len(frames))
 	}
 	pool, direct := frames[0], frames[1]
-	if pool.Type != protocol.ControlDownRegister || pool.Transport != protocol.TransportICMP || pool.ServerPort != 9200 ||
+	if pool.Type != protocol.ControlEgressRegister || pool.Transport != protocol.TransportICMP || pool.ServerPort != 9200 ||
 		pool.Flags != protocol.ControlFlagReturnPool || pool.ReturnIP != netip.MustParseAddr("203.0.113.0") || pool.ReturnPrefix != 28 ||
-		pool.DownServer != netip.MustParseAddr("198.51.100.1") || pool.DownMode != uint8(config.ModeBalancer) ||
+		pool.EgressServer != netip.MustParseAddr("198.51.100.1") || pool.EgressMode != uint8(config.ModeBalancer) ||
 		pool.ListenPort != 51820 || pool.Sequence != 9 || pool.LeaseSeconds != registrationLeaseSeconds {
 		t.Fatalf("pool frame = %#v", pool)
 	}
@@ -156,13 +156,13 @@ func TestSplitGroupSendsItsDownPaths(t *testing.T) {
 	}
 }
 
-func TestDownProbeIsAnsweredOnAnUpPath(t *testing.T) {
+func TestEgressProbeIsAnsweredOnAnIngressPath(t *testing.T) {
 	t.Parallel()
 
 	fixture := newSplitFixture(t)
-	probe := downProbe{
+	probe := egressProbe{
 		frame: protocol.ControlFrame{
-			Type: protocol.ControlProbe, Transport: protocol.TransportICMP, Flags: protocol.ControlFlagDownPath,
+			Type: protocol.ControlProbe, Transport: protocol.TransportICMP, Flags: protocol.ControlFlagEgressPath,
 			PathID: 0, Sequence: 77, ListenPort: 51820, ServerPort: 9200,
 			InstanceNonce: 42, AdvertisedIP: netip.MustParseAddr("192.0.2.10"),
 		},
@@ -174,25 +174,25 @@ func TestDownProbeIsAnsweredOnAnUpPath(t *testing.T) {
 	fixture.controls.handle(probe)
 	sent := fixture.controls.takeSent()
 	if len(sent) != 1 || sent[0].registration.pathID != 0 {
-		t.Fatalf("probe replies = %#v, want one on up path 0", sent)
+		t.Fatalf("probe replies = %#v, want one on ingress path 0", sent)
 	}
 	reply := sent[0].frame
-	if reply.Type != protocol.ControlProbeReply || reply.Flags != protocol.ControlFlagDownPath|protocol.ControlFlagReturnIP ||
+	if reply.Type != protocol.ControlProbeReply || reply.Flags != protocol.ControlFlagEgressPath|protocol.ControlFlagReturnIP ||
 		reply.PathID != 0 || reply.Sequence != 77 || reply.ReturnIP != probe.source || reply.Transport != protocol.TransportICMP {
 		t.Fatalf("probe reply = %#v", reply)
 	}
 	paths, _ := fixture.controller.Paths()
 	var downs []bool
 	for _, path := range paths {
-		if path.Direction == directionDown {
+		if path.Direction == directionEgress {
 			downs = append(downs, path.Healthy)
 		}
 	}
 	if !slices.Equal(downs, []bool{true, false}) {
-		t.Fatalf("down path health = %v, want only the probed path healthy", downs)
+		t.Fatalf("egress path health = %v, want only the probed path healthy", downs)
 	}
 
-	for name, bad := range map[string]downProbe{
+	for name, bad := range map[string]egressProbe{
 		"source outside the pool": {frame: probe.frame, source: netip.MustParseAddr("203.0.114.4"), transport: protocol.TransportICMP, port: 9200},
 		"other port":              {frame: probe.frame, source: probe.source, transport: protocol.TransportICMP, port: 9201},
 		"other transport":         {frame: probe.frame, source: probe.source, transport: protocol.TransportUDP, port: 9200},
@@ -203,25 +203,25 @@ func TestDownProbeIsAnsweredOnAnUpPath(t *testing.T) {
 		}
 	}
 
-	// Without a healthy up path, the reply goes on every up path.
+	// Without a healthy ingress path, the reply goes on every ingress path.
 	fixture.miss(t, 0, missLimit)
 	fixture.miss(t, 1, missLimit)
 	fixture.controls.handle(probe)
 	if sent := fixture.controls.takeSent(); len(sent) != 2 {
-		t.Fatalf("probe replies without a healthy up path = %d, want 2", len(sent))
+		t.Fatalf("probe replies without a healthy ingress path = %d, want 2", len(sent))
 	}
 }
 
-func TestDownPathRuntimeChanges(t *testing.T) {
+func TestEgressPathRuntimeChanges(t *testing.T) {
 	t.Parallel()
 
 	fixture := newSplitFixture(t)
 	controller := fixture.controller
-	added, err := controller.AddDownPath("198.51.100.1:9400/udp via 203.0.113.9", 51820)
+	added, err := controller.AddEgressPath("198.51.100.1:9400/udp via 203.0.113.9", 51820)
 	if err != nil {
-		t.Fatalf("AddDownPath: %v", err)
+		t.Fatalf("AddEgressPath: %v", err)
 	}
-	if added.ID != 2 || added.Direction != directionDown || added.Healthy {
+	if added.ID != 2 || added.Direction != directionEgress || added.Healthy {
 		t.Fatalf("added = %#v", added)
 	}
 	if group := fixture.dataplane.groups[51820]; group.DownMask != 0b111 {
@@ -232,49 +232,49 @@ func TestDownPathRuntimeChanges(t *testing.T) {
 		port   uint16
 		status int
 	}{
-		"same down path": {raw: "198.51.100.1:9400/udp", port: 51820, status: http.StatusConflict},
-		"interface":      {raw: "198.51.100.1%eth0:9500/udp", port: 51820, status: http.StatusBadRequest},
-		"port range":     {raw: "198.51.100.1:9500-9510/udp", port: 51820, status: http.StatusBadRequest},
-		"paired group":   {raw: "198.51.100.1:9500/udp", port: 51821, status: http.StatusConflict},
+		"same egress path": {raw: "198.51.100.1:9400/udp", port: 51820, status: http.StatusConflict},
+		"interface":        {raw: "198.51.100.1%eth0:9500/udp", port: 51820, status: http.StatusBadRequest},
+		"port range":       {raw: "198.51.100.1:9500-9510/udp", port: 51820, status: http.StatusBadRequest},
+		"paired group":     {raw: "198.51.100.1:9500/udp", port: 51821, status: http.StatusConflict},
 	} {
-		if _, err := controller.AddDownPath(test.raw, test.port); statusOf(err) != test.status {
-			t.Fatalf("%s: AddDownPath error = %v, want status %d", name, err, test.status)
+		if _, err := controller.AddEgressPath(test.raw, test.port); statusOf(err) != test.status {
+			t.Fatalf("%s: AddEgressPath error = %v, want status %d", name, err, test.status)
 		}
 	}
 	if _, err := controller.AddBridge("198.51.100.4:9600/udp via 203.0.113.9", 51820); statusOf(err) != http.StatusBadRequest {
 		t.Fatalf("AddBridge with via error = %v, want bad request", err)
 	}
 
-	if err := controller.RemoveDownPath(1); err != nil {
-		t.Fatalf("RemoveDownPath: %v", err)
+	if err := controller.RemoveEgressPath(1); err != nil {
+		t.Fatalf("RemoveEgressPath: %v", err)
 	}
 	if group := fixture.dataplane.groups[51820]; group.DownMask != 0b101 {
 		t.Fatalf("group = %#v after the removal", group)
 	}
-	if err := controller.SetDownMode("burst", 51820); err != nil {
-		t.Fatalf("SetDownMode: %v", err)
+	if err := controller.SetEgressMode("burst", 51820); err != nil {
+		t.Fatalf("SetEgressMode: %v", err)
 	}
-	if group := fixture.dataplane.groups[51820]; group.DownMode != config.ModeBurst {
+	if group := fixture.dataplane.groups[51820]; group.EgressMode != config.ModeBurst {
 		t.Fatalf("group = %#v after the mode change", group)
 	}
-	if err := controller.SetDownMode("burst", 51821); statusOf(err) != http.StatusConflict {
-		t.Fatalf("SetDownMode on a paired group error = %v", err)
+	if err := controller.SetEgressMode("burst", 51821); statusOf(err) != http.StatusConflict {
+		t.Fatalf("SetEgressMode on a paired group error = %v", err)
 	}
-	frames := decodeFrames(t, fixture.registrations[0].downFrames(3))
+	frames := decodeFrames(t, fixture.registrations[0].egressFrames(3))
 	leases := map[uint16]uint32{}
 	for _, frame := range frames {
 		leases[frame.PathID] = frame.LeaseSeconds
-		if frame.DownMode != uint8(config.ModeBurst) {
-			t.Fatalf("frame %d has down mode %d, want burst", frame.PathID, frame.DownMode)
+		if frame.EgressMode != uint8(config.ModeBurst) {
+			t.Fatalf("frame %d has egress mode %d, want burst", frame.PathID, frame.EgressMode)
 		}
 	}
 	if len(leases) != 3 || leases[0] != registrationLeaseSeconds || leases[1] != 0 || leases[2] != registrationLeaseSeconds {
 		t.Fatalf("frame leases = %v, want the removed path withdrawn with a lease of zero", leases)
 	}
-	if err := controller.RemoveDownPath(0); err != nil {
-		t.Fatalf("RemoveDownPath(0): %v", err)
+	if err := controller.RemoveEgressPath(0); err != nil {
+		t.Fatalf("RemoveEgressPath(0): %v", err)
 	}
-	if err := controller.RemoveDownPath(2); statusOf(err) != http.StatusConflict {
-		t.Fatalf("RemoveDownPath of the last down path error = %v", err)
+	if err := controller.RemoveEgressPath(2); statusOf(err) != http.StatusConflict {
+		t.Fatalf("RemoveEgressPath of the last egress path error = %v", err)
 	}
 }

@@ -10,21 +10,21 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-// SetDownPath writes one client down path slot. A nil path clears the slot.
-func (r *Runtime) SetDownPath(slot int, path *DownPathSettings) error {
+// SetEgressPath writes one client egress path slot. A nil path clears the slot.
+func (r *Runtime) SetEgressPath(slot int, path *EgressPathSettings) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return errors.New("set down path: MUP dataplane is closed")
+		return errors.New("set egress path: MUP dataplane is closed")
 	}
-	return applyDownPath(r.objects.ClientDownPaths, slot, path)
+	return applyEgressPath(r.objects.ClientDownPaths, slot, path)
 }
 
-// DownPathsSeen returns, for each client down path slot, the time since the
+// EgressPathsSeen returns, for each client egress path slot, the time since the
 // client program last accepted a reply from it. A slot without a reply has
 // a negative duration.
-func (r *Runtime) DownPathsSeen() ([MaxDownPaths]time.Duration, error) {
-	var seen [MaxDownPaths]time.Duration
+func (r *Runtime) EgressPathsSeen() ([MaxEgressPaths]time.Duration, error) {
+	var seen [MaxEgressPaths]time.Duration
 	for slot := range seen {
 		seen[slot] = -1
 	}
@@ -35,74 +35,74 @@ func (r *Runtime) DownPathsSeen() ([MaxDownPaths]time.Duration, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return seen, errors.New("read down paths: MUP dataplane is closed")
+		return seen, errors.New("read egress paths: MUP dataplane is closed")
 	}
-	for slot := range MaxDownPaths {
-		var down mupClientDownPathV1
-		if err := r.objects.ClientDownPaths.Lookup(uint32(slot), &down); err != nil {
-			return seen, fmt.Errorf("read client down path %d: %w", slot, err)
+	for slot := range MaxEgressPaths {
+		var egress mupClientDownPathV1
+		if err := r.objects.ClientDownPaths.Lookup(uint32(slot), &egress); err != nil {
+			return seen, fmt.Errorf("read client egress path %d: %w", slot, err)
 		}
-		if down.ServerIp != 0 && down.LastSeenNs != 0 && uint64(now) >= down.LastSeenNs {
-			seen[slot] = time.Duration(uint64(now) - down.LastSeenNs)
+		if egress.ServerIp != 0 && egress.LastSeenNs != 0 && uint64(now) >= egress.LastSeenNs {
+			seen[slot] = time.Duration(uint64(now) - egress.LastSeenNs)
 		}
 	}
 	return seen, nil
 }
 
-// SetServerDownPath writes one down path of a client on a server.
-func (r *Runtime) SetServerDownPath(entry DownPathEntry) error {
-	key, value, err := encodeDownPathEntry(entry)
+// SetServerEgressPath writes one egress path of a client on a server.
+func (r *Runtime) SetServerEgressPath(entry EgressPathEntry) error {
+	key, value, err := encodeEgressPathEntry(entry)
 	if err != nil {
 		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return errors.New("set server down path: MUP dataplane is closed")
+		return errors.New("set server egress path: MUP dataplane is closed")
 	}
 	if err := r.objects.ServerDownPaths.Update(key, value, ebpf.UpdateAny); err != nil {
-		return fmt.Errorf("update down path %d of %s: %w", entry.PathID, entry.Client.AdvertisedIP, err)
+		return fmt.Errorf("update egress path %d of %s: %w", entry.PathID, entry.Client.AdvertisedIP, err)
 	}
 	return nil
 }
 
-// DeleteServerDownPath removes one down path of a client on a server.
-func (r *Runtime) DeleteServerDownPath(client ClientKey, pathID uint16) error {
-	key, err := encodeDownPathKey(client, pathID)
+// DeleteServerEgressPath removes one egress path of a client on a server.
+func (r *Runtime) DeleteServerEgressPath(client ClientKey, pathID uint16) error {
+	key, err := encodeEgressPathKey(client, pathID)
 	if err != nil {
 		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return errors.New("delete server down path: MUP dataplane is closed")
+		return errors.New("delete server egress path: MUP dataplane is closed")
 	}
 	if err := deleteEntry(r.objects.ServerDownPaths, key); err != nil {
-		return fmt.Errorf("delete down path %d of %s: %w", pathID, client.AdvertisedIP, err)
+		return fmt.Errorf("delete egress path %d of %s: %w", pathID, client.AdvertisedIP, err)
 	}
 	return nil
 }
 
-// SetServerDownGroup writes the down group of a client on a server.
-func (r *Runtime) SetServerDownGroup(entry DownGroupEntry) error {
-	key, value, err := encodeDownGroupEntry(entry)
+// SetServerEgressGroup writes the egress group of a client on a server.
+func (r *Runtime) SetServerEgressGroup(entry EgressGroupEntry) error {
+	key, value, err := encodeEgressGroupEntry(entry)
 	if err != nil {
 		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return errors.New("set server down group: MUP dataplane is closed")
+		return errors.New("set server egress group: MUP dataplane is closed")
 	}
 	if err := r.objects.ServerDownGroups.Update(key, value, ebpf.UpdateAny); err != nil {
-		return fmt.Errorf("update down group of %s: %w", entry.Client.AdvertisedIP, err)
+		return fmt.Errorf("update egress group of %s: %w", entry.Client.AdvertisedIP, err)
 	}
 	return nil
 }
 
-// DeleteServerDownGroup removes the down group of a client on a server. Its
-// replies then follow the upstream paths again.
-func (r *Runtime) DeleteServerDownGroup(client ClientKey) error {
+// DeleteServerEgressGroup removes the egress group of a client on a server. Its
+// replies then follow the ingress paths again.
+func (r *Runtime) DeleteServerEgressGroup(client ClientKey) error {
 	key, err := encodeClientKey(client)
 	if err != nil {
 		return err
@@ -110,10 +110,10 @@ func (r *Runtime) DeleteServerDownGroup(client ClientKey) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return errors.New("delete server down group: MUP dataplane is closed")
+		return errors.New("delete server egress group: MUP dataplane is closed")
 	}
 	if err := deleteEntry(r.objects.ServerDownGroups, key); err != nil {
-		return fmt.Errorf("delete down group of %s: %w", client.AdvertisedIP, err)
+		return fmt.Errorf("delete egress group of %s: %w", client.AdvertisedIP, err)
 	}
 	return nil
 }

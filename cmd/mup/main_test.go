@@ -259,25 +259,41 @@ func TestRunExitCodes(t *testing.T) {
 func TestParseArgsClientSplitPaths(t *testing.T) {
 	appConfig, err := parseArgs([]string{
 		"client", "-p", "51820", "-s", "192.0.2.10",
-		"--up", "203.0.113.5:9000/udp", "--up", "203.0.113.5:9100/icmp",
-		"--down", "203.0.113.5:9200/icmp via 198.51.100.0/28",
-		"--up-mode", "balancer", "--down-mode", "burst",
+		"--ingress", "203.0.113.5:9000/udp", "--ingress", "203.0.113.5:9100/icmp",
+		"--egress", "203.0.113.5:9200/icmp via 198.51.100.0/28",
+		"--ingress-mode", "balancer", "--egress-mode", "burst",
 	})
 	if err != nil {
 		t.Fatalf("parseArgs: %v", err)
 	}
 	group := appConfig.Client.Groups[0]
-	if len(group.Paths) != 2 || len(group.DownPaths) != 1 ||
-		group.Mode != config.ModeBalancer || group.DownMode != config.ModeBurst {
+	if len(group.Paths) != 2 || len(group.EgressPaths) != 1 ||
+		group.Mode != config.ModeBalancer || group.EgressMode != config.ModeBurst {
+		t.Fatalf("group = %#v", group)
+	}
+}
+
+func TestParseArgsClientOldSplitFlags(t *testing.T) {
+	appConfig, err := parseArgs([]string{
+		"client", "-p", "51820", "-s", "192.0.2.10",
+		"--up", "203.0.113.5:9000/udp", "--down", "203.0.113.5:9200/icmp via 198.51.100.0/28",
+		"--up-mode", "balancer", "--down-mode", "burst",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs with the old flags: %v", err)
+	}
+	group := appConfig.Client.Groups[0]
+	if len(group.Paths) != 1 || len(group.EgressPaths) != 1 ||
+		group.Mode != config.ModeBalancer || group.EgressMode != config.ModeBurst {
 		t.Fatalf("group = %#v", group)
 	}
 }
 
 func TestParseArgsClientRejectsMixedForms(t *testing.T) {
 	for _, args := range [][]string{
-		{"client", "-p", "51820", "-s", "192.0.2.10", "-u", "203.0.113.5:9000/udp", "--down", "203.0.113.5:9200/udp"},
-		{"client", "-p", "51820", "-s", "192.0.2.10", "--up", "203.0.113.5:9000/udp"},
-		{"client", "-p", "51820", "-s", "192.0.2.10", "--up", "203.0.113.5:9000/udp", "--down", "203.0.113.5:9200/udp", "--mode", "burst"},
+		{"client", "-p", "51820", "-s", "192.0.2.10", "-u", "203.0.113.5:9000/udp", "--egress", "203.0.113.5:9200/udp"},
+		{"client", "-p", "51820", "-s", "192.0.2.10", "--ingress", "203.0.113.5:9000/udp"},
+		{"client", "-p", "51820", "-s", "192.0.2.10", "--ingress", "203.0.113.5:9000/udp", "--egress", "203.0.113.5:9200/udp", "--mode", "burst"},
 	} {
 		if _, err := parseArgs(args); err == nil {
 			t.Fatalf("parseArgs(%q) succeeded", args)
@@ -288,22 +304,22 @@ func TestParseArgsClientRejectsMixedForms(t *testing.T) {
 func TestParseArgsClientBridges(t *testing.T) {
 	appConfig, err := parseArgs([]string{
 		"client", "-p", "51820", "-s", "160.119.74.74",
-		"--up", "46.102.130.95:9000/icmp", "--up-bridge", "5.6.7.8:9100/udp",
-		"--down-bridge", "5.6.7.8:9200/icmp via 87.107.117.192/28",
+		"--ingress", "46.102.130.95:9000/icmp", "--ingress-bridge", "5.6.7.8:9100/udp",
+		"--egress-bridge", "5.6.7.8:9200/icmp via 87.107.117.192/28",
 	})
 	if err != nil {
 		t.Fatalf("parseArgs: %v", err)
 	}
 	group := appConfig.Client.Groups[0]
 	if len(group.Paths) != 2 || group.Paths[0].Bridge || !group.Paths[1].Bridge {
-		t.Fatalf("up paths = %#v", group.Paths)
+		t.Fatalf("ingress paths = %#v", group.Paths)
 	}
-	if len(group.DownPaths) != 1 || !group.DownPaths[0].Bridge {
-		t.Fatalf("down paths = %#v", group.DownPaths)
+	if len(group.EgressPaths) != 1 || !group.EgressPaths[0].Bridge {
+		t.Fatalf("egress paths = %#v", group.EgressPaths)
 	}
 	for _, args := range [][]string{
-		{"client", "-p", "51820", "-s", "192.0.2.10", "--up-bridge", "5.6.7.8:9100/udp"},
-		{"client", "-p", "51820", "-s", "192.0.2.10", "-u", "203.0.113.5:9000/udp", "--down-bridge", "5.6.7.8:9200/udp"},
+		{"client", "-p", "51820", "-s", "192.0.2.10", "--ingress-bridge", "5.6.7.8:9100/udp"},
+		{"client", "-p", "51820", "-s", "192.0.2.10", "-u", "203.0.113.5:9000/udp", "--egress-bridge", "5.6.7.8:9200/udp"},
 	} {
 		if _, err := parseArgs(args); err == nil {
 			t.Fatalf("parseArgs(%q) succeeded", args)
@@ -330,5 +346,21 @@ func TestParseArgsBridge(t *testing.T) {
 		if _, err := parseArgs(args); err == nil {
 			t.Fatalf("parseArgs(%q) succeeded", args)
 		}
+	}
+}
+
+func TestParseArgsClientOldBridgeFlags(t *testing.T) {
+	appConfig, err := parseArgs([]string{
+		"client", "-p", "51820", "-s", "160.119.74.74",
+		"--up", "46.102.130.95:9000/icmp", "--up-bridge", "5.6.7.8:9100/udp",
+		"--down-bridge", "5.6.7.8:9200/icmp via 87.107.117.192/28",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs with the old bridge flags: %v", err)
+	}
+	group := appConfig.Client.Groups[0]
+	if len(group.Paths) != 2 || group.Paths[0].Bridge || !group.Paths[1].Bridge ||
+		len(group.EgressPaths) != 1 || !group.EgressPaths[0].Bridge {
+		t.Fatalf("group = %#v", group)
 	}
 }

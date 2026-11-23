@@ -71,10 +71,10 @@ func (c *DaemonClient) SetMode(ctx context.Context, mode string, listenPort uint
 	return c.do(ctx, http.MethodPut, "/v1/mode", ModeRequest{Mode: mode, ListenPort: listenPort}, nil)
 }
 
-// AddDownPath adds a down path to a group with separate down paths.
-func (c *DaemonClient) AddDownPath(ctx context.Context, path string, listenPort uint16) (Path, error) {
+// AddEgressPath adds an egress path to a group with separate egress paths.
+func (c *DaemonClient) AddEgressPath(ctx context.Context, path string, listenPort uint16) (Path, error) {
 	var added Path
-	err := c.do(ctx, http.MethodPost, "/v1/paths", AddPathRequest{Path: path, ListenPort: listenPort, Down: true}, &added)
+	err := c.do(ctx, http.MethodPost, "/v1/paths", AddPathRequest{Path: path, ListenPort: listenPort, Egress: true}, &added)
 	return added, err
 }
 
@@ -83,22 +83,22 @@ func (c *DaemonClient) ResetDrops(ctx context.Context) error {
 	return c.do(ctx, http.MethodDelete, "/v1/drops", nil, nil)
 }
 
-// AddBridge adds a path through a MUP bridge to a group with separate down
-// paths: an up path, or a down path with down.
-func (c *DaemonClient) AddBridge(ctx context.Context, path string, listenPort uint16, down bool) (Path, error) {
+// AddBridge adds a path through a MUP bridge to a group with separate egress
+// paths: an ingress path, or an egress path with egress.
+func (c *DaemonClient) AddBridge(ctx context.Context, path string, listenPort uint16, egress bool) (Path, error) {
 	var added Path
-	err := c.do(ctx, http.MethodPost, "/v1/paths", AddPathRequest{Path: path, ListenPort: listenPort, Down: down, Bridge: true}, &added)
+	err := c.do(ctx, http.MethodPost, "/v1/paths", AddPathRequest{Path: path, ListenPort: listenPort, Egress: egress, Bridge: true}, &added)
 	return added, err
 }
 
-// DeleteDownPath removes a down path.
-func (c *DaemonClient) DeleteDownPath(ctx context.Context, id int) error {
-	return c.do(ctx, http.MethodDelete, "/v1/paths/"+strconv.Itoa(id)+"?direction=down", nil, nil)
+// DeleteEgressPath removes an egress path.
+func (c *DaemonClient) DeleteEgressPath(ctx context.Context, id int) error {
+	return c.do(ctx, http.MethodDelete, "/v1/paths/"+strconv.Itoa(id)+"?direction=egress", nil, nil)
 }
 
-// SetDownMode changes the downstream mode of a group with separate down paths.
-func (c *DaemonClient) SetDownMode(ctx context.Context, mode string, listenPort uint16) error {
-	return c.do(ctx, http.MethodPut, "/v1/mode", ModeRequest{Mode: mode, ListenPort: listenPort, Down: true}, nil)
+// SetEgressMode changes the egress mode of a group with separate egress paths.
+func (c *DaemonClient) SetEgressMode(ctx context.Context, mode string, listenPort uint16) error {
+	return c.do(ctx, http.MethodPut, "/v1/mode", ModeRequest{Mode: mode, ListenPort: listenPort, Egress: true}, nil)
 }
 
 func (c *DaemonClient) Peers(ctx context.Context) (PeerList, error) {

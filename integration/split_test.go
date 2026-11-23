@@ -12,10 +12,10 @@ import (
 	"github.com/xshecan/mup/api"
 )
 
-// TestPrivilegedSplitPaths runs a group with one UDP up path and two down
+// TestPrivilegedSplitPaths runs a group with one UDP ingress path and two egress
 // paths: an ICMP path that reflects through 10.210.1.3, and a direct UDP path.
-// The downstream moves to the second down path when the reflector fails,
-// while the up path stays healthy, and a downstream burst reaches each peer
+// The egress moves to the second egress path when the reflector fails,
+// while the ingress path stays healthy, and an egress burst reaches each peer
 // once.
 func TestPrivilegedSplitPaths(t *testing.T) {
 	requirePrivilegedLinux(t)
@@ -61,9 +61,9 @@ func TestPrivilegedSplitPaths(t *testing.T) {
   control_socket: %s
   servers:
     - port: 51820
-      upstream:
+      ingress:
         routes: [10.210.1.2:5000/udp]
-      downstream:
+      egress:
         mode: fallback
         routes:
           - "10.210.1.2:5010/icmp via 10.210.1.3"
@@ -83,20 +83,20 @@ func TestPrivilegedSplitPaths(t *testing.T) {
 	state := func() string {
 		return fmt.Sprintf("%s\nclient %s\nserver %s\n%s", pathText(t, clientAPI), dropText(t, clientAPI), dropText(t, serverAPI), logs())
 	}
-	// downHealth reads the health of each down path on the server and on the
+	// egressHealth reads the health of each egress path on the server and on the
 	// client, and whether the client uses it.
-	type downView struct{ server, client, inUse [2]bool }
-	view := func() (downView, error) {
-		var current downView
+	type egressView struct{ server, client, inUse [2]bool }
+	view := func() (egressView, error) {
+		var current egressView
 		clients, err := serverAPI.Clients(context.Background())
 		if err != nil {
 			return current, err
 		}
 		for _, registered := range clients {
-			if registered.Down == nil {
+			if registered.Egress == nil {
 				continue
 			}
-			for _, path := range registered.Down.Paths {
+			for _, path := range registered.Egress.Paths {
 				if path.ID < 2 {
 					current.server[path.ID] = path.Healthy
 				}
@@ -107,14 +107,14 @@ func TestPrivilegedSplitPaths(t *testing.T) {
 			return current, err
 		}
 		for _, path := range paths {
-			if path.Direction == "down" && path.ID < 2 {
+			if path.Direction == "egress" && path.ID < 2 {
 				current.client[path.ID] = path.Healthy
 				current.inUse[path.ID] = path.InUse
 			}
 		}
 		return current, nil
 	}
-	waitForDown := func(description string, want [2]bool) {
+	waitForEgress := func(description string, want [2]bool) {
 		t.Helper()
 		waitFor(t, 30*time.Second, description, state, func() (bool, error) {
 			current, err := view()
@@ -123,37 +123,37 @@ func TestPrivilegedSplitPaths(t *testing.T) {
 	}
 
 	waitForRegisteredPaths(t, serverAPI, 1, logs)
-	waitForDown("both down paths to become healthy", [2]bool{true, true})
+	waitForEgress("both egress paths to become healthy", [2]bool{true, true})
 	exchange(t, peerNS, "10.210.3.1:51820", 3, state)
 	if current, _ := view(); current.inUse != [2]bool{true, false} {
-		t.Fatalf("fallback uses down paths %v, want only the reflected path\n%s", current.inUse, state())
+		t.Fatalf("fallback uses egress paths %v, want only the reflected path\n%s", current.inUse, state())
 	}
 
-	// Without the reflector, the downstream moves to the direct path, and the
-	// up path stays healthy, because the server sends each ACK on the direct
-	// down path too.
+	// Without the reflector, the egress moves to the direct path, and the
+	// ingress path stays healthy, because the server sends each ACK on the direct
+	// egress path too.
 	runIP(t, "-n", reflectorNS, "link", "set", "mr"+suffix, "down")
-	waitForDown("the reflected down path to become unhealthy", [2]bool{false, true})
+	waitForEgress("the reflected egress path to become unhealthy", [2]bool{false, true})
 	exchange(t, peerNS, "10.210.3.1:51820", 3, state)
 	paths, err := clientAPI.Paths(context.Background())
 	if err != nil {
 		t.Fatalf("client paths: %v", err)
 	}
 	for _, path := range paths {
-		if path.Direction == "up" && !path.Healthy {
-			t.Fatalf("up path %d became unhealthy with a down path\n%s", path.ID, state())
+		if path.Direction == "ingress" && !path.Healthy {
+			t.Fatalf("ingress path %d became unhealthy with an egress path\n%s", path.ID, state())
 		}
-		if path.Direction == "down" && path.ID == 1 && !path.InUse {
-			t.Fatalf("the direct down path carries no replies\n%s", state())
+		if path.Direction == "egress" && path.ID == 1 && !path.InUse {
+			t.Fatalf("the direct egress path carries no replies\n%s", state())
 		}
 	}
 
-	// A downstream burst sends each reply on both down paths, and the client
+	// An egress burst sends each reply on both egress paths, and the client
 	// passes one copy to the peer.
 	runIP(t, "-n", reflectorNS, "link", "set", "mr"+suffix, "up")
-	waitForDown("the reflected down path to come back", [2]bool{true, true})
-	if err := clientAPI.SetDownMode(context.Background(), "burst", 0); err != nil {
-		t.Fatalf("set down mode: %v", err)
+	waitForEgress("the reflected egress path to come back", [2]bool{true, true})
+	if err := clientAPI.SetEgressMode(context.Background(), "burst", 0); err != nil {
+		t.Fatalf("set egress mode: %v", err)
 	}
 	waitFor(t, 20*time.Second, "the server to take the burst mode", state, func() (bool, error) {
 		clients, err := serverAPI.Clients(context.Background())
@@ -161,7 +161,7 @@ func TestPrivilegedSplitPaths(t *testing.T) {
 			return false, err
 		}
 		for _, registered := range clients {
-			if registered.Down != nil && registered.Down.Mode == "burst" {
+			if registered.Egress != nil && registered.Egress.Mode == "burst" {
 				return true, nil
 			}
 		}
@@ -176,7 +176,7 @@ func TestPrivilegedSplitPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client status: %v", err)
 	}
-	if refused := dropCount(status.Drops, "DOWNSTREAM_SOURCE"); refused != 0 {
-		t.Fatalf("client refused %d downstream packets\n%s", refused, state())
+	if refused := dropCount(status.Drops, "EGRESS_SOURCE"); refused != 0 {
+		t.Fatalf("client refused %d egress packets\n%s", refused, state())
 	}
 }

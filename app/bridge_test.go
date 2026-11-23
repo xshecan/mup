@@ -22,41 +22,41 @@ func TestBridgePathRuntimeChanges(t *testing.T) {
 
 	fixture := newSplitFixture(t)
 	controller := fixture.controller
-	up, err := controller.AddBridge("5.6.7.8:9600/udp", 51820)
+	ingress, err := controller.AddBridge("5.6.7.8:9600/udp", 51820)
 	if err != nil {
 		t.Fatalf("AddBridge: %v", err)
 	}
-	if !up.Bridge || up.Direction != directionUp || up.Server != "5.6.7.8" {
-		t.Fatalf("up bridge = %#v", up)
+	if !ingress.Bridge || ingress.Direction != directionIngress || ingress.Server != "5.6.7.8" {
+		t.Fatalf("ingress bridge = %#v", ingress)
 	}
 	if _, err := controller.AddBridge("5.6.7.8:9601/udp", 51821); statusOf(err) != http.StatusConflict {
 		t.Fatalf("AddBridge in a paired group error = %v", err)
 	}
-	down, err := controller.AddDownBridge("5.6.7.8:9700/icmp via 203.0.113.0/28", 51820)
+	egress, err := controller.AddEgressBridge("5.6.7.8:9700/icmp via 203.0.113.0/28", 51820)
 	if err != nil {
-		t.Fatalf("AddDownBridge: %v", err)
+		t.Fatalf("AddEgressBridge: %v", err)
 	}
-	if !down.Bridge || down.Direction != directionDown || down.ID != 2 {
-		t.Fatalf("down bridge = %#v", down)
+	if !egress.Bridge || egress.Direction != directionEgress || egress.ID != 2 {
+		t.Fatalf("egress bridge = %#v", egress)
 	}
-	frames := decodeFrames(t, fixture.registrations[0].downFrames(1))
+	frames := decodeFrames(t, fixture.registrations[0].egressFrames(1))
 	bridged := frames[len(frames)-1]
 	if bridged.PathID != 2 || bridged.Flags != protocol.ControlFlagReturnPool|protocol.ControlFlagBridge ||
-		bridged.DownServer != netip.MustParseAddr("5.6.7.8") {
-		t.Fatalf("DOWN_REGISTER of the down bridge = %#v", bridged)
+		bridged.EgressServer != netip.MustParseAddr("5.6.7.8") {
+		t.Fatalf("EGRESS_REGISTER of the egress bridge = %#v", bridged)
 	}
 	for _, frame := range frames[:len(frames)-1] {
 		if frame.Flags&protocol.ControlFlagBridge != 0 {
-			t.Fatalf("down route %d has the bridge flag", frame.PathID)
+			t.Fatalf("egress route %d has the bridge flag", frame.PathID)
 		}
 	}
 }
 
-func TestDownRegistryKeepsADownBridge(t *testing.T) {
+func TestEgressRegistryKeepsAEgressBridge(t *testing.T) {
 	t.Parallel()
 
-	plane := newFakeDownPlane()
-	registry := newTestDownRegistry(plane)
+	plane := newFakeEgressPlane()
+	registry := newTestEgressRegistry(plane)
 	bridge, local := netip.MustParseAddr("5.6.7.8"), netip.MustParseAddr("203.0.113.5")
 	registry.route = func(address netip.Addr) (netip.Addr, int, error) {
 		if address != bridge {
@@ -64,21 +64,21 @@ func TestDownRegistryKeepsADownBridge(t *testing.T) {
 		}
 		return local, 4, nil
 	}
-	frame := downFrame(0, 12000, protocol.TransportICMP, config.ModeFallback)
+	frame := egressFrame(0, 12000, protocol.TransportICMP, config.ModeFallback)
 	frame.Flags = protocol.ControlFlagReturnIP | protocol.ControlFlagBridge
 	frame.ReturnIP = netip.MustParseAddr("198.51.100.9")
-	frame.DownServer = bridge
+	frame.EgressServer = bridge
 	start := time.Unix(1000, 0)
 	// A bridge is not an address of this host, and its port is a bridge port.
-	if err := registry.register(frame, downClient, start); err != nil {
+	if err := registry.register(frame, egressClient, start); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	entry := plane.paths[downKey{client: downKeyOf, id: 0}]
+	entry := plane.paths[egressKey{client: egressKeyOf, id: 0}]
 	if !entry.Bridge || entry.LocalIP != local || entry.Ifindex != 4 || entry.Server != bridge || entry.ReturnIP != frame.ReturnIP {
 		t.Fatalf("entry = %#v", entry)
 	}
 	// The bridge can serve another server, so the path waits for a reply.
-	if group := plane.groups[downKeyOf]; group.PathMask != 0b1 || group.HealthyMask != 0 {
+	if group := plane.groups[egressKeyOf]; group.PathMask != 0b1 || group.HealthyMask != 0 {
 		t.Fatalf("group = %#v, want the bridge unhealthy before its first reply", group)
 	}
 	targets := registry.probeTargets(start)
@@ -89,18 +89,18 @@ func TestDownRegistryKeepsADownBridge(t *testing.T) {
 		t.Fatal("confirm of the bridge failed")
 	}
 	registry.sync(start.Add(time.Second))
-	if group := plane.groups[downKeyOf]; group.HealthyMask != 0b1 {
+	if group := plane.groups[egressKeyOf]; group.HealthyMask != 0b1 {
 		t.Fatalf("group = %#v, want the bridge healthy after its reply", group)
 	}
 	views := registry.clients(start.Add(time.Second))
-	if paths := views[downKeyOf].Paths; len(paths) != 1 || !paths[0].Bridge || !paths[0].Healthy {
-		t.Fatalf("API view = %#v", views[downKeyOf])
+	if paths := views[egressKeyOf].Paths; len(paths) != 1 || !paths[0].Bridge || !paths[0].Healthy {
+		t.Fatalf("API view = %#v", views[egressKeyOf])
 	}
 
 	// A route to the bridge that fails rejects the frame.
 	registry.route = func(netip.Addr) (netip.Addr, int, error) { return netip.Addr{}, 0, errors.New("no route") }
 	frame.PathID = 1
-	if err := registry.register(frame, downClient, start); err == nil {
+	if err := registry.register(frame, egressClient, start); err == nil {
 		t.Fatal("register without a route to the bridge succeeded")
 	}
 }
@@ -116,7 +116,7 @@ func (*fakeBridgeDataplane) Snapshot() (dataplane.StatsSnapshot, error) {
 }
 
 func (*fakeBridgeDataplane) BridgeCounters() (dataplane.BridgeCounters, error) {
-	return dataplane.BridgeCounters{UpPackets: 5, UpBytes: 500, DownPackets: 7, DownBytes: 700}, nil
+	return dataplane.BridgeCounters{IngressPackets: 5, IngressBytes: 500, EgressPackets: 7, EgressBytes: 700}, nil
 }
 
 func (f *fakeBridgeDataplane) SetBridgeAddresses(addresses []netip.Addr) error {
@@ -141,7 +141,7 @@ func TestBridgeAPIServesTheStatus(t *testing.T) {
 	}
 	got := status.Bridge
 	if status.Role != api.RoleBridge || got == nil || got.Server != "46.102.130.95" || got.Port != 9000 || got.PortLast != 9399 ||
-		len(got.Allow) != 1 || len(got.Addresses) != 1 || got.UpPackets != 5 || got.DownBytes != 700 {
+		len(got.Allow) != 1 || len(got.Addresses) != 1 || got.IngressPackets != 5 || got.EgressBytes != 700 {
 		t.Fatalf("status = %#v", status)
 	}
 	if dropCountOf(status.Drops, "BRIDGE_SOURCE") != 3 {

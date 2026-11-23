@@ -26,18 +26,18 @@ type Status struct {
 }
 
 // BridgeStatus describes a bridge. It takes the ports from Port to PortLast,
-// sends the upstream to Server, and takes wrapped replies from Server and the
+// sends the ingress to Server, and takes wrapped replies from Server and the
 // Allow ranges. The counters count the packets and bytes that it sent.
 type BridgeStatus struct {
-	Server      string   `json:"server"`
-	Port        uint16   `json:"port"`
-	PortLast    uint16   `json:"port_last,omitempty"`
-	Allow       []string `json:"allow,omitempty"`
-	Addresses   []string `json:"addresses"`
-	UpPackets   uint64   `json:"up_packets"`
-	UpBytes     uint64   `json:"up_bytes"`
-	DownPackets uint64   `json:"down_packets"`
-	DownBytes   uint64   `json:"down_bytes"`
+	Server         string   `json:"server"`
+	Port           uint16   `json:"port"`
+	PortLast       uint16   `json:"port_last,omitempty"`
+	Allow          []string `json:"allow,omitempty"`
+	Addresses      []string `json:"addresses"`
+	IngressPackets uint64   `json:"ingress_packets"`
+	IngressBytes   uint64   `json:"ingress_bytes"`
+	EgressPackets  uint64   `json:"egress_packets"`
+	EgressBytes    uint64   `json:"egress_bytes"`
 }
 
 type ClientStatus struct {
@@ -54,16 +54,16 @@ type ClientStatus struct {
 }
 
 // Group is the set of servers for the peers of one listen port. A group with
-// separate down paths also has DownMode and its down path counts.
+// separate egress paths also has EgressMode and its egress path counts.
 type Group struct {
-	ListenPort       uint16 `json:"listen_port"`
-	Mode             string `json:"mode"`
-	Paths            int    `json:"paths"`
-	HealthyPaths     int    `json:"healthy_paths"`
-	Peers            int    `json:"peers"`
-	DownMode         string `json:"down_mode,omitempty"`
-	DownPaths        int    `json:"down_paths,omitempty"`
-	HealthyDownPaths int    `json:"healthy_down_paths,omitempty"`
+	ListenPort         uint16 `json:"listen_port"`
+	Mode               string `json:"mode"`
+	Paths              int    `json:"paths"`
+	HealthyPaths       int    `json:"healthy_paths"`
+	Peers              int    `json:"peers"`
+	EgressMode         string `json:"egress_mode,omitempty"`
+	EgressPaths        int    `json:"egress_paths,omitempty"`
+	HealthyEgressPaths int    `json:"healthy_egress_paths,omitempty"`
 }
 
 // ServerStatus describes a server. It accepts the ports from Port to
@@ -82,9 +82,9 @@ type ServerStatus struct {
 }
 
 // Path is one client path. ListenPort names its group. InUse reports whether
-// the mode of the group sends traffic on the path. Direction is "up" for an up
-// path and "down" for a down path of a group with separate down paths, and
-// empty for a path that carries both directions. A down path is healthy while
+// the mode of the group sends traffic on the path. Direction is "ingress" for an ingress
+// path and "egress" for an egress path of a group with separate egress paths, and
+// empty for a path that carries both directions. An egress path is healthy while
 // its probes arrive, and LastProbe is the time of the latest one. A path with
 // Bridge goes through a MUP bridge, and Server is the bridge address.
 type Path struct {
@@ -163,21 +163,21 @@ type RegisteredClient struct {
 	LeaseSeconds float64          `json:"lease_seconds"`
 	Paths        []RegisteredPath `json:"paths"`
 	Peers        int              `json:"peers"`
-	// Down holds the down paths of a client with separate down paths.
-	Down *DownGroup `json:"down,omitempty"`
+	// Egress holds the egress paths of a client with separate egress paths.
+	Egress *EgressGroup `json:"egress,omitempty"`
 }
 
-// DownGroup is the downstream mode and the down paths of a client, as a server
+// EgressGroup is the egress mode and the egress paths of a client, as a server
 // sees them.
-type DownGroup struct {
-	Mode  string     `json:"mode"`
-	Paths []DownPath `json:"paths"`
+type EgressGroup struct {
+	Mode  string       `json:"mode"`
+	Paths []EgressPath `json:"paths"`
 }
 
-// DownPath is one down path of a client on a server. Members counts the
+// EgressPath is one egress path of a client on a server. Members counts the
 // reflectors that the path can use, and HealthyMembers the ones whose probes
 // reach the client.
-type DownPath struct {
+type EgressPath struct {
 	ID             uint16  `json:"id"`
 	Bridge         bool    `json:"bridge,omitempty"`
 	Server         string  `json:"server"`
@@ -211,8 +211,8 @@ type Drop struct {
 type AddPathRequest struct {
 	Path       string `json:"path"`
 	ListenPort uint16 `json:"listen_port,omitempty"`
-	// Down adds a down path to a group with separate down paths.
-	Down bool `json:"down,omitempty"`
+	// Egress adds an egress path to a group with separate egress paths.
+	Egress bool `json:"egress,omitempty"`
 	// Bridge adds a path through a MUP bridge. Path then names the bridge.
 	Bridge bool `json:"bridge,omitempty"`
 }
@@ -222,8 +222,8 @@ type AddPathRequest struct {
 type ModeRequest struct {
 	Mode       string `json:"mode"`
 	ListenPort uint16 `json:"listen_port,omitempty"`
-	// Down changes the downstream mode of a group with separate down paths.
-	Down bool `json:"down,omitempty"`
+	// Egress changes the egress mode of a group with separate egress paths.
+	Egress bool `json:"egress,omitempty"`
 }
 
 type Error struct {

@@ -16,12 +16,12 @@ client:
   advertise: 192.0.2.10
   servers:
     - port: 51820
-      upstream:
+      ingress:
         mode: balancer
         routes:
           - 203.0.113.5:9000-9099/udp
           - 203.0.113.5%eth1:9100/icmp
-      downstream:
+      egress:
         mode: burst
         routes:
           - 203.0.113.5:9200/icmp via 198.51.100.0/28 balance per-packet
@@ -34,22 +34,22 @@ client:
 		t.Fatalf("Load: %v", err)
 	}
 	split := app.Client.Groups[0]
-	if !split.Split() || split.Mode != ModeBalancer || split.DownMode != ModeBurst {
+	if !split.Split() || split.Mode != ModeBalancer || split.EgressMode != ModeBurst {
 		t.Fatalf("split group = %#v", split)
 	}
 	if len(split.Paths) != 2 || split.Paths[0].LastPort != 9099 || split.Paths[1].Interface != "eth1" {
-		t.Fatalf("up paths = %#v", split.Paths)
+		t.Fatalf("ingress paths = %#v", split.Paths)
 	}
-	if len(split.DownPaths) != 2 {
-		t.Fatalf("down paths = %#v", split.DownPaths)
+	if len(split.EgressPaths) != 2 {
+		t.Fatalf("egress paths = %#v", split.EgressPaths)
 	}
-	pool := split.DownPaths[0]
+	pool := split.EgressPaths[0]
 	if pool.Transport != protocol.TransportICMP || pool.ServerPort != 9200 ||
 		pool.ReturnIP != netip.MustParseAddr("198.51.100.0") || pool.ReturnPrefix != 28 || pool.Balance != BalancePerPacket {
-		t.Fatalf("pool down path = %#v", pool)
+		t.Fatalf("pool egress path = %#v", pool)
 	}
-	if direct := split.DownPaths[1]; direct.Transport != protocol.TransportUDP || direct.ReturnIP.IsValid() {
-		t.Fatalf("direct down path = %#v", direct)
+	if direct := split.EgressPaths[1]; direct.Transport != protocol.TransportUDP || direct.ReturnIP.IsValid() {
+		t.Fatalf("direct egress path = %#v", direct)
 	}
 	if paired := app.Client.Groups[1]; paired.Split() || len(paired.Paths) != 1 {
 		t.Fatalf("paired group = %#v", paired)
@@ -69,72 +69,72 @@ func TestLoadClientRejectsBadDirections(t *testing.T) {
 			group: `
       routes:
         - 203.0.113.5:9000/udp
-      upstream:
+      ingress:
         routes:
           - 203.0.113.5:9000/udp
-      downstream:
+      egress:
         routes:
           - 203.0.113.5:9200/udp`,
 			want: "not both",
 		},
 		{
-			name: "upstream alone",
+			name: "ingress alone",
 			group: `
-      upstream:
+      ingress:
         routes:
           - 203.0.113.5:9000/udp`,
 			want: "go together",
 		},
 		{
-			name: "empty downstream",
+			name: "empty egress",
 			group: `
-      upstream:
+      ingress:
         routes:
           - 203.0.113.5:9000/udp
-      downstream:
+      egress:
         mode: burst`,
 			want: "at least one route",
 		},
 		{
-			name: "via on an up bridge",
+			name: "via on an ingress bridge",
 			group: `
-      upstream:
+      ingress:
         bridges:
           - 203.0.113.5:9000/udp via 198.51.100.1
-      downstream:
+      egress:
         routes:
           - 203.0.113.5:9200/udp`,
 			want: "has no via",
 		},
 		{
-			name: "interface on a down route",
+			name: "interface on an egress route",
 			group: `
-      upstream:
+      ingress:
         routes:
           - 203.0.113.5:9000/udp
-      downstream:
+      egress:
         routes:
           - 203.0.113.5%eth0:9200/udp`,
 			want: "no interface",
 		},
 		{
-			name: "port range on a down route",
+			name: "port range on an egress route",
 			group: `
-      upstream:
+      ingress:
         routes:
           - 203.0.113.5:9000/udp
-      downstream:
+      egress:
         routes:
           - 203.0.113.5:9200-9210/udp`,
 			want: "one server port",
 		},
 		{
-			name: "same down route twice",
+			name: "same egress route twice",
 			group: `
-      upstream:
+      ingress:
         routes:
           - 203.0.113.5:9000/udp
-      downstream:
+      egress:
         routes:
           - 203.0.113.5:9200/udp
           - 203.0.113.5:9200/udp via 198.51.100.1`,
@@ -143,10 +143,10 @@ func TestLoadClientRejectsBadDirections(t *testing.T) {
 		{
 			name: "unknown key in a block",
 			group: `
-      upstream:
+      ingress:
         routes:
           - 203.0.113.5:9000/udp
-      downstream:
+      egress:
         paths:
           - 203.0.113.5:9200/udp`,
 			want: "paths",
@@ -166,7 +166,7 @@ client:
 	}
 }
 
-func TestUpRouteReflectParses(t *testing.T) {
+func TestIngressRouteReflectParses(t *testing.T) {
 	t.Parallel()
 
 	cfg, err := Load(writeFile(t, `
@@ -174,12 +174,12 @@ client:
   advertise: 192.0.2.10
   servers:
     - port: 51820
-      upstream:
+      ingress:
         routes:
           - 203.0.113.5:9000/icmp via 198.51.100.1
           - 203.0.113.5:9100/icmp via 87.107.117.192/28 balance per-packet
           - 203.0.113.5:9200/udp via 194.225.72.10
-      downstream:
+      egress:
         routes:
           - 203.0.113.5:9300/udp
 `))
@@ -188,43 +188,43 @@ client:
 	}
 	group := cfg.Client.Groups[0]
 	if len(group.Paths) != 3 {
-		t.Fatalf("up paths = %d, want 3", len(group.Paths))
+		t.Fatalf("ingress paths = %d, want 3", len(group.Paths))
 	}
 	for index, path := range group.Paths {
-		if !path.UpReflect(group.Split()) {
-			t.Fatalf("up path %d UpReflect = false, want true (%s)", index, path)
+		if !path.IngressReflect(group.Split()) {
+			t.Fatalf("ingress path %d IngressReflect = false, want true (%s)", index, path)
 		}
 	}
 	if path := group.Paths[1]; !path.IsPool() || path.Balance != BalancePerPacket {
-		t.Fatalf("pool up path = %#v, want a per-packet pool", path)
+		t.Fatalf("pool ingress path = %#v, want a per-packet pool", path)
 	}
 }
 
-func TestSymmetricRouteIsNotUpReflect(t *testing.T) {
+func TestSymmetricRouteIsNotIngressReflect(t *testing.T) {
 	t.Parallel()
 
 	path := mustPath(t, "203.0.113.5:9000/icmp via 198.51.100.1")
-	if path.UpReflect(false) {
-		t.Fatalf("a symmetric route must not be an up reflect path: %s", path)
+	if path.IngressReflect(false) {
+		t.Fatalf("a symmetric route must not be an ingress reflect path: %s", path)
 	}
 }
 
-func TestClientAcceptsEightDownPaths(t *testing.T) {
+func TestClientAcceptsEightEgressPaths(t *testing.T) {
 	t.Parallel()
 
 	group := Group{ListenPort: 51820, Paths: []Path{mustPath(t, "203.0.113.5:9000/udp")}}
 	for port := 9200; port < 9209; port++ {
-		group.DownPaths = append(group.DownPaths, Path{
+		group.EgressPaths = append(group.EgressPaths, Path{
 			Server: netip.MustParseAddr("203.0.113.5"), ServerPort: uint16(port), Transport: protocol.TransportUDP,
 		})
 	}
 	client := Client{AdvertisedIP: netip.MustParseAddr("192.0.2.10"), Groups: []Group{group}}
-	if err := client.Validate(); err == nil || !strings.Contains(err.Error(), "at most 8 down routes") {
-		t.Fatalf("Validate error = %v, want the down route limit", err)
+	if err := client.Validate(); err == nil || !strings.Contains(err.Error(), "at most 8 egress routes") {
+		t.Fatalf("Validate error = %v, want the egress route limit", err)
 	}
-	client.Groups[0].DownPaths = client.Groups[0].DownPaths[:8]
+	client.Groups[0].EgressPaths = client.Groups[0].EgressPaths[:8]
 	if err := client.Validate(); err != nil {
-		t.Fatalf("Validate with 8 down routes: %v", err)
+		t.Fatalf("Validate with 8 egress routes: %v", err)
 	}
 }
 
@@ -235,4 +235,60 @@ func mustPath(t *testing.T, raw string) Path {
 		t.Fatalf("ParsePath(%q): %v", raw, err)
 	}
 	return path
+}
+
+func TestLoadClientAcceptsOldDirectionKeys(t *testing.T) {
+	t.Parallel()
+
+	app, err := Load(writeFile(t, `
+client:
+  advertise: 192.0.2.10
+  servers:
+    - port: 51820
+      upstream:
+        mode: balancer
+        routes:
+          - 203.0.113.5:9000/udp
+      downstream:
+        mode: burst
+        routes:
+          - 203.0.113.5:9200/udp
+`))
+	if err != nil {
+		t.Fatalf("Load with the old keys: %v", err)
+	}
+	group := app.Client.Groups[0]
+	if !group.Split() || group.Mode != ModeBalancer || group.EgressMode != ModeBurst ||
+		len(group.Paths) != 1 || len(group.EgressPaths) != 1 {
+		t.Fatalf("group = %#v", group)
+	}
+}
+
+func TestLoadClientRejectsNewAndOldDirectionKeys(t *testing.T) {
+	t.Parallel()
+
+	const block = `
+        mode: balancer
+        routes:
+          - 203.0.113.5:9000/udp
+`
+	for name, keys := range map[string][2]string{
+		"ingress and upstream":  {"ingress", "upstream"},
+		"egress and downstream": {"egress", "downstream"},
+	} {
+		first, second := keys[0], keys[1]
+		other := "egress"
+		if first == "egress" {
+			other = "ingress"
+		}
+		_, err := Load(writeFile(t, `
+client:
+  advertise: 192.0.2.10
+  servers:
+    - port: 51820
+      `+first+`:`+block+`      `+second+`:`+block+`      `+other+`:`+block))
+		if err == nil || !strings.Contains(err.Error(), "not both") {
+			t.Fatalf("%s: err = %v, want a not both error", name, err)
+		}
+	}
 }

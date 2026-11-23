@@ -24,12 +24,12 @@ type serverInspector struct {
 	dataplane     serverDataplane
 	startedAt     time.Time
 	interfaceName func(int) string
-	// downs holds the down paths of the clients with separate down paths.
-	downs *downService
+	// egresses holds the egress paths of the clients with separate egress paths.
+	egresses *egressService
 }
 
-func newServerInspector(server config.Server, plane serverDataplane, startedAt time.Time, downs *downService) *serverInspector {
-	return &serverInspector{server: server, dataplane: plane, startedAt: startedAt, interfaceName: interfaceName, downs: downs}
+func newServerInspector(server config.Server, plane serverDataplane, startedAt time.Time, egresses *egressService) *serverInspector {
+	return &serverInspector{server: server, dataplane: plane, startedAt: startedAt, interfaceName: interfaceName, egresses: egresses}
 }
 
 func (s *serverInspector) Status() (api.Status, error) {
@@ -128,10 +128,10 @@ func (s *serverInspector) Clients() ([]api.RegisteredClient, error) {
 			LeaseSeconds: path.ExpiresIn.Seconds(),
 		})
 	}
-	if s.downs != nil {
-		for client, down := range s.downs.registry.clients(time.Now()) {
+	if s.egresses != nil {
+		for client, egress := range s.egresses.registry.clients(time.Now()) {
 			if position, exists := index[client]; exists {
-				clients[position].Down = &down
+				clients[position].Egress = &egress
 			}
 		}
 	}

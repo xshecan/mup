@@ -116,7 +116,7 @@ func (m *Mode) UnmarshalText(text []byte) error {
 	return nil
 }
 
-// Balance is how a return pool spreads the downstream replies of a route.
+// Balance is how a return pool spreads the egress replies of a route.
 type Balance uint8
 
 const (
@@ -190,19 +190,19 @@ type Client struct {
 // fails against another identity. The configuration file calls a group a
 // server and its paths routes.
 //
-// Paths and Mode are the up paths and the upstream mode. A group without down
-// paths sends each reply back on the path of the latest upstream packet. A
-// group with down paths lets the server pick the down path of each reply with
-// DownMode, so the two directions use separate paths.
+// Paths and Mode are the ingress paths and the ingress mode. A group without egress
+// paths sends each reply back on the path of the latest ingress packet. A
+// group with egress paths lets the server pick the egress path of each reply with
+// EgressMode, so the two directions use separate paths.
 type Group struct {
-	ListenPort uint16
-	Mode       Mode
-	Paths      []Path
-	DownMode   Mode
-	DownPaths  []Path
+	ListenPort  uint16
+	Mode        Mode
+	Paths       []Path
+	EgressMode  Mode
+	EgressPaths []Path
 }
 
-// Direction is the upstream or the downstream block of a group in the
+// Direction is the ingress or the egress block of a group in the
 // configuration file. Bridges are paths through a MUP bridge. They come after
 // the routes, so a route gets a lower path ID than a bridge.
 type Direction struct {
@@ -222,45 +222,60 @@ func (d Direction) all() []Path {
 	return paths
 }
 
-// Split reports whether the group has its own down paths.
+// Split reports whether the group has its own egress paths.
 func (g Group) Split() bool {
-	return len(g.DownPaths) > 0
+	return len(g.EgressPaths) > 0
 }
 
 // UnmarshalYAML reads a group in one of two forms: "mode" and "routes" for
-// paths that carry both directions, or "upstream" and "downstream" blocks for
-// separate up paths and down paths.
+// paths that carry both directions, or "ingress" and "egress" blocks for
+// separate ingress paths and egress paths.
 func (g *Group) UnmarshalYAML(unmarshal func(any) error) error {
 	var raw struct {
 		ListenPort uint16     `yaml:"port"`
 		Mode       *Mode      `yaml:"mode"`
 		Paths      []Path     `yaml:"routes"`
+		Ingress    *Direction `yaml:"ingress"`
+		Egress     *Direction `yaml:"egress"`
+		// Upstream and Downstream are the deprecated names of Ingress and Egress.
 		Upstream   *Direction `yaml:"upstream"`
 		Downstream *Direction `yaml:"downstream"`
 	}
 	if err := unmarshal(&raw); err != nil {
 		return err
 	}
+	if raw.Ingress != nil && raw.Upstream != nil {
+		return fmt.Errorf("server %d: use ingress or upstream, not both", raw.ListenPort)
+	}
+	if raw.Egress != nil && raw.Downstream != nil {
+		return fmt.Errorf("server %d: use egress or downstream, not both", raw.ListenPort)
+	}
+	if raw.Ingress == nil {
+		raw.Ingress = raw.Upstream
+	}
+	if raw.Egress == nil {
+		raw.Egress = raw.Downstream
+	}
 	*g = Group{ListenPort: raw.ListenPort, Paths: raw.Paths}
 	if raw.Mode != nil {
 		g.Mode = *raw.Mode
 	}
-	if raw.Upstream == nil && raw.Downstream == nil {
+	if raw.Ingress == nil && raw.Egress == nil {
 		return nil
 	}
 	if raw.Mode != nil || len(raw.Paths) > 0 {
-		return fmt.Errorf("server %d: use mode and routes, or upstream and downstream, not both", raw.ListenPort)
+		return fmt.Errorf("server %d: use mode and routes, or ingress and egress, not both", raw.ListenPort)
 	}
-	if raw.Upstream == nil || raw.Downstream == nil {
-		return fmt.Errorf("server %d: upstream and downstream go together", raw.ListenPort)
+	if raw.Ingress == nil || raw.Egress == nil {
+		return fmt.Errorf("server %d: ingress and egress go together", raw.ListenPort)
 	}
-	if len(raw.Downstream.Paths)+len(raw.Downstream.Bridges) == 0 {
-		return fmt.Errorf("server %d: downstream requires at least one route or bridge", raw.ListenPort)
+	if len(raw.Egress.Paths)+len(raw.Egress.Bridges) == 0 {
+		return fmt.Errorf("server %d: egress requires at least one route or bridge", raw.ListenPort)
 	}
-	g.Mode = raw.Upstream.Mode
-	g.Paths = raw.Upstream.all()
-	g.DownMode = raw.Downstream.Mode
-	g.DownPaths = raw.Downstream.all()
+	g.Mode = raw.Ingress.Mode
+	g.Paths = raw.Ingress.all()
+	g.EgressMode = raw.Egress.Mode
+	g.EgressPaths = raw.Egress.all()
 	return nil
 }
 
@@ -285,7 +300,7 @@ func (c Client) Validate() error {
 		listenPort uint16
 	}
 	var seen []groupPath
-	var downs []Path
+	var egresses []Path
 	for _, group := range c.Groups {
 		if err := group.validate(); err != nil {
 			return err
@@ -305,20 +320,20 @@ func (c Client) Validate() error {
 			}
 			seen = append(seen, groupPath{path: path, listenPort: group.ListenPort})
 		}
-		for _, down := range group.DownPaths {
-			for _, earlier := range downs {
-				if earlier.SameDownPath(down) {
-					return fmt.Errorf("client has the down route %s twice", down)
+		for _, egress := range group.EgressPaths {
+			for _, earlier := range egresses {
+				if earlier.SameEgressPath(egress) {
+					return fmt.Errorf("client has the egress route %s twice", egress)
 				}
 			}
-			downs = append(downs, down)
+			egresses = append(egresses, egress)
 		}
 	}
 	if len(seen) > MaxPaths {
 		return fmt.Errorf("client accepts at most %d paths in all groups", MaxPaths)
 	}
-	if len(downs) > MaxPaths {
-		return fmt.Errorf("client accepts at most %d down routes in all groups", MaxPaths)
+	if len(egresses) > MaxPaths {
+		return fmt.Errorf("client accepts at most %d egress routes in all groups", MaxPaths)
 	}
 	return nil
 }
@@ -338,29 +353,29 @@ func (g Group) validate() error {
 			return fmt.Errorf("server %d: route %d: %w", g.ListenPort, index, err)
 		}
 		if path.Bridge && !g.Split() {
-			return fmt.Errorf("server %d: route %d: a bridge needs a group with upstream and downstream", g.ListenPort, index)
+			return fmt.Errorf("server %d: route %d: a bridge needs a group with ingress and egress", g.ListenPort, index)
 		}
 		if path.Bridge && path.ReturnIP.IsValid() {
-			return fmt.Errorf("server %d: upstream route %d: an up bridge has no via, because it passes the client packets on to the server", g.ListenPort, index)
+			return fmt.Errorf("server %d: ingress route %d: an ingress bridge has no via, because it passes the client packets on to the server", g.ListenPort, index)
 		}
 		if path.ProxyBridge.IsValid() {
 			if path.Bridge {
 				return fmt.Errorf("server %d: route %d: a route is a bridge or a bridge reflect, not both", g.ListenPort, index)
 			}
 			if !g.Split() {
-				return fmt.Errorf("server %d: route %d: a bridge reflect needs a group with upstream and downstream", g.ListenPort, index)
+				return fmt.Errorf("server %d: route %d: a bridge reflect needs a group with ingress and egress", g.ListenPort, index)
 			}
 			if !path.ReturnIP.IsValid() {
-				return fmt.Errorf("server %d: route %d: a bridge reflect needs a via, because the bridge emits the reflected upstream", g.ListenPort, index)
+				return fmt.Errorf("server %d: route %d: a bridge reflect needs a via, because the bridge emits the reflected ingress", g.ListenPort, index)
 			}
 		}
 	}
-	if g.DownMode > ModeBurst {
-		return fmt.Errorf("server %d: invalid downstream mode %d", g.ListenPort, uint8(g.DownMode))
+	if g.EgressMode > ModeBurst {
+		return fmt.Errorf("server %d: invalid egress mode %d", g.ListenPort, uint8(g.EgressMode))
 	}
-	for index, path := range g.DownPaths {
-		if err := path.ValidateDown(); err != nil {
-			return fmt.Errorf("server %d: downstream route %d: %w", g.ListenPort, index, err)
+	for index, path := range g.EgressPaths {
+		if err := path.ValidateEgress(); err != nil {
+			return fmt.Errorf("server %d: egress route %d: %w", g.ListenPort, index, err)
 		}
 	}
 	return nil
@@ -372,8 +387,8 @@ func (g Group) validate() error {
 // is nonzero, ReturnIP is a pool base and the server spreads the replies over
 // the pool by Balance.
 //
-// If Bridge is set, Server is the address of a MUP bridge. An up bridge passes
-// the packets of the path to its server. A down bridge sends the replies that
+// If Bridge is set, Server is the address of a MUP bridge. An ingress bridge passes
+// the packets of the path to its server. An egress bridge sends the replies that
 // a server wraps for it, and the address of the path is the bridge address.
 //
 // If LastPort is nonzero, the path has the server ports from ServerPort to
@@ -389,8 +404,8 @@ type Path struct {
 	ReturnPrefix uint8
 	Balance      Balance
 	Bridge       bool
-	// ProxyBridge is set on an up reflect route that a bridge emits. The client
-	// reflects the upstream to Server through the via, but it cannot send the
+	// ProxyBridge is set on an ingress reflect route that a bridge emits. The client
+	// reflects the ingress to Server through the via, but it cannot send the
 	// spoofed packet, so it wraps the packet for the bridge at ProxyBridge, and
 	// the bridge emits the spoofed packet.
 	ProxyBridge netip.Addr
@@ -409,15 +424,15 @@ func (p Path) IsPool() bool {
 	return p.ReturnPrefix != 0
 }
 
-// UpReflect reports whether the path reflects the upstream. An up route of a
-// group with down paths that has a return IP, and is not a bridge, reflects the
-// upstream through the return IP or the pool. The split argument is true for a
-// group with down paths.
-func (p Path) UpReflect(split bool) bool {
+// IngressReflect reports whether the path reflects the ingress. An ingress route of a
+// group with egress paths that has a return IP, and is not a bridge, reflects the
+// ingress through the return IP or the pool. The split argument is true for a
+// group with egress paths.
+func (p Path) IngressReflect(split bool) bool {
 	return split && !p.Bridge && p.ReturnIP.IsValid()
 }
 
-// BridgeReflect reports whether an up reflect route emits through a bridge,
+// BridgeReflect reports whether an ingress reflect route emits through a bridge,
 // because the client cannot send the spoofed packet itself.
 func (p Path) BridgeReflect() bool {
 	return p.ProxyBridge.IsValid()
@@ -494,28 +509,28 @@ func (p *Path) UnmarshalText(text []byte) error {
 	return nil
 }
 
-// ValidateDown applies the rules of a down path. The server sends the replies
+// ValidateEgress applies the rules of an egress path. The server sends the replies
 // from the address and port of the path, so the path has no interface and one
 // port.
-func (p Path) ValidateDown() error {
+func (p Path) ValidateEgress() error {
 	if err := p.validate(); err != nil {
 		return err
 	}
 	if p.Interface != "" {
-		return errors.New("a down route has no interface, because the server picks the interface")
+		return errors.New("an egress route has no interface, because the server picks the interface")
 	}
 	if p.HasPortRange() {
-		return errors.New("a down route has one server port")
+		return errors.New("an egress route has one server port")
 	}
 	if p.ProxyBridge.IsValid() {
-		return errors.New("a down route has no bridge reflect, because the server sends the replies")
+		return errors.New("an egress route has no bridge reflect, because the server sends the replies")
 	}
 	return nil
 }
 
-// SameDownPath reports whether two down paths send from the same server
+// SameEgressPath reports whether two egress paths send from the same server
 // address, port, and transport. The client cannot tell their replies apart.
-func (p Path) SameDownPath(other Path) bool {
+func (p Path) SameEgressPath(other Path) bool {
 	return p.Server == other.Server && p.ServerPort == other.ServerPort && p.Transport == other.Transport
 }
 
@@ -554,7 +569,7 @@ type Server struct {
 	Port          PortRange      `yaml:"port"`
 	Target        netip.AddrPort `yaml:"target"`
 	ControlSocket string         `yaml:"control_socket"`
-	// TargetIngress delivers each upstream packet into the ingress hook of
+	// TargetIngress delivers each ingress packet into the ingress hook of
 	// the interface that holds the target address, from the advertised IP
 	// of the client. A program on that hook, for example the TC fast path of
 	// a WireGuard router, then sees the packet as a packet from the client.
@@ -646,7 +661,7 @@ func ParsePath(raw string) (Path, error) {
 	var proxyBridge netip.Addr
 	balance := BalancePerPeer
 	usage := errors.New("path must use IPv4:PORT/udp or /icmp, with an optional via RETURN_IP, or via POOL_CIDR balance MODE")
-	// A trailing "bridge BRIDGE" names a bridge that emits the reflected upstream.
+	// A trailing "bridge BRIDGE" names a bridge that emits the reflected ingress.
 	if n := len(fields); n >= 2 && fields[n-2] == "bridge" {
 		address, err := netip.ParseAddr(fields[n-1])
 		if err != nil || !isNonzeroIPv4(address) {

@@ -24,10 +24,10 @@ type BridgeSettings struct {
 // BridgeCounters counts the packets and bytes that a bridge sends in each
 // direction.
 type BridgeCounters struct {
-	UpPackets   uint64
-	UpBytes     uint64
-	DownPackets uint64
-	DownBytes   uint64
+	IngressPackets uint64
+	IngressBytes   uint64
+	EgressPackets  uint64
+	EgressBytes    uint64
 }
 
 func encodeBridgeConfig(settings BridgeSettings) (mupBridgeConfigV1, error) {

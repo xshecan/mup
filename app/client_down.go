@@ -11,29 +11,29 @@ import (
 )
 
 // clientControls owns the control sockets of a client. It opens the socket of
-// each up path, receives the frames that arrive on down paths, and sends a
-// frame on an up path.
+// each ingress path, receives the frames that arrive on egress paths, and sends a
+// frame on an ingress path.
 type clientControls interface {
 	open(pathRegistration) (pathConn, error)
-	// listenDown starts to receive the frames on the down paths of the
-	// groups with these listen ports. It passes each down path probe to
-	// handle, and each REGISTER_ACK to the up path that waits for it. The
+	// listenEgress starts to receive the frames on the egress paths of the
+	// groups with these listen ports. It passes each egress path probe to
+	// handle, and each REGISTER_ACK to the ingress path that waits for it. The
 	// returned function stops it.
-	listenDown(listen downListen, handle func(downProbe)) (func(), error)
-	// sendUp sends one control frame on an up path.
-	sendUp(registration pathRegistration, frame []byte) error
+	listenEgress(listen egressListen, handle func(egressProbe)) (func(), error)
+	// sendIngress sends one control frame on an ingress path.
+	sendIngress(registration pathRegistration, frame []byte) error
 }
 
-// downListen names what a client receives on its down paths.
-type downListen struct {
+// egressListen names what a client receives on its egress paths.
+type egressListen struct {
 	advertisedIP netip.Addr
 	nonce        uint64
 	listenPorts  []uint16
 }
 
-// downProbe is a PROBE that arrived on a down path. Source is the packet
+// egressProbe is a PROBE that arrived on an egress path. Source is the packet
 // source, and Port is the UDP source port or the ICMP identifier.
-type downProbe struct {
+type egressProbe struct {
 	frame     protocol.ControlFrame
 	source    netip.Addr
 	transport protocol.TransportID
@@ -41,21 +41,21 @@ type downProbe struct {
 	received  time.Time
 }
 
-// open lets a pathOpener act as the controls of a client without down paths.
+// open lets a pathOpener act as the controls of a client without egress paths.
 func (o pathOpener) open(registration pathRegistration) (pathConn, error) {
 	return o(registration)
 }
 
-func (pathOpener) listenDown(downListen, func(downProbe)) (func(), error) {
+func (pathOpener) listenEgress(egressListen, func(egressProbe)) (func(), error) {
 	return func() {}, nil
 }
 
-func (pathOpener) sendUp(pathRegistration, []byte) error {
+func (pathOpener) sendIngress(pathRegistration, []byte) error {
 	return nil
 }
 
-// ackRouter passes each REGISTER_ACK of a group with down paths to the up path
-// that waits for it. The ACK can arrive on any down path, so on any socket.
+// ackRouter passes each REGISTER_ACK of a group with egress paths to the ingress path
+// that waits for it. The ACK can arrive on any egress path, so on any socket.
 type ackRouter struct {
 	mu      sync.Mutex
 	waiters []*ackWaiter
@@ -96,52 +96,52 @@ func (r *ackRouter) post(pathID uint16, frame []byte) {
 	}
 }
 
-// downSet holds the down paths of a group with separate down paths. Each up
-// path of the group sends a DOWN_REGISTER for each of them with every
-// REGISTER, so each server that an up path reaches learns them all. A removed
-// down path stays in the frames with a lease of zero for one lease, so the
+// egressSet holds the egress paths of a group with separate egress paths. Each ingress
+// path of the group sends a EGRESS_REGISTER for each of them with every
+// REGISTER, so each server that an ingress path reaches learns them all. A removed
+// egress path stays in the frames with a lease of zero for one lease, so the
 // servers forget it at once.
-type downSet struct {
+type egressSet struct {
 	mu        sync.Mutex
 	mode      config.Mode
 	paths     map[uint16]config.Path
-	withdrawn map[uint16]downWithdrawal
+	withdrawn map[uint16]egressWithdrawal
 }
 
-type downWithdrawal struct {
+type egressWithdrawal struct {
 	path  config.Path
 	until time.Time
 }
 
-func newDownSet(mode config.Mode) *downSet {
-	return &downSet{mode: mode, paths: make(map[uint16]config.Path), withdrawn: make(map[uint16]downWithdrawal)}
+func newEgressSet(mode config.Mode) *egressSet {
+	return &egressSet{mode: mode, paths: make(map[uint16]config.Path), withdrawn: make(map[uint16]egressWithdrawal)}
 }
 
-func (d *downSet) set(slot uint16, path config.Path) {
+func (d *egressSet) set(slot uint16, path config.Path) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.paths[slot] = path
 	delete(d.withdrawn, slot)
 }
 
-func (d *downSet) remove(slot uint16, now time.Time) {
+func (d *egressSet) remove(slot uint16, now time.Time) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if path, ok := d.paths[slot]; ok {
-		d.withdrawn[slot] = downWithdrawal{path: path, until: now.Add(registrationLeaseSeconds * time.Second)}
+		d.withdrawn[slot] = egressWithdrawal{path: path, until: now.Add(registrationLeaseSeconds * time.Second)}
 	}
 	delete(d.paths, slot)
 }
 
-func (d *downSet) setMode(mode config.Mode) {
+func (d *egressSet) setMode(mode config.Mode) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.mode = mode
 }
 
-// frames builds the DOWN_REGISTER frames that an up path sends before its
+// frames builds the EGRESS_REGISTER frames that an ingress path sends before its
 // REGISTER with this sequence.
-func (d *downSet) frames(registration pathRegistration, sequence uint32, now time.Time) [][]byte {
+func (d *egressSet) frames(registration pathRegistration, sequence uint32, now time.Time) [][]byte {
 	if d == nil {
 		return nil
 	}
@@ -149,7 +149,7 @@ func (d *downSet) frames(registration pathRegistration, sequence uint32, now tim
 	defer d.mu.Unlock()
 	frames := make([][]byte, 0, len(d.paths)+len(d.withdrawn))
 	for slot, path := range d.paths {
-		if frame, err := downRegisterFrame(registration, slot, path, d.mode, sequence, registrationLeaseSeconds); err == nil {
+		if frame, err := egressRegisterFrame(registration, slot, path, d.mode, sequence, registrationLeaseSeconds); err == nil {
 			frames = append(frames, frame)
 		}
 	}
@@ -158,16 +158,16 @@ func (d *downSet) frames(registration pathRegistration, sequence uint32, now tim
 			delete(d.withdrawn, slot)
 			continue
 		}
-		if frame, err := downRegisterFrame(registration, slot, withdrawal.path, d.mode, sequence, 0); err == nil {
+		if frame, err := egressRegisterFrame(registration, slot, withdrawal.path, d.mode, sequence, 0); err == nil {
 			frames = append(frames, frame)
 		}
 	}
 	return frames
 }
 
-func downRegisterFrame(registration pathRegistration, slot uint16, path config.Path, mode config.Mode, sequence, lease uint32) ([]byte, error) {
+func egressRegisterFrame(registration pathRegistration, slot uint16, path config.Path, mode config.Mode, sequence, lease uint32) ([]byte, error) {
 	frame := protocol.ControlFrame{
-		Type:          protocol.ControlDownRegister,
+		Type:          protocol.ControlEgressRegister,
 		Transport:     path.Transport,
 		PathID:        slot,
 		Sequence:      sequence,
@@ -176,8 +176,8 @@ func downRegisterFrame(registration pathRegistration, slot uint16, path config.P
 		LeaseSeconds:  lease,
 		InstanceNonce: registration.nonce,
 		AdvertisedIP:  registration.advertisedIP,
-		DownMode:      uint8(mode),
-		DownServer:    path.Server,
+		EgressMode:    uint8(mode),
+		EgressServer:  path.Server,
 	}
 	switch {
 	case path.IsPool():
@@ -201,13 +201,13 @@ func downRegisterFrame(registration pathRegistration, slot uint16, path config.P
 	return packet, nil
 }
 
-// downProbeReplyFrame answers a probe of a down path. It names the source that
+// egressProbeReplyFrame answers a probe of an egress path. It names the source that
 // the probe came from, which is the reflector of a reflected path.
-func downProbeReplyFrame(registration pathRegistration, probe downProbe, path config.Path) ([]byte, error) {
+func egressProbeReplyFrame(registration pathRegistration, probe egressProbe, path config.Path) ([]byte, error) {
 	frame := protocol.ControlFrame{
 		Type:          protocol.ControlProbeReply,
 		Transport:     path.Transport,
-		Flags:         protocol.ControlFlagDownPath | protocol.ControlFlagReturnIP,
+		Flags:         protocol.ControlFlagEgressPath | protocol.ControlFlagReturnIP,
 		PathID:        probe.frame.PathID,
 		Sequence:      probe.frame.Sequence,
 		ListenPort:    registration.listenPort,
@@ -223,9 +223,9 @@ func downProbeReplyFrame(registration pathRegistration, probe downProbe, path co
 	return packet, nil
 }
 
-// downSourceMatches reports whether a packet source and port fit a down path:
+// egressSourceMatches reports whether a packet source and port fit an egress path:
 // the server of a direct path, its return IP, or an address in its pool.
-func downSourceMatches(path config.Path, source netip.Addr, transport protocol.TransportID, port uint16) bool {
+func egressSourceMatches(path config.Path, source netip.Addr, transport protocol.TransportID, port uint16) bool {
 	if path.Transport != transport || path.ServerPort != port {
 		return false
 	}

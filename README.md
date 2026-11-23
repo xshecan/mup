@@ -43,9 +43,9 @@ Each group has one of three path modes. Fallback uses the first healthy path. Ba
 
 Each path has its own return mode. The optional `via RETURN_IP` after a path sets it, and the client `-r` flag sets it for each path without one. Without a return IP, the server replies directly with the transport of the path. On a UDP path, the server sends replies with the return IP as their source. On an ICMP path, the server sends an Echo Request to the return IP, and that host answers the client.
 
-A group can also have separate up paths and down paths, each with its own mode and health. The client picks the up path of each packet, and the server picks the down path of each reply. See [Separate up and down paths](#separate-up-and-down-paths).
+A group can also have separate ingress paths and egress paths, each with its own mode and health. The client picks the ingress path of each packet, and the server picks the egress path of each reply. See [Separate ingress and egress paths](#separate-ingress-and-egress-paths).
 
-A bridge is a second host between a client and a server. It passes the upstream on to the server, and it sends the replies of a server whose network drops spoofed packets. See [Bridges](#bridges).
+A bridge is a second host between a client and a server. It passes the ingress on to the server, and it sends the replies of a server whose network drops spoofed packets. See [Bridges](#bridges).
 
 [PROTOCOL.md](PROTOCOL.md) describes every packet, map, timer, and drop reason.
 
@@ -144,8 +144,8 @@ server:
 | `client.control_socket` | `--control-socket` | Optional. The socket for `mupctl`. An empty value turns the socket off. |
 | `client.servers[].port` | `-p` | The port where the group receives packets from its peers. |
 | `client.servers[].mode` | `--mode` | Optional. The path mode of the group. The default is `fallback`. |
-| `client.servers[].upstream`, `client.servers[].downstream` | `--up`, `--down` | Optional. A `mode` and `routes` for each direction, in place of `mode` and `routes`. See [Separate up and down paths](#separate-up-and-down-paths). |
-| `client.servers[].upstream.bridges`, `client.servers[].downstream.bridges` | `--up-bridge`, `--down-bridge` | Optional. The paths through a bridge in each direction. See [Bridges](#bridges). |
+| `client.servers[].ingress`, `client.servers[].egress` | `--ingress`, `--egress` | Optional. A `mode` and `routes` for each direction, in place of `mode` and `routes`. See [Separate ingress and egress paths](#separate-ingress-and-egress-paths). |
+| `client.servers[].ingress.bridges`, `client.servers[].egress.bridges` | `--ingress-bridge`, `--egress-bridge` | Optional. The paths through a bridge in each direction. See [Bridges](#bridges). |
 | `client.servers[].routes` | `-u` | The paths of the group, in the form of the `-u` flag. A path can end with `via RETURN_IP`. The server port of a path can be a range, `FIRST-LAST`. See [Server port ranges](#server-port-ranges). |
 | `server.port` | `-p` | The UDP ports and the ICMP Echo identifiers that the server accepts, as `PORT` or `FIRST-LAST`, for example `5000-6000`. |
 | `server.target` | `-r` | The WireGuard target that receives all traffic. |
@@ -178,48 +178,48 @@ These rules apply to port ranges:
 - The routes of two groups must not share a port of the same server.
 - The client does not save a move. At the next start, each path starts on the first port of its range again.
 
-## Separate up and down paths
+## Separate ingress and egress paths
 
-A path carries both directions: the server sends each reply back on the path of the latest upstream packet. To let each direction pick its own path, give the group an `upstream` block and a `downstream` block instead of `mode` and `routes`:
+A path carries both directions: the server sends each reply back on the path of the latest ingress packet. To let each direction pick its own path, give the group an `ingress` block and a `egress` block instead of `mode` and `routes`:
 
 ```yaml
 client:
   advertise: 192.0.2.10
   servers:
     - port: 51820
-      upstream:
+      ingress:
         mode: fallback
         routes:
           - 203.0.113.5:5000-5099/udp
           - 203.0.113.5:5100/icmp
-      downstream:
+      egress:
         mode: balancer
         routes:
           - 203.0.113.5:5200/icmp via 198.51.100.0/28 balance per-packet
           - 203.0.113.6:5300/udp
 ```
 
-The client picks the up path of each packet with the upstream mode. The server picks the down path of each reply with the downstream mode. A down path that fails moves only the replies, and an up path that fails moves only the upstream.
+The client picks the ingress path of each packet with the ingress mode. The server picks the egress path of each reply with the egress mode. An egress path that fails moves only the replies, and an ingress path that fails moves only the ingress.
 
-A downstream route has the form of a path, with these differences:
+An egress route has the form of a path, with these differences:
 
-- `SERVER` is an address of the server host. A direct down path sends the replies from it, and the server sends through the interface that holds it.
+- `SERVER` is an address of the server host. A direct egress path sends the replies from it, and the server sends through the interface that holds it.
 - `PORT` is one port of `server.port`. It is the UDP source port of the replies, or the identifier of ICMP replies.
 - `via` is optional, as in a path. The server reflects the replies through the return IP or the pool.
-- A downstream route has no `%IFACE` and no port range.
+- An egress route has no `%IFACE` and no port range.
 
-An upstream route can take a `via`, which reflects the upstream to the server. See [Upstream reflect](#upstream-reflect). A client has up to 8 up paths and up to 8 down paths in all groups.
+An ingress route can take a `via`, which reflects the ingress to the server. See [Ingress reflect](#ingress-reflect). A client has up to 8 ingress paths and up to 8 egress paths in all groups.
 
-The server probes each down path every 2 seconds, through each member of a pool, and the client answers on an up path. A down path, or a member of its pool, is healthy while these probes come back. So a reflector that answers the ping of the server but does not reach the client carries no replies. The server also sends each ACK on the down paths, so an up path stays healthy even with no packet back on its own flow.
+The server probes each egress path every 2 seconds, through each member of a pool, and the client answers on an ingress path. An egress path, or a member of its pool, is healthy while these probes come back. So a reflector that answers the ping of the server but does not reach the client carries no replies. The server also sends each ACK on the egress paths, so an ingress path stays healthy even with no packet back on its own flow.
 
-In the downstream burst mode, the server sends each reply on every healthy down path, and the client passes the first copy to the peer. A server without down path support ignores the down paths, and its replies come back on the up paths.
+In the egress burst mode, the server sends each reply on every healthy egress path, and the client passes the first copy to the peer. A server without egress path support ignores the egress paths, and its replies come back on the ingress paths.
 
-### Upstream reflect
+### Ingress reflect
 
-A `via` on an upstream route reflects the path, in the other direction from a down route. The client sends the upstream to the via host, and the via host passes it to the server. So the server never sees the client address on the upstream, only the via host.
+A `via` on an ingress route reflects the path, in the other direction from an egress route. The client sends the ingress to the via host, and the via host passes it to the server. So the server never sees the client address on the ingress, only the via host.
 
 ```yaml
-      upstream:
+      ingress:
         routes:
           - 160.119.74.88:9000/icmp via 6.7.8.9
           - 160.119.74.88:9100/icmp via 87.107.117.192/28 balance per-packet
@@ -228,33 +228,33 @@ A `via` on an upstream route reflects the path, in the other direction from a do
 
 These rules apply:
 
-- An ICMP up route reflects. The client sends an Echo Request to the via host, with the server as the source. The via host then answers the server with an Echo Reply, and the server accepts the reply as the upstream.
-- A UDP up route forges the source. The client sends to the server with the via as the source, because a plain host does not reflect a UDP packet.
-- `via BASE/PREFIX balance per-peer` or `per-packet` reflects through a pool, as a down route does.
-- A `via` on an up route is valid only in a group with `upstream` and `downstream`. A symmetric route in `routes` keeps the return meaning of `via`.
+- An ICMP ingress route reflects. The client sends an Echo Request to the via host, with the server as the source. The via host then answers the server with an Echo Reply, and the server accepts the reply as the ingress.
+- A UDP ingress route forges the source. The client sends to the server with the via as the source, because a plain host does not reflect a UDP packet.
+- `via BASE/PREFIX balance per-peer` or `per-packet` reflects through a pool, as an egress route does.
+- A `via` on an ingress route is valid only in a group with `ingress` and `egress`. A symmetric route in `routes` keeps the return meaning of `via`.
 
-The client sends each REGISTER reflected through every member, so the server registers one path for each member that reflects. The client keeps the members whose ACK comes back, and spreads the upstream over them. A member that stops reflecting loses its registration and drops out, so the path carries no upstream through a dead member.
+The client sends each REGISTER reflected through every member, so the server registers one path for each member that reflects. The client keeps the members whose ACK comes back, and spreads the ingress over them. A member that stops reflecting loses its registration and drops out, so the path carries no ingress through a dead member.
 
-The client must send a packet whose source is not the client address, which is the same spoofing that a reflected down path needs. An old server rejects an up reflect REGISTER, so the path stays unhealthy.
+The client must send a packet whose source is not the client address, which is the same spoofing that a reflected egress path needs. An old server rejects an ingress reflect REGISTER, so the path stays unhealthy.
 
 ## Bridges
 
 A bridge is a second host between a client and a server. It runs `mup bridge`, and it serves one MUP server. The network of the bridge must accept packets with a source address that is not its own.
 
-- An up bridge takes the packets of the client, in the same way as a server. It changes only the destination to its server, and it keeps the client address as the source. So the server gets the same packets as from the client, and it needs no change.
-- A down bridge sends the replies of the server. The server builds each reply as for a down route, wraps it in a UDP packet, and sends it to the bridge. The bridge removes the wrapper and sends the reply with the source that the down path needs. So a server whose network drops spoofed packets can use reflected down paths.
+- An ingress bridge takes the packets of the client, in the same way as a server. It changes only the destination to its server, and it keeps the client address as the source. So the server gets the same packets as from the client, and it needs no change.
+- An egress bridge sends the replies of the server. The server builds each reply as for an egress route, wraps it in a UDP packet, and sends it to the bridge. The bridge removes the wrapper and sends the reply with the source that the egress path needs. So a server whose network drops spoofed packets can use reflected egress paths.
 
-Only the client configuration names a bridge, in a `bridges` list next to `routes` in `upstream` or `downstream`. In this example, the server cannot spoof, so the bridge 5.6.7.8 reflects its replies through the pool:
+Only the client configuration names a bridge, in a `bridges` list next to `routes` in `ingress` or `egress`. In this example, the server cannot spoof, so the bridge 5.6.7.8 reflects its replies through the pool:
 
 ```yaml
 client:
   advertise: 160.119.74.74
   servers:
     - port: 51820
-      upstream:
+      ingress:
         routes:
           - 46.102.130.95:9000/icmp
-      downstream:
+      egress:
         bridges:
           - 5.6.7.8:9200/icmp via 87.107.117.192/28
 ```
@@ -267,16 +267,16 @@ bridge:
 
 A bridge entry has the form of a route, with the bridge address in place of the server address. These rules apply:
 
-- An up bridge has no `via`. It can have a port range and `%IFACE`.
-- A down bridge can have `via`. It has one port and no `%IFACE`. Without `via`, it sends the replies from the bridge address.
+- An ingress bridge has no `via`. It can have a port range and `%IFACE`.
+- An egress bridge can have `via`. It has one port and no `%IFACE`. Without `via`, it sends the replies from the bridge address.
 - The routes and the bridges of a direction share its 8 path slots, and the routes come first. So in the fallback mode, a healthy route carries the traffic before a bridge.
-- The `port` range of the bridge must include the ports of all bridge entries. The bridge sends the upstream to its server on the same port.
+- The `port` range of the bridge must include the ports of all bridge entries. The bridge sends the ingress to its server on the same port.
 
 The bridge takes wrapped replies only from its server. A server behind NAT reaches the bridge from its NAT address, so put that address in `bridge.allow`. The bridge passes every other packet to the kernel, so a normal ping to the bridge still gets its reply.
 
-A down bridge starts unhealthy, because a client does not know which server a bridge serves. Each server that gets the down bridge probes it, and only the probes of the server of the bridge come back. A dead bridge makes its up paths and its down paths unhealthy.
+An egress bridge starts unhealthy, because a client does not know which server a bridge serves. Each server that gets the egress bridge probes it, and only the probes of the server of the bridge come back. A dead bridge makes its ingress paths and its egress paths unhealthy.
 
-The wrapper adds 20 bytes to each reply between the server and the bridge. The largest WireGuard message on a down bridge is thus the path MTU minus 48 bytes. At a path MTU of 1500, this is a WireGuard MTU of 1420, the WireGuard default. The server drops a larger reply and counts reason 25 (`BRIDGE_SIZE`). The upstream through a bridge has no wrapper.
+The wrapper adds 20 bytes to each reply between the server and the bridge. The largest WireGuard message on an egress bridge is thus the path MTU minus 48 bytes. At a path MTU of 1500, this is a WireGuard MTU of 1420, the WireGuard default. The server drops a larger reply and counts reason 25 (`BRIDGE_SIZE`). The ingress through a bridge has no wrapper.
 
 The bridge host needs IPv4 forwarding (`net.ipv4.ip_forward=1`), because the bridge program uses the route lookup of a forwarded packet. Without it, the bridge does not start.
 
@@ -333,11 +333,11 @@ The command `mup --config FILE` reads a [configuration file](#configuration-file
 ```text
 mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP]" [-u ...] -s CLIENT_IP
            [-r RETURN_IP] [--mode fallback|balancer|burst] [--control-socket PATH]
-mup client -p LISTEN_PORT --up "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp" [--up ...]
-           --down "SERVER_IP:PORT/udp|icmp [via RETURN_IP]" [--down ...] -s CLIENT_IP
-           [--up-bridge "BRIDGE_IP[%IFACE]:PORT[-LAST]/udp|icmp"] [--up-bridge ...]
-           [--down-bridge "BRIDGE_IP:PORT/udp|icmp [via RETURN_IP]"] [--down-bridge ...]
-           [--up-mode MODE] [--down-mode MODE] [--control-socket PATH]
+mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp" [--ingress ...]
+           --egress "SERVER_IP:PORT/udp|icmp [via RETURN_IP]" [--egress ...] -s CLIENT_IP
+           [--ingress-bridge "BRIDGE_IP[%IFACE]:PORT[-LAST]/udp|icmp"] [--ingress-bridge ...]
+           [--egress-bridge "BRIDGE_IP:PORT/udp|icmp [via RETURN_IP]"] [--egress-bridge ...]
+           [--ingress-mode MODE] [--egress-mode MODE] [--control-socket PATH]
 ```
 
 | Flag | Value | Meaning |
@@ -347,10 +347,10 @@ mup client -p LISTEN_PORT --up "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp" [--up ..
 | `-s` | IPv4 | The advertised IP. It must be an address of the client host, and no other active client of the server can use it. |
 | `-r` | IPv4 | Optional. The return IP of each `-u` path without its own `via`. On UDP paths, it is the spoofed source of replies. On ICMP paths, it is the reflector host. |
 | `--mode` | `fallback`, `balancer`, `burst` | The path mode. The default is `fallback`. |
-| `--up` | `SERVER_IP[%IFACE]:PORT/udp` or `/icmp` | One up path of a group with separate down paths. Use it with `--down`, and not with `-u`. |
-| `--down` | `SERVER_IP:PORT/udp` or `/icmp`, then optionally `via RETURN_IP` | One down path. See [Separate up and down paths](#separate-up-and-down-paths). |
-| `--up-bridge`, `--down-bridge` | `BRIDGE_IP:PORT/udp` or `/icmp` | One up path or down path through a bridge. A down bridge can end with `via RETURN_IP`. See [Bridges](#bridges). |
-| `--up-mode`, `--down-mode` | `fallback`, `balancer`, `burst` | The upstream mode and the downstream mode. The default is `fallback`. |
+| `--ingress` | `SERVER_IP[%IFACE]:PORT/udp` or `/icmp` | One ingress path of a group with separate egress paths. Use it with `--egress`, and not with `-u`. |
+| `--egress` | `SERVER_IP:PORT/udp` or `/icmp`, then optionally `via RETURN_IP` | One egress path. See [Separate ingress and egress paths](#separate-ingress-and-egress-paths). |
+| `--ingress-bridge`, `--egress-bridge` | `BRIDGE_IP:PORT/udp` or `/icmp` | One ingress path or egress path through a bridge. An egress bridge can end with `via RETURN_IP`. See [Bridges](#bridges). |
+| `--ingress-mode`, `--egress-mode` | `fallback`, `balancer`, `burst` | The ingress mode and the egress mode. The default is `fallback`. |
 | `--control-socket` | path | The socket for `mupctl`. The default is `/run/mup/client.sock`. An empty value turns the socket off. |
 
 ### Server
@@ -398,8 +398,8 @@ mup bridge -s SERVER_IP -p PORT[-LAST] [-a CIDR] [-a ...] [--control-socket PATH
 | `mupctl add path SERVER[%IFACE]:PORT[-LAST]/udp [via RETURN_IP]` | client | Adds a path to a group. The value uses the form of the `-u` flag. |
 | `mupctl delete path ID` | client | Removes a path. |
 | `mupctl set mode burst` | client | Changes the path mode of a group to `fallback`, `balancer`, or `burst`. |
-| `mupctl add path --down SERVER:PORT/udp [via RETURN_IP]` | client | Adds a down path to a group with separate down paths. `delete path --down ID` removes one, and `set mode --down MODE` changes the downstream mode. |
-| `mupctl add path --bridge BRIDGE:PORT/udp` | client | Adds an up path through a bridge. With `--down`, it adds a down path through a bridge. `delete path` removes either one. |
+| `mupctl add path --egress SERVER:PORT/udp [via RETURN_IP]` | client | Adds an egress path to a group with separate egress paths. `delete path --egress ID` removes one, and `set mode --egress MODE` changes the egress mode. |
+| `mupctl add path --bridge BRIDGE:PORT/udp` | client | Adds an ingress path through a bridge. With `--egress`, it adds an egress path through a bridge. `delete path` removes either one. |
 
 On a client, `mupctl status` prints this overview:
 
@@ -514,8 +514,8 @@ The integration tests create disposable network namespaces and private bpffs mou
 - A target on the server host, on the loopback address and on another address.
 - The limit of routes for one source IP.
 - A normal ping with the server port as its identifier.
-- Separate up and down paths: a failover of the down paths only, and a downstream burst.
-- A bridge for the upstream and for a reflected downstream, with a server that cannot spoof, and the failure and return of the bridge.
+- Separate ingress and egress paths: a failover of the egress paths only, and an egress burst.
+- A bridge for the ingress and for a reflected egress, with a server that cannot spoof, and the failure and return of the bridge.
 
 These tests pass on Linux 6.8 (Ubuntu 24.04) and on Linux 6.12 (Debian 13). To run them with a daemon that you built before, set `MUP_BINARY` to its path. To measure real PPS, bandwidth, drops, and CPU, use the namespace topology with the production NICs.
 
@@ -528,8 +528,8 @@ MUP has no authentication of its own. A host can spoof the source address of a r
 ## Limits
 
 - IPv4 only, with no IPv4 options and no fragments.
-- Up to 8 paths, up to 8 down paths, and up to 4095 peers per client, shared by all of its groups. The bridges of a direction count as its paths.
-- A reply on a down bridge is 20 bytes larger between the server and the bridge. At a path MTU of 1500, it needs a WireGuard MTU of 1420 or less.
+- Up to 8 paths, up to 8 egress paths, and up to 4095 peers per client, shared by all of its groups. The bridges of a direction count as its paths.
+- A reply on an egress bridge is 20 bytes larger between the server and the bridge. At a path MTU of 1500, it needs a WireGuard MTU of 1420 or less.
 - Up to 1024 peers from one source IP on a client.
 - Up to 41000 routes per server, and up to 4096 registered clients.
 - Up to 4096 server ports in one range. The server opens one UDP socket for each port, so no other program can use a port of the range. A packet to a port of the range from a registered path must be valid MUP traffic, or the server drops it. Every other UDP packet to these ports goes on to the kernel, for example the replies of a NAT flow on such a port.
@@ -537,5 +537,5 @@ MUP has no authentication of its own. A host can spoof the source address of a r
 - The target can be on the server host, on `127.0.0.1` or on another address of the host. On a UDP path, the network device then completes the checksum of each reply. On an ICMP path, MUP computes the checksum itself, because some devices, for example vmxnet3, do not complete it for ICMP. A device that completes it can still change the Echo sequence field, so these replies have no fixed sequence.
 - On an ICMP route with `via`, the server reaches the `via` host only through the interface that faces the client.
 - A client binds a UDP control socket to its advertised IP and each listen port. If another program holds that port, the client does not start.
-- MUP attaches only to the interfaces that are up at start. After you add an interface, restart MUP.
+- MUP attaches only to the interfaces that are ingress at start. After you add an interface, restart MUP.
 - MUP supports only interfaces with an Ethernet header, and the loopback interface. A path over a PPP, tun, WireGuard, or raw-IP modem interface fails at start.

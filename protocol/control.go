@@ -21,16 +21,16 @@ var (
 	ErrControlLength     = errors.New("invalid mup control frame length")
 	ErrControlTransport  = errors.New("invalid mup control transport")
 	ErrControlPrefix     = errors.New("invalid mup control pool prefix")
-	ErrControlMode       = errors.New("invalid mup control down mode")
+	ErrControlMode       = errors.New("invalid mup control egress mode")
 	ErrZeroInstanceNonce = errors.New("instance nonce must be nonzero")
 )
 
 // allControlFlags holds every defined control flag bit.
-const allControlFlags = ControlFlagReturnIP | ControlFlagReturnPool | ControlFlagBalancePerPacket | ControlFlagDownPath | ControlFlagBridge | ControlFlagUpReflect
+const allControlFlags = ControlFlagReturnIP | ControlFlagReturnPool | ControlFlagBalancePerPacket | ControlFlagEgressPath | ControlFlagBridge | ControlFlagIngressReflect
 
-// MaxDownMode is the largest down mode of a DOWN_REGISTER: 0 is fallback, 1
+// MaxEgressMode is the largest egress mode of a EGRESS_REGISTER: 0 is fallback, 1
 // is balancer, and 2 is burst.
-const MaxDownMode = 2
+const MaxEgressMode = 2
 
 type ControlFrame struct {
 	Flags         uint8
@@ -46,13 +46,13 @@ type ControlFrame struct {
 	AdvertisedIP  netip.Addr
 	ReturnIP      netip.Addr
 	ReturnPrefix  uint8
-	// DownMode and DownServer are set only in a DOWN_REGISTER. DownMode is the
-	// downstream mode of the group, at offset 18. DownServer is the server
-	// address of the down path, at offset 44. In a direct down path, it is the
-	// source of the replies. With ControlFlagBridge, DownServer is the address
+	// EgressMode and EgressServer are set only in a EGRESS_REGISTER. EgressMode is the
+	// egress mode of the group, at offset 18. EgressServer is the server
+	// address of the egress path, at offset 44. In a direct egress path, it is the
+	// source of the replies. With ControlFlagBridge, EgressServer is the address
 	// of a bridge.
-	DownMode   uint8
-	DownServer netip.Addr
+	EgressMode   uint8
+	EgressServer netip.Addr
 }
 
 func EncodeControlFrame(dst []byte, frame ControlFrame) error {
@@ -85,9 +85,9 @@ func EncodeControlFrame(dst []byte, frame ControlFrame) error {
 	binary.BigEndian.PutUint64(dst[28:36], frame.InstanceNonce)
 	binary.BigEndian.PutUint32(dst[36:40], frame.Sequence)
 	binary.BigEndian.PutUint32(dst[40:44], frame.LeaseSeconds)
-	if frame.Type == ControlDownRegister {
-		dst[18] = frame.DownMode
-		server := frame.DownServer.As4()
+	if frame.Type == ControlEgressRegister {
+		dst[18] = frame.EgressMode
+		server := frame.EgressServer.As4()
 		copy(dst[44:48], server[:])
 	}
 	return nil
@@ -106,7 +106,7 @@ func DecodeControlFrame(src []byte) (ControlFrame, error) {
 	if binary.BigEndian.Uint16(src[8:10]) != ControlFrameLength {
 		return ControlFrame{}, ErrControlLength
 	}
-	if ControlType(src[5]) != ControlDownRegister &&
+	if ControlType(src[5]) != ControlEgressRegister &&
 		(src[18] != 0 || src[44] != 0 || src[45] != 0 || src[46] != 0 || src[47] != 0) {
 		return ControlFrame{}, ErrControlReserved
 	}
@@ -133,9 +133,9 @@ func DecodeControlFrame(src []byte) (ControlFrame, error) {
 	} else if src[19] != 0 {
 		return ControlFrame{}, ErrControlReserved
 	}
-	if frame.Type == ControlDownRegister {
-		frame.DownMode = src[18]
-		frame.DownServer = netip.AddrFrom4([4]byte(src[44:48]))
+	if frame.Type == ControlEgressRegister {
+		frame.EgressMode = src[18]
+		frame.EgressServer = netip.AddrFrom4([4]byte(src[44:48]))
 	}
 	if err := validateControlFrame(frame); err != nil {
 		return ControlFrame{}, err
@@ -160,7 +160,7 @@ func RandomInstanceNonce() (uint64, error) {
 }
 
 func validateControlFrame(frame ControlFrame) error {
-	if frame.Type < ControlRegister || frame.Type > ControlDownRegister {
+	if frame.Type < ControlRegister || frame.Type > ControlEgressRegister {
 		return ErrControlType
 	}
 	if frame.Transport != TransportUDP && frame.Transport != TransportICMP {
@@ -175,14 +175,14 @@ func validateControlFrame(frame ControlFrame) error {
 	if frame.Flags&ControlFlagBalancePerPacket != 0 && frame.Flags&ControlFlagReturnPool == 0 {
 		return ErrControlFlags
 	}
-	if frame.Flags&ControlFlagDownPath != 0 &&
+	if frame.Flags&ControlFlagEgressPath != 0 &&
 		frame.Type != ControlProbe && frame.Type != ControlProbeReply {
 		return ErrControlFlags
 	}
-	if frame.Flags&ControlFlagBridge != 0 && frame.Type != ControlDownRegister {
+	if frame.Flags&ControlFlagBridge != 0 && frame.Type != ControlEgressRegister {
 		return ErrControlFlags
 	}
-	if frame.Flags&ControlFlagUpReflect != 0 {
+	if frame.Flags&ControlFlagIngressReflect != 0 {
 		if frame.Type != ControlRegister && frame.Type != ControlRegisterACK {
 			return ErrControlFlags
 		}
@@ -190,14 +190,14 @@ func validateControlFrame(frame ControlFrame) error {
 			return ErrControlFlags
 		}
 	}
-	if frame.Type == ControlDownRegister {
-		if !frame.DownServer.Is4() || frame.DownServer.IsUnspecified() {
+	if frame.Type == ControlEgressRegister {
+		if !frame.EgressServer.Is4() || frame.EgressServer.IsUnspecified() {
 			return ErrControlAddress
 		}
-		if frame.DownMode > MaxDownMode {
+		if frame.EgressMode > MaxEgressMode {
 			return ErrControlMode
 		}
-	} else if frame.DownMode != 0 || frame.DownServer.IsValid() {
+	} else if frame.EgressMode != 0 || frame.EgressServer.IsValid() {
 		return ErrControlReserved
 	}
 	if frame.Status > ControlStatusNoReflector {

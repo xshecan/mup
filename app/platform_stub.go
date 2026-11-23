@@ -20,25 +20,25 @@ func newClientPathOpener() clientControls {
 	})
 }
 
-func serveServerControls(context.Context, config.Server, *control.Registry, registrationSink, *reflectorTargets, *downService) error {
+func serveServerControls(context.Context, config.Server, *control.Registry, registrationSink, *reflectorTargets, *egressService) error {
 	return dataplane.ErrUnsupportedPlatform
 }
 
-func openDownSender() (*rawDownSender, error) {
+func openEgressSender() (*rawEgressSender, error) {
 	return nil, dataplane.ErrUnsupportedPlatform
 }
 
-type rawDownSender struct{}
+type rawEgressSender struct{}
 
-func (*rawDownSender) send(downTarget, []byte, uint16) error {
+func (*rawEgressSender) send(egressTarget, []byte, uint16) error {
 	return dataplane.ErrUnsupportedPlatform
 }
 
-func (*rawDownSender) Close() error {
+func (*rawEgressSender) Close() error {
 	return nil
 }
 
-func locateDownInterface(netip.Addr, netip.Addr) (int, error) {
+func locateEgressInterface(netip.Addr, netip.Addr) (int, error) {
 	return 0, dataplane.ErrUnsupportedPlatform
 }
 

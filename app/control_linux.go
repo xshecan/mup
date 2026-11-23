@@ -32,8 +32,8 @@ type syscallConnection interface {
 
 // linuxClientControls owns the control sockets of a client. The UDP sockets
 // of the groups take the frames on UDP paths. One raw ICMP socket takes the
-// frames on the ICMP down paths, and the ACKs of the ICMP up paths, of the
-// groups with separate down paths.
+// frames on the ICMP egress paths, and the ACKs of the ICMP ingress paths, of the
+// groups with separate egress paths.
 type linuxClientControls struct {
 	sockets *udpControlSockets
 
@@ -49,8 +49,8 @@ func newClientPathOpener() clientControls {
 }
 
 func (c *linuxClientControls) open(registration pathRegistration) (pathConn, error) {
-	if registration.upReflect {
-		return openUpReflectPathConn(registration, c.sockets.router)
+	if registration.ingressReflect {
+		return openIngressReflectPathConn(registration, c.sockets.router)
 	}
 	if registration.path.Transport == protocol.TransportUDP {
 		return openUDPPathConn(c.sockets, registration)
@@ -59,8 +59,8 @@ func (c *linuxClientControls) open(registration pathRegistration) (pathConn, err
 	if err != nil {
 		return nil, err
 	}
-	if registration.downs != nil {
-		// The ACK of this path can arrive on any down path, and the shared
+	if registration.egresses != nil {
+		// The ACK of this path can arrive on any egress path, and the shared
 		// ICMP socket reads it, so this socket only sends.
 		if err := dropAllInput(conn.connection); err != nil {
 			_ = conn.Close()
@@ -72,10 +72,10 @@ func (c *linuxClientControls) open(registration pathRegistration) (pathConn, err
 	return conn, nil
 }
 
-func (c *linuxClientControls) listenDown(listen downListen, handle func(downProbe)) (func(), error) {
+func (c *linuxClientControls) listenEgress(listen egressListen, handle func(egressProbe)) (func(), error) {
 	connection, err := net.ListenIP("ip4:icmp", &net.IPAddr{IP: net.IP(listen.advertisedIP.AsSlice())})
 	if err != nil {
-		return nil, fmt.Errorf("open the ICMP socket of the down paths: %w", err)
+		return nil, fmt.Errorf("open the ICMP socket of the egress paths: %w", err)
 	}
 	sockets := make([]*udpControlSocket, 0, len(listen.listenPorts))
 	release := func() {
@@ -99,7 +99,7 @@ func (c *linuxClientControls) listenDown(listen downListen, handle func(downProb
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		readDownICMP(connection, listen.nonce, c.sockets.router, handle)
+		readEgressICMP(connection, listen.nonce, c.sockets.router, handle)
 	}()
 	return func() {
 		c.sockets.onProbe.Store(nil)
@@ -112,9 +112,9 @@ func (c *linuxClientControls) listenDown(listen downListen, handle func(downProb
 	}, nil
 }
 
-// readDownICMP reads the Echo Replies to the client. A REGISTER_ACK goes to
-// the up path that waits for it, and a down path probe goes to handle.
-func readDownICMP(connection *net.IPConn, nonce uint64, router *ackRouter, handle func(downProbe)) {
+// readEgressICMP reads the Echo Replies to the client. A REGISTER_ACK goes to
+// the ingress path that waits for it, and an egress path probe goes to handle.
+func readEgressICMP(connection *net.IPConn, nonce uint64, router *ackRouter, handle func(egressProbe)) {
 	buffer := make([]byte, icmpControlBufferLength)
 	for {
 		count, _, _, source, err := connection.ReadMsgIP(buffer, nil)
@@ -136,8 +136,8 @@ func readDownICMP(connection *net.IPConn, nonce uint64, router *ackRouter, handl
 		switch {
 		case frame.Type == protocol.ControlRegisterACK:
 			router.post(frame.PathID, echo.payload)
-		case frame.Type == protocol.ControlProbe && frame.Flags&protocol.ControlFlagDownPath != 0:
-			handle(downProbe{
+		case frame.Type == protocol.ControlProbe && frame.Flags&protocol.ControlFlagEgressPath != 0:
+			handle(egressProbe{
 				frame:     frame,
 				source:    ipAddress(source.IP),
 				transport: protocol.TransportICMP,
@@ -148,9 +148,9 @@ func readDownICMP(connection *net.IPConn, nonce uint64, router *ackRouter, handl
 	}
 }
 
-func (c *linuxClientControls) sendUp(registration pathRegistration, frame []byte) error {
+func (c *linuxClientControls) sendIngress(registration pathRegistration, frame []byte) error {
 	if registration.path.BridgeReflect() {
-		return c.sendUpViaBridge(registration, frame)
+		return c.sendIngressViaBridge(registration, frame)
 	}
 	ifindex := 0
 	if name := registration.path.Interface; name != "" {
@@ -172,7 +172,7 @@ func (c *linuxClientControls) sendUp(registration pathRegistration, frame []byte
 	connection := c.icmp
 	c.mu.Unlock()
 	if connection == nil {
-		return errors.New("the ICMP socket of the down paths is closed")
+		return errors.New("the ICMP socket of the egress paths is closed")
 	}
 	echo := marshalICMPEcho(icmpEchoRequest, registration.path.ServerPort, 0, frame)
 	var oob []byte
@@ -183,11 +183,11 @@ func (c *linuxClientControls) sendUp(registration pathRegistration, frame []byte
 	return err
 }
 
-// sendUpViaBridge sends a control frame on an up path that reflects through a
+// sendIngressViaBridge sends a control frame on an ingress path that reflects through a
 // bridge. Such a client does not reach the server directly, which is the
 // reason for the bridge, so a frame that it sends straight to the server is
 // lost. The bridge emits the frame to the server from the advertised IP.
-func (c *linuxClientControls) sendUpViaBridge(registration pathRegistration, frame []byte) error {
+func (c *linuxClientControls) sendIngressViaBridge(registration pathRegistration, frame []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.rawOpen {
@@ -276,7 +276,7 @@ type icmpPathConn struct {
 	destination  *net.IPAddr
 	buffer       []byte
 	registration pathRegistration
-	// An up path of a group with separate down paths reads its ACK from
+	// An ingress path of a group with separate egress paths reads its ACK from
 	// the shared ICMP socket through routed.
 	router *ackRouter
 	routed *ackWaiter
@@ -330,8 +330,8 @@ func (s *icmpPathConn) Run(ctx context.Context, report probeReporter) error {
 // ACK in an Echo Reply.
 func (s *icmpPathConn) register(frame []byte, sentAt time.Time, sequence uint32) registerResult {
 	path := s.registration.path
-	for _, down := range s.registration.downFrames(sequence) {
-		_, _ = s.connection.WriteToIP(marshalICMPEcho(icmpEchoRequest, path.ServerPort, uint16(sequence), down), s.destination)
+	for _, egress := range s.registration.egressFrames(sequence) {
+		_, _ = s.connection.WriteToIP(marshalICMPEcho(icmpEchoRequest, path.ServerPort, uint16(sequence), egress), s.destination)
 	}
 	if s.routed != nil {
 		drainRouted(s.routed)
@@ -363,7 +363,7 @@ func (s *icmpPathConn) register(frame []byte, sentAt time.Time, sequence uint32)
 	}
 }
 
-// awaitRouted waits for the ACK of an up path of a group with separate down
+// awaitRouted waits for the ACK of an ingress path of a group with separate egress
 // paths, which the shared ICMP socket or a UDP socket passes on.
 func (s *icmpPathConn) awaitRouted(sentAt time.Time, sequence uint32) registerResult {
 	timer := time.NewTimer(time.Until(sentAt.Add(controlReplyTimeout)))
@@ -386,16 +386,16 @@ func serveServerControls(
 	registry *control.Registry,
 	sink registrationSink,
 	targets *reflectorTargets,
-	downs *downService,
+	egresses *egressService,
 ) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := make(chan error, 3)
 	go func() {
-		results <- serveServerUDPControl(ctx, server, registry, sink, targets, downs)
+		results <- serveServerUDPControl(ctx, server, registry, sink, targets, egresses)
 	}()
 	go func() {
-		results <- serveServerICMPControl(ctx, server, registry, sink, targets, downs)
+		results <- serveServerICMPControl(ctx, server, registry, sink, targets, egresses)
 	}()
 	go func() {
 		results <- expireRegistry(ctx, registry)
@@ -432,7 +432,7 @@ func serveServerUDPControl(
 	registry *control.Registry,
 	sink registrationSink,
 	targets *reflectorTargets,
-	downs *downService,
+	egresses *egressService,
 ) error {
 	connections := make([]*net.UDPConn, 0, server.Port.Len())
 	defer func() {
@@ -453,7 +453,7 @@ func serveServerUDPControl(
 	results := make(chan error, len(connections))
 	for _, connection := range connections {
 		go func() {
-			results <- serveServerUDPConnection(ctx, connection, registry, sink, targets, downs)
+			results <- serveServerUDPConnection(ctx, connection, registry, sink, targets, egresses)
 		}()
 	}
 	return <-results
@@ -465,7 +465,7 @@ func serveServerUDPConnection(
 	registry *control.Registry,
 	sink registrationSink,
 	targets *reflectorTargets,
-	downs *downService,
+	egresses *egressService,
 ) error {
 	serverPort := uint16(connection.LocalAddr().(*net.UDPAddr).Port)
 	buffer := make([]byte, udpControlBufferLength)
@@ -489,7 +489,7 @@ func serveServerUDPConnection(
 		if err != nil {
 			continue
 		}
-		if downs.handle(frame, ipAddress(source.IP)) {
+		if egresses.handle(frame, ipAddress(source.IP)) {
 			continue
 		}
 		// A probe reply confirms a UDP reflector reached the client. It carries
@@ -514,11 +514,11 @@ func serveServerUDPConnection(
 			registry,
 			sink,
 			targets,
-			downs,
+			egresses,
 		)
 		if err == nil {
 			_, _, _ = connection.WriteMsgUDP(ack, replySource(local), source)
-			downs.ack(frame, ack)
+			egresses.ack(frame, ack)
 		}
 	}
 }
@@ -529,7 +529,7 @@ func serveServerICMPControl(
 	registry *control.Registry,
 	sink registrationSink,
 	targets *reflectorTargets,
-	downs *downService,
+	egresses *egressService,
 ) error {
 	connection, err := net.ListenIP("ip4:icmp", &net.IPAddr{IP: net.IPv4zero})
 	if err != nil {
@@ -554,14 +554,14 @@ func serveServerICMPControl(
 			return err
 		}
 		echo, err := parseICMPEcho(stripIPv4Header(buffer[:count]))
-		// A reflected up REGISTER arrives as an Echo Reply from the via host, so
+		// A reflected ingress REGISTER arrives as an Echo Reply from the via host, so
 		// the server reads both Echo Requests and Echo Replies as control.
 		if err != nil || (echo.echoType != icmpEchoRequest && echo.echoType != icmpEchoReply) ||
 			!server.Port.Contains(echo.identifier) {
 			continue
 		}
 		frame, err := protocol.DecodeControlFrame(echo.payload)
-		if err != nil || downs.handle(frame, ipAddress(source.IP)) {
+		if err != nil || egresses.handle(frame, ipAddress(source.IP)) {
 			continue
 		}
 		local, err := packetInfoDestination(oob[:oobCount])
@@ -577,12 +577,12 @@ func serveServerICMPControl(
 			registry,
 			sink,
 			targets,
-			downs,
+			egresses,
 		)
 		if err == nil {
 			reply := marshalICMPEcho(icmpEchoReply, echo.identifier, echo.sequence, ack)
 			_, _, _ = connection.WriteMsgIP(reply, replySource(local), source)
-			downs.ack(frame, ack)
+			egresses.ack(frame, ack)
 		}
 	}
 }
@@ -595,7 +595,7 @@ func acceptRegistration(
 	registry *control.Registry,
 	sink registrationSink,
 	targets *reflectorTargets,
-	downs *downService,
+	egresses *egressService,
 ) ([]byte, error) {
 	frame, err := protocol.DecodeControlFrame(packet)
 	if err != nil {
@@ -622,7 +622,7 @@ func acceptRegistration(
 		if err := sink.RevokeRegistration(replaced); err != nil {
 			return nil, err
 		}
-		downs.revoke(replaced)
+		egresses.revoke(replaced)
 	}
 	now, err := monotonicNowNS()
 	if err != nil {
@@ -632,20 +632,20 @@ func acceptRegistration(
 	if frame.Flags&protocol.ControlFlagBalancePerPacket != 0 {
 		balance = config.BalancePerPacket
 	}
-	// An up reflect REGISTER arrives from the via host, so its source is the
-	// via. The path accepts the reflected upstream from that source, and it
+	// An ingress reflect REGISTER arrives from the via host, so its source is the
+	// via. The path accepts the reflected ingress from that source, and it
 	// reflects no replies, so the server skips the reflector setup below.
-	upReflect := frame.Flags&protocol.ControlFlagUpReflect != 0
+	ingressReflect := frame.Flags&protocol.ControlFlagIngressReflect != 0
 	settings := dataplane.RegistrationSettings{
-		AdvertisedIP:  frame.AdvertisedIP,
-		InstanceNonce: frame.InstanceNonce,
-		ReturnIP:      frame.ReturnIP,
-		ReturnPrefix:  frame.ReturnPrefix,
-		Balance:       balance,
-		ListenPort:    frame.ListenPort,
-		PathCount:     1,
-		ExpiresAtNS:   now + uint64(registrationLeaseSeconds)*uint64(time.Second),
-		UpReflect:     upReflect,
+		AdvertisedIP:   frame.AdvertisedIP,
+		InstanceNonce:  frame.InstanceNonce,
+		ReturnIP:       frame.ReturnIP,
+		ReturnPrefix:   frame.ReturnPrefix,
+		Balance:        balance,
+		ListenPort:     frame.ListenPort,
+		PathCount:      1,
+		ExpiresAtNS:    now + uint64(registrationLeaseSeconds)*uint64(time.Second),
+		IngressReflect: ingressReflect,
 		Path: dataplane.RegisteredPathSettings{
 			SourceIP:   source,
 			LocalIP:    local,
@@ -658,7 +658,7 @@ func acceptRegistration(
 		return nil, err
 	}
 	status := protocol.ControlStatusOK
-	if !upReflect && frame.Flags&protocol.ControlFlagReturnPool != 0 {
+	if !ingressReflect && frame.Flags&protocol.ControlFlagReturnPool != 0 {
 		if err := sink.ObservePool(frame.ReturnIP, frame.ReturnPrefix, transport); err != nil {
 			return nil, err
 		}

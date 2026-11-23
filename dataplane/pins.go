@@ -4,7 +4,7 @@ package dataplane
 // state that the daemon or its clients write again soon after a start. The
 // loader removes the pin of such a map when its layout changed, so a new
 // version starts over the pins of an old one. The client writes every slot of
-// path_config at each start. v0.4.0 grew the drop counters and the down path
+// path_config at each start. v0.4.0 grew the drop counters and the egress path
 // entries, and v0.4.1 grew the path slots.
 //
 // A pinned map that is not in this list must keep its layout, or the daemon

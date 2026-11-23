@@ -12,14 +12,14 @@ import (
 	"github.com/xshecan/mup/api"
 )
 
-// TestPrivilegedUpBridgeReflect runs a group whose up route reflects the
-// upstream through a member at 10.210.1.3, by way of a bridge at 10.210.1.4.
-// The client cannot spoof, so it wraps each reflected REGISTER and each upstream
+// TestPrivilegedIngressBridgeReflect runs a group whose ingress route reflects the
+// ingress through a member at 10.210.1.3, by way of a bridge at 10.210.1.4.
+// The client cannot spoof, so it wraps each reflected REGISTER and each ingress
 // packet for the bridge, and the bridge removes the wrapper and emits the
-// spoofed packet to the member. The member answers the server, so the up route
-// is healthy while the bridge relays, and the upstream stops when the bridge
+// spoofed packet to the member. The member answers the server, so the ingress route
+// is healthy while the bridge relays, and the ingress stops when the bridge
 // fails.
-func TestPrivilegedUpBridgeReflect(t *testing.T) {
+func TestPrivilegedIngressBridgeReflect(t *testing.T) {
 	requirePrivilegedLinux(t)
 	binaryPath := buildDaemon(t)
 
@@ -72,10 +72,10 @@ func TestPrivilegedUpBridgeReflect(t *testing.T) {
   control_socket: %s
   servers:
     - port: 51820
-      upstream:
+      ingress:
         routes:
           - "10.210.1.2:5000/icmp via 10.210.1.3 bridge 10.210.1.4"
-      downstream:
+      egress:
         routes:
           - 10.210.1.2:5010/udp
 `, clientSocket)
@@ -96,13 +96,13 @@ func TestPrivilegedUpBridgeReflect(t *testing.T) {
 		return fmt.Sprintf("%s\nclient %s\nserver %s\nbridge %s\n%s",
 			pathText(t, clientAPI), dropText(t, clientAPI), dropText(t, serverAPI), dropText(t, bridgeAPI), logs())
 	}
-	upHealthy := func() (bool, error) {
+	ingressHealthy := func() (bool, error) {
 		paths, err := clientAPI.Paths(context.Background())
 		if err != nil {
 			return false, err
 		}
 		for _, path := range paths {
-			if path.Direction == "up" {
+			if path.Direction == "ingress" {
 				return path.Healthy, nil
 			}
 		}
@@ -110,31 +110,31 @@ func TestPrivilegedUpBridgeReflect(t *testing.T) {
 	}
 
 	// The member reflects the REGISTER that the bridge emits, so the server sees
-	// one registered path, and the up route becomes healthy.
+	// one registered path, and the ingress route becomes healthy.
 	waitForRegisteredPaths(t, serverAPI, 1, logs)
-	waitFor(t, 30*time.Second, "the up bridge reflect path to become healthy", state, upHealthy)
+	waitFor(t, 30*time.Second, "the ingress bridge reflect path to become healthy", state, ingressHealthy)
 	exchange(t, peerNS, "10.210.3.1:51820", 3, state)
 
-	// The bridge removed the wrapper and relayed the upstream, so it counted the
+	// The bridge removed the wrapper and relayed the ingress, so it counted the
 	// wrapped packets that it unwrapped.
 	status, err := bridgeAPI.Status(context.Background())
 	if err != nil || status.Bridge == nil {
 		t.Fatalf("bridge status = %#v, %v", status, err)
 	}
-	if status.Bridge.DownPackets == 0 {
-		t.Fatalf("bridge relayed %d wrapped packets, want more than zero\n%s", status.Bridge.DownPackets, state())
+	if status.Bridge.EgressPackets == 0 {
+		t.Fatalf("bridge relayed %d wrapped packets, want more than zero\n%s", status.Bridge.EgressPackets, state())
 	}
 
-	// Without the bridge, the client cannot emit the spoofed packet, so the up
-	// route becomes unhealthy and the upstream stops.
+	// Without the bridge, the client cannot emit the spoofed packet, so the ingress
+	// route becomes unhealthy and the ingress stops.
 	runIP(t, "-n", bridgeNS, "link", "set", "mb"+suffix, "down")
-	waitFor(t, 30*time.Second, "the up bridge reflect path to become unhealthy", state, func() (bool, error) {
-		healthy, err := upHealthy()
+	waitFor(t, 30*time.Second, "the ingress bridge reflect path to become unhealthy", state, func() (bool, error) {
+		healthy, err := ingressHealthy()
 		return err == nil && !healthy, err
 	})
 
-	// With the bridge back, the up route recovers and the upstream flows.
+	// With the bridge back, the ingress route recovers and the ingress flows.
 	runIP(t, "-n", bridgeNS, "link", "set", "mb"+suffix, "up")
-	waitFor(t, 30*time.Second, "the up bridge reflect path to recover", state, upHealthy)
+	waitFor(t, 30*time.Second, "the ingress bridge reflect path to recover", state, ingressHealthy)
 	exchange(t, peerNS, "10.210.3.1:51820", 3, state)
 }

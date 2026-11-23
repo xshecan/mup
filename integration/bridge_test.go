@@ -13,8 +13,8 @@ import (
 	"github.com/xshecan/mup/api"
 )
 
-// TestPrivilegedBridge runs a group whose up path and down path both go
-// through a bridge at 10.210.1.4. The down path reflects through 10.210.1.3,
+// TestPrivilegedBridge runs a group whose ingress path and egress path both go
+// through a bridge at 10.210.1.4. The egress path reflects through 10.210.1.3,
 // so its replies need a spoofed source. The switch drops every packet of the
 // server with another source, so only the bridge can send them. When the
 // bridge stops, both paths become unhealthy, and they come back with it.
@@ -78,9 +78,9 @@ func TestPrivilegedBridge(t *testing.T) {
   control_socket: %s
   servers:
     - port: 51820
-      upstream:
+      ingress:
         bridges: [10.210.1.4:5000/udp]
-      downstream:
+      egress:
         bridges:
           - "10.210.1.4:5010/icmp via 10.210.1.3"
 `, clientSocket)
@@ -101,7 +101,7 @@ func TestPrivilegedBridge(t *testing.T) {
 		return fmt.Sprintf("%s\nclient %s\nserver %s\nbridge %s\n%s",
 			pathText(t, clientAPI), dropText(t, clientAPI), dropText(t, serverAPI), dropText(t, bridgeAPI), logs())
 	}
-	// health reads the health of the up bridge on the client, and of the down
+	// health reads the health of the ingress bridge on the client, and of the egress
 	// bridge on the server and on the client.
 	health := func() ([3]bool, error) {
 		var current [3]bool
@@ -113,7 +113,7 @@ func TestPrivilegedBridge(t *testing.T) {
 			if !path.Bridge {
 				return current, fmt.Errorf("path %d is not a bridge", path.ID)
 			}
-			if path.Direction == "up" {
+			if path.Direction == "ingress" {
 				current[0] = path.Healthy
 			} else {
 				current[2] = path.Healthy
@@ -124,8 +124,8 @@ func TestPrivilegedBridge(t *testing.T) {
 			return current, err
 		}
 		for _, registered := range clients {
-			if registered.Down != nil && len(registered.Down.Paths) == 1 && registered.Down.Paths[0].Bridge {
-				current[1] = registered.Down.Paths[0].Healthy
+			if registered.Egress != nil && len(registered.Egress.Paths) == 1 && registered.Egress.Paths[0].Bridge {
+				current[1] = registered.Egress.Paths[0].Healthy
 			}
 		}
 		return current, nil
@@ -144,8 +144,8 @@ func TestPrivilegedBridge(t *testing.T) {
 	if err != nil || status.Bridge == nil {
 		t.Fatalf("bridge status = %#v, %v", status, err)
 	}
-	if status.Bridge.UpPackets == 0 || status.Bridge.DownPackets == 0 {
-		t.Fatalf("bridge sent %d packets up and %d down, want both\n%s", status.Bridge.UpPackets, status.Bridge.DownPackets, state())
+	if status.Bridge.IngressPackets == 0 || status.Bridge.EgressPackets == 0 {
+		t.Fatalf("bridge sent %d packets ingress and %d egress, want both\n%s", status.Bridge.IngressPackets, status.Bridge.EgressPackets, state())
 	}
 
 	runIP(t, "-n", bridgeNS, "link", "set", "mb"+suffix, "down")

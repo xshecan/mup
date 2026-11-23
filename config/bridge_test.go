@@ -16,12 +16,12 @@ client:
   advertise: 160.119.74.74
   servers:
     - port: 51820
-      upstream:
+      ingress:
         routes:
           - 46.102.130.95:9000/icmp
         bridges:
           - 5.6.7.8%eth1:9100-9199/udp
-      downstream:
+      egress:
         bridges:
           - 5.6.7.8:9200/icmp via 87.107.117.192/28
 `))
@@ -30,15 +30,15 @@ client:
 	}
 	group := app.Client.Groups[0]
 	if len(group.Paths) != 2 || group.Paths[0].Bridge || !group.Paths[1].Bridge {
-		t.Fatalf("up paths = %#v, want the route and then the bridge", group.Paths)
+		t.Fatalf("ingress paths = %#v, want the route and then the bridge", group.Paths)
 	}
-	if up := group.Paths[1]; up.Server != netip.MustParseAddr("5.6.7.8") || up.Interface != "eth1" || up.LastPort != 9199 {
-		t.Fatalf("up bridge = %#v", up)
+	if ingress := group.Paths[1]; ingress.Server != netip.MustParseAddr("5.6.7.8") || ingress.Interface != "eth1" || ingress.LastPort != 9199 {
+		t.Fatalf("ingress bridge = %#v", ingress)
 	}
-	if len(group.DownPaths) != 1 || !group.DownPaths[0].Bridge || group.DownPaths[0].ReturnPrefix != 28 {
-		t.Fatalf("down paths = %#v", group.DownPaths)
+	if len(group.EgressPaths) != 1 || !group.EgressPaths[0].Bridge || group.EgressPaths[0].ReturnPrefix != 28 {
+		t.Fatalf("egress paths = %#v", group.EgressPaths)
 	}
-	if kind := group.DownPaths[0].Kind(); kind != "bridge" {
+	if kind := group.EgressPaths[0].Kind(); kind != "bridge" {
 		t.Fatalf("Kind = %q, want bridge", kind)
 	}
 }
@@ -50,23 +50,23 @@ func TestLoadClientRejectsBadBridges(t *testing.T) {
 		servers string
 		want    string
 	}{
-		"up bridge with via": {`
+		"ingress bridge with via": {`
     - port: 51820
-      upstream:
+      ingress:
         bridges: [5.6.7.8:9000/udp via 1.1.1.1]
-      downstream:
+      egress:
         routes: [203.0.113.5:9200/udp]`, "no via"},
-		"down bridge with a range": {`
+		"egress bridge with a range": {`
     - port: 51820
-      upstream:
+      ingress:
         routes: [203.0.113.5:9000/udp]
-      downstream:
+      egress:
         bridges: [5.6.7.8:9200-9210/udp]`, "one server port"},
-		"no downstream": {`
+		"no egress": {`
     - port: 51820
-      upstream:
+      ingress:
         bridges: [5.6.7.8:9000/udp]
-      downstream:
+      egress:
         mode: burst`, "at least one route or bridge"},
 	} {
 		_, err := Load(writeFile(t, "client:\n  advertise: 192.0.2.10\n  servers:"+test.servers+"\n"))
@@ -76,7 +76,7 @@ func TestLoadClientRejectsBadBridges(t *testing.T) {
 	}
 }
 
-func TestGroupRejectsABridgeWithoutDownPaths(t *testing.T) {
+func TestGroupRejectsABridgeWithoutEgressPaths(t *testing.T) {
 	t.Parallel()
 
 	path, err := ParsePath("5.6.7.8:9000/udp")
@@ -85,7 +85,7 @@ func TestGroupRejectsABridgeWithoutDownPaths(t *testing.T) {
 	}
 	path.Bridge = true
 	client := Client{AdvertisedIP: netip.MustParseAddr("192.0.2.10"), Groups: []Group{{ListenPort: 51820, Paths: []Path{path}}}}
-	if err := client.Validate(); err == nil || !strings.Contains(err.Error(), "upstream and downstream") {
+	if err := client.Validate(); err == nil || !strings.Contains(err.Error(), "ingress and egress") {
 		t.Fatalf("Validate error = %v", err)
 	}
 }

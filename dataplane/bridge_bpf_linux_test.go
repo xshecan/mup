@@ -73,7 +73,7 @@ func wrappedFrame(frame []byte, source netip.Addr, port uint16) []byte {
 	return append(bytes.Clone(frame[:14]), wrapped...)
 }
 
-func TestBridgeSendsTheUpstreamToItsServer(t *testing.T) {
+func TestBridgeSendsTheIngressToItsServer(t *testing.T) {
 	collection := bridgeCollection(t)
 	defer collection.Close()
 
@@ -95,7 +95,7 @@ func TestBridgeSendsTheUpstreamToItsServer(t *testing.T) {
 		t.Fatalf("ICMP header %x, or a checksum is invalid", l4[:8])
 	}
 	if packets := bridgeCounter(t, collection, 0); packets != 2 {
-		t.Fatalf("upstream packets = %d, want 2", packets)
+		t.Fatalf("ingress packets = %d, want 2", packets)
 	}
 }
 
@@ -141,7 +141,7 @@ func TestBridgeUnwrapsTheRepliesOfItsServer(t *testing.T) {
 		}
 	}
 	if packets := bridgeCounter(t, collection, 2); packets != 2 {
-		t.Fatalf("downstream packets = %d, want 2", packets)
+		t.Fatalf("egress packets = %d, want 2", packets)
 	}
 
 	direct := udpWireGuardFrame(t, bridgeAddress, bridgeClient, 9300, 51820, 9)
@@ -196,36 +196,36 @@ func TestBridgeCompletesAPartialInnerChecksum(t *testing.T) {
 	}
 }
 
-// downBridgeCollection is downReplyCollection with path 0 through a bridge
+// egressBridgeCollection is egressReplyCollection with path 0 through a bridge
 // that reflects through the pool, and path 1 a direct UDP path.
-func downBridgeCollection(t *testing.T, mode uint8, healthy uint8) *ebpf.Collection {
+func egressBridgeCollection(t *testing.T, mode uint8, healthy uint8) *ebpf.Collection {
 	t.Helper()
-	collection := downReplyCollection(t, mode, healthy)
+	collection := egressReplyCollection(t, mode, healthy)
 	client := mupClientKeyV1{AdvertisedIp: mustTestWord(t, ingressClient), InstanceNonce: 7}
 	bridged := mupDownPathV1{
 		ServerIp: mustTestWord(t, bridgeAddress), Ifindex: 1, ServerPort: 9300, Transport: uint8(protocol.TransportICMP),
 		Flags: protocol.ControlFlagReturnPool | protocol.ControlFlagBridge, Count: 2, LocalIp: mustTestWord(t, bridgeServer),
 	}
-	bridged.Members[0] = mustTestWord(t, downMemberA)
-	bridged.Members[1] = mustTestWord(t, downMemberB)
+	bridged.Members[0] = mustTestWord(t, egressMemberA)
+	bridged.Members[1] = mustTestWord(t, egressMemberB)
 	direct := mupDownPathV1{
-		ServerIp: mustTestWord(t, downDirectServer), Ifindex: 1, ServerPort: 9200, Transport: uint8(protocol.TransportUDP),
+		ServerIp: mustTestWord(t, egressDirectServer), Ifindex: 1, ServerPort: 9200, Transport: uint8(protocol.TransportUDP),
 	}
 	for id, value := range []mupDownPathV1{bridged, direct} {
 		if err := collection.Maps["server_down_paths"].Update(mupDownPathKeyV1{Client: client, PathId: uint32(id)}, value, ebpf.UpdateAny); err != nil {
-			t.Fatalf("update down path %d: %v", id, err)
+			t.Fatalf("update egress path %d: %v", id, err)
 		}
 	}
 	if err := collection.Maps["server_down_groups"].Update(client, mupDownGroupV1{
 		ListenPort: 51821, Mode: mode, PathMask: 0b11, HealthyMask: healthy, IcmpMask: 0b01,
 	}, ebpf.UpdateAny); err != nil {
-		t.Fatalf("update down group: %v", err)
+		t.Fatalf("update egress group: %v", err)
 	}
 	return collection
 }
 
-func TestServerWrapsTheReplyOfADownBridge(t *testing.T) {
-	collection := downBridgeCollection(t, 0, 0b01)
+func TestServerWrapsTheReplyOfAEgressBridge(t *testing.T) {
+	collection := egressBridgeCollection(t, 0, 0b01)
 	defer collection.Close()
 	result, output := targetReply(t, collection)
 	if result != tcActOK && result != tcActRedirect {
@@ -250,16 +250,16 @@ func TestServerWrapsTheReplyOfADownBridge(t *testing.T) {
 	assertReflectedICMP(t, append(bytes.Clone(output[:14]), inner...))
 }
 
-// In a burst, the copy of a down bridge loses its wrapper after the clone, so
+// In a burst, the copy of an egress bridge loses its wrapper after the clone, so
 // the next path gets the reply as it was.
 func TestServerBurstUnwrapsAfterTheBridgeCopy(t *testing.T) {
-	collection := downBridgeCollection(t, 2, 0b11)
+	collection := egressBridgeCollection(t, 2, 0b11)
 	defer collection.Close()
 	result, output := targetReply(t, collection)
 	if result != tcActOK && result != tcActRedirect {
 		t.Fatalf("return value = %d, want pass or redirect", int32(result))
 	}
-	assertUDPHeader(t, output, downDirectServer, ingressClient, 9200, 51821)
+	assertUDPHeader(t, output, egressDirectServer, ingressClient, 9200, 51821)
 	if drops := dropCount(t, collection, protocol.DropBridgePacket); drops != 0 {
 		t.Fatalf("BRIDGE_PACKET drops = %d", drops)
 	}

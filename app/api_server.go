@@ -26,10 +26,10 @@ type clientAPI interface {
 	AddBridge(raw string, listenPort uint16) (api.Path, error)
 	RemovePath(id int) error
 	SetMode(raw string, listenPort uint16) error
-	AddDownPath(raw string, listenPort uint16) (api.Path, error)
-	AddDownBridge(raw string, listenPort uint16) (api.Path, error)
-	RemoveDownPath(id int) error
-	SetDownMode(raw string, listenPort uint16) error
+	AddEgressPath(raw string, listenPort uint16) (api.Path, error)
+	AddEgressBridge(raw string, listenPort uint16) (api.Path, error)
+	RemoveEgressPath(id int) error
+	SetEgressMode(raw string, listenPort uint16) error
 	Peers() (api.PeerList, error)
 }
 
@@ -150,10 +150,10 @@ func (h apiHandler) addPath(w http.ResponseWriter, r *http.Request) {
 	}
 	var add func(string, uint16) (api.Path, error)
 	switch {
-	case request.Down && request.Bridge:
-		add = h.client.AddDownBridge
-	case request.Down:
-		add = h.client.AddDownPath
+	case request.Egress && request.Bridge:
+		add = h.client.AddEgressBridge
+	case request.Egress:
+		add = h.client.AddEgressPath
 	case request.Bridge:
 		add = h.client.AddBridge
 	default:
@@ -173,8 +173,8 @@ func (h apiHandler) removePath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	remove := h.client.RemovePath
-	if r.URL.Query().Get("direction") == "down" {
-		remove = h.client.RemoveDownPath
+	if r.URL.Query().Get("direction") == "egress" {
+		remove = h.client.RemoveEgressPath
 	}
 	if err := remove(id); err != nil {
 		writeError(w, err)
@@ -193,8 +193,8 @@ func (h apiHandler) setMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	set := h.client.SetMode
-	if request.Down {
-		set = h.client.SetDownMode
+	if request.Egress {
+		set = h.client.SetEgressMode
 	}
 	if err := set(request.Mode, request.ListenPort); err != nil {
 		writeError(w, err)

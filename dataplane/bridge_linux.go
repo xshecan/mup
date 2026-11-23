@@ -114,5 +114,5 @@ func (r *Runtime) BridgeCounters() (BridgeCounters, error) {
 			totals[index] += value
 		}
 	}
-	return BridgeCounters{UpPackets: totals[0], UpBytes: totals[1], DownPackets: totals[2], DownBytes: totals[3]}, nil
+	return BridgeCounters{IngressPackets: totals[0], IngressBytes: totals[1], EgressPackets: totals[2], EgressBytes: totals[3]}, nil
 }

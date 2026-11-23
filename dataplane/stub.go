@@ -92,7 +92,7 @@ func (*Runtime) SetPath(int, PathSettings) error {
 	return ErrUnsupportedPlatform
 }
 
-func (*Runtime) SetUpReflect(int, []netip.Addr, bool) error {
+func (*Runtime) SetIngressReflect(int, []netip.Addr, bool) error {
 	return ErrUnsupportedPlatform
 }
 
@@ -120,27 +120,27 @@ func (*Runtime) RegisteredPaths() ([]RegisteredPath, error) {
 	return nil, ErrUnsupportedPlatform
 }
 
-func (*Runtime) SetDownPath(int, *DownPathSettings) error {
+func (*Runtime) SetEgressPath(int, *EgressPathSettings) error {
 	return ErrUnsupportedPlatform
 }
 
-func (*Runtime) DownPathsSeen() ([MaxDownPaths]time.Duration, error) {
-	return [MaxDownPaths]time.Duration{}, ErrUnsupportedPlatform
+func (*Runtime) EgressPathsSeen() ([MaxEgressPaths]time.Duration, error) {
+	return [MaxEgressPaths]time.Duration{}, ErrUnsupportedPlatform
 }
 
-func (*Runtime) SetServerDownPath(DownPathEntry) error {
+func (*Runtime) SetServerEgressPath(EgressPathEntry) error {
 	return ErrUnsupportedPlatform
 }
 
-func (*Runtime) DeleteServerDownPath(ClientKey, uint16) error {
+func (*Runtime) DeleteServerEgressPath(ClientKey, uint16) error {
 	return ErrUnsupportedPlatform
 }
 
-func (*Runtime) SetServerDownGroup(DownGroupEntry) error {
+func (*Runtime) SetServerEgressGroup(EgressGroupEntry) error {
 	return ErrUnsupportedPlatform
 }
 
-func (*Runtime) DeleteServerDownGroup(ClientKey) error {
+func (*Runtime) DeleteServerEgressGroup(ClientKey) error {
 	return ErrUnsupportedPlatform
 }
 

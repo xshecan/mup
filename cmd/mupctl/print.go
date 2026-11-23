@@ -29,12 +29,12 @@ func printStatus(w io.Writer, status api.Status, clients []api.RegisteredClient,
 	switch {
 	case status.Client != nil:
 		client := status.Client
-		healthy, total, downHealthy, downTotal := 0, 0, 0, 0
+		healthy, total, egressHealthy, egressTotal := 0, 0, 0, 0
 		for _, path := range client.Paths {
-			if path.Direction == "down" {
-				downTotal++
+			if path.Direction == "egress" {
+				egressTotal++
 				if path.Healthy {
-					downHealthy++
+					egressHealthy++
 				}
 				continue
 			}
@@ -46,8 +46,8 @@ func printStatus(w io.Writer, status api.Status, clients []api.RegisteredClient,
 		field("IP", client.AdvertisedIP)
 		field("Uptime", humanDuration(now.Sub(status.StartedAt)))
 		field("Paths", fmt.Sprintf("%d/%d healthy, generation %d", healthy, total, client.Generation))
-		if downTotal > 0 {
-			field("Down paths", fmt.Sprintf("%d/%d healthy", downHealthy, downTotal))
+		if egressTotal > 0 {
+			field("Egress paths", fmt.Sprintf("%d/%d healthy", egressHealthy, egressTotal))
 		}
 		field("Peers", strconv.FormatUint(client.Peers, 10))
 		field("Tokens", tokenUsage(client))
@@ -89,8 +89,8 @@ func printStatus(w io.Writer, status api.Status, clients []api.RegisteredClient,
 		field("Allow", orDash(strings.Join(bridge.Allow, ", ")))
 		field("Addresses", orDash(strings.Join(bridge.Addresses, ", ")))
 		field("Uptime", humanDuration(now.Sub(status.StartedAt)))
-		field("Upstream", fmt.Sprintf("%d packets, %s", bridge.UpPackets, humanBytes(bridge.UpBytes)))
-		field("Downstream", fmt.Sprintf("%d packets, %s", bridge.DownPackets, humanBytes(bridge.DownBytes)))
+		field("Ingress", fmt.Sprintf("%d packets, %s", bridge.IngressPackets, humanBytes(bridge.IngressBytes)))
+		field("Egress", fmt.Sprintf("%d packets, %s", bridge.EgressPackets, humanBytes(bridge.EgressBytes)))
 		field("Drops", dropSummary(status.Drops))
 		_ = fields.Flush()
 	default:
@@ -130,11 +130,11 @@ func printGroups(w io.Writer, groups []api.Group) {
 	}
 	split := false
 	for _, group := range groups {
-		split = split || group.DownMode != ""
+		split = split || group.EgressMode != ""
 	}
 	table := newTable(w)
 	if split {
-		row(table, "GROUP", "MODE", "PATHS", "DOWN MODE", "DOWN PATHS", "PEERS")
+		row(table, "GROUP", "MODE", "PATHS", "EGRESS MODE", "EGRESS PATHS", "PEERS")
 	} else {
 		row(table, "GROUP", "MODE", "PATHS", "PEERS")
 	}
@@ -145,11 +145,11 @@ func printGroups(w io.Writer, groups []api.Group) {
 			fmt.Sprintf("%d/%d healthy", group.HealthyPaths, group.Paths),
 		}
 		if split {
-			downPaths := "-"
-			if group.DownMode != "" {
-				downPaths = fmt.Sprintf("%d/%d healthy", group.HealthyDownPaths, group.DownPaths)
+			egressPaths := "-"
+			if group.EgressMode != "" {
+				egressPaths = fmt.Sprintf("%d/%d healthy", group.HealthyEgressPaths, group.EgressPaths)
 			}
-			cells = append(cells, orDash(group.DownMode), downPaths)
+			cells = append(cells, orDash(group.EgressMode), egressPaths)
 		}
 		row(table, append(cells, strconv.Itoa(group.Peers))...)
 	}
@@ -169,8 +169,8 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 	table := newTable(w)
 	header := []string{"ID", "GROUP", "SERVER", "TRANSPORT", "VIA", "INTERFACE", "STATUS", "IN USE", "LAST ACK", "RTT"}
 	if split {
-		// An up path shows its latest ACK, and a down path its latest probe.
-		header = []string{"ID", "DIR", "GROUP", "SERVER", "TRANSPORT", "VIA", "INTERFACE", "STATUS", "IN USE", "LAST", "RTT"}
+		// An ingress path shows its latest ACK, and an egress path its latest probe.
+		header = []string{"ID", "PATH", "GROUP", "SERVER", "TRANSPORT", "VIA", "INTERFACE", "STATUS", "IN USE", "LAST", "RTT"}
 	}
 	if bridged {
 		// A bridge path shows the bridge address in the SERVER column.
@@ -187,7 +187,7 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 		}
 		if split {
 			lastACK = "ack " + lastACK
-			if path.Direction == "down" {
+			if path.Direction == "egress" {
 				lastACK = "probe never"
 				if !path.LastProbe.IsZero() {
 					lastACK = "probe " + humanDuration(now.Sub(path.LastProbe))
@@ -295,17 +295,17 @@ func printClients(w io.Writer, clients []api.RegisteredClient, wide bool) {
 	}
 	split := false
 	for _, client := range clients {
-		split = split || client.Down != nil
+		split = split || client.Egress != nil
 	}
 	table := newTable(w)
 	header := []string{"CLIENT", "NONCE", "PATHS", "PEERS", "RETURN IP", "LEASE"}
 	if split {
-		header = append(header, "DOWN")
+		header = append(header, "EGRESS")
 	}
 	if wide {
 		header = append(header, "LISTEN PORT", "PATH LIST")
 		if split {
-			header = append(header, "DOWN LIST")
+			header = append(header, "EGRESS LIST")
 		}
 	}
 	row(table, header...)
@@ -327,7 +327,7 @@ func printClients(w io.Writer, clients []api.RegisteredClient, wide bool) {
 			lease,
 		}
 		if split {
-			cells = append(cells, downSummary(client.Down))
+			cells = append(cells, egressSummary(client.Egress))
 		}
 		if wide {
 			list := make([]string, 0, len(client.Paths))
@@ -336,7 +336,7 @@ func printClients(w io.Writer, clients []api.RegisteredClient, wide bool) {
 			}
 			cells = append(cells, strconv.Itoa(int(client.ListenPort)), orDash(strings.Join(list, ",")))
 			if split {
-				cells = append(cells, downList(client.Down))
+				cells = append(cells, egressList(client.Egress))
 			}
 		}
 		row(table, cells...)
@@ -344,29 +344,29 @@ func printClients(w io.Writer, clients []api.RegisteredClient, wide bool) {
 	_ = table.Flush()
 }
 
-// downSummary shows the healthy down paths of a client and its downstream
+// egressSummary shows the healthy egress paths of a client and its egress
 // mode.
-func downSummary(down *api.DownGroup) string {
-	if down == nil {
+func egressSummary(egress *api.EgressGroup) string {
+	if egress == nil {
 		return "-"
 	}
 	healthy := 0
-	for _, path := range down.Paths {
+	for _, path := range egress.Paths {
 		if path.Healthy {
 			healthy++
 		}
 	}
-	return fmt.Sprintf("%d/%d healthy, %s", healthy, len(down.Paths), down.Mode)
+	return fmt.Sprintf("%d/%d healthy, %s", healthy, len(egress.Paths), egress.Mode)
 }
 
-// downList shows each down path as ID:TRANSPORT:SERVER:PORT, with the healthy
-// members of a path that reflects.
-func downList(down *api.DownGroup) string {
-	if down == nil {
+// egressList shows each egress path as ID:TRANSPORT:SERVER:PORT, with the
+// healthy members of a path that reflects.
+func egressList(egress *api.EgressGroup) string {
+	if egress == nil {
 		return "-"
 	}
-	list := make([]string, 0, len(down.Paths))
-	for _, path := range down.Paths {
+	list := make([]string, 0, len(egress.Paths))
+	for _, path := range egress.Paths {
 		text := fmt.Sprintf("%d:%s:%s:%d", path.ID, path.Transport, path.Server, path.Port)
 		if path.Bridge {
 			text = fmt.Sprintf("%d:%s:bridge %s:%d", path.ID, path.Transport, path.Server, path.Port)

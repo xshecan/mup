@@ -38,10 +38,10 @@ const (
 	ControlProbeReply
 	ControlDeregister
 	ControlError
-	// ControlDownRegister declares one down path of a group: a way that the
-	// server sends replies to the client. The client sends it on its up
-	// paths, and each server that owns the address of the down path keeps it.
-	ControlDownRegister
+	// ControlEgressRegister declares one egress path of a group: a way that the
+	// server sends replies to the client. The client sends it on its ingress
+	// paths, and each server that owns the address of the egress path keeps it.
+	ControlEgressRegister
 )
 
 type ControlStatus uint16
@@ -70,19 +70,19 @@ const (
 	// ControlFlagBalancePerPacket picks the per-packet balance mode of a
 	// return pool. A pool without it uses the per-peer mode.
 	ControlFlagBalancePerPacket uint8 = 1 << 2
-	// ControlFlagDownPath marks a PROBE or a PROBE_REPLY of a down path. Its
-	// path ID is then the ID of the down path.
-	ControlFlagDownPath uint8 = 1 << 3
-	// ControlFlagBridge marks a DOWN_REGISTER of a down path through a MUP
-	// bridge. The down server field then holds the bridge address, and the
+	// ControlFlagEgressPath marks a PROBE or a PROBE_REPLY of an egress path. Its
+	// path ID is then the ID of the egress path.
+	ControlFlagEgressPath uint8 = 1 << 3
+	// ControlFlagBridge marks an EGRESS_REGISTER of an egress path through a MUP
+	// bridge. The egress server field then holds the bridge address, and the
 	// server wraps the replies of the path for the bridge.
 	ControlFlagBridge uint8 = 1 << 4
-	// ControlFlagUpReflect marks a REGISTER of an up path that reflects the
-	// upstream through its return IP, with ControlFlagReturnIP, or through one
+	// ControlFlagIngressReflect marks a REGISTER of an ingress path that reflects the
+	// ingress through its return IP, with ControlFlagReturnIP, or through one
 	// member of its pool, with ControlFlagReturnPool. The server then accepts
-	// the reflected upstream from that source, and it does not reflect the
+	// the reflected ingress from that source, and it does not reflect the
 	// replies of the path.
-	ControlFlagUpReflect uint8 = 1 << 5
+	ControlFlagIngressReflect uint8 = 1 << 5
 )
 
 type DropReason uint32
@@ -110,7 +110,7 @@ const (
 	DropTailCall
 	DropChecksum
 	DropSourceLimit
-	DropDownstreamSource
+	DropEgressSource
 	DropBridgeSource
 	DropBridgePacket
 	DropBridgeSize
@@ -140,7 +140,7 @@ var dropReasonNames = [...]string{
 	DropTailCall:          "TAIL_CALL",
 	DropChecksum:          "CHECKSUM",
 	DropSourceLimit:       "SOURCE_LIMIT",
-	DropDownstreamSource:  "DOWNSTREAM_SOURCE",
+	DropEgressSource:      "EGRESS_SOURCE",
 	DropBridgeSource:      "BRIDGE_SOURCE",
 	DropBridgePacket:      "BRIDGE_PACKET",
 	DropBridgeSize:        "BRIDGE_SIZE",

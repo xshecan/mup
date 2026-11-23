@@ -86,8 +86,8 @@ func serverModule(server config.Server) fx.Option {
 				return control.NewRegistry(server.Port.First, server.Port.Last, registrationLeaseSeconds*time.Second)
 			},
 			newReflectorTargets,
-			newDownService,
-			asLoop(func(downs *downService) loop { return downs.run }),
+			newEgressService,
+			asLoop(func(egresses *egressService) loop { return egresses.run }),
 			asLoop(newServerControlLoop),
 			asLoop(newReflectorProbeLoop),
 			asLoop(newReflectorEmitLoop),
@@ -189,25 +189,25 @@ func attachBridge(lifecycle fx.Lifecycle, runtime *dataplane.Runtime, plan runti
 	}))
 }
 
-// newDownService opens the raw socket that sends probes and ACKs on the down
+// newEgressService opens the raw socket that sends probes and ACKs on the egress
 // paths of the clients. The server already needs raw sockets for its ICMP
 // control frames, so a failure here stops the start.
-func newDownService(lifecycle fx.Lifecycle, server config.Server, runtime *dataplane.Runtime, logger *log.Logger) (*downService, error) {
-	sender, err := openDownSender()
+func newEgressService(lifecycle fx.Lifecycle, server config.Server, runtime *dataplane.Runtime, logger *log.Logger) (*egressService, error) {
+	sender, err := openEgressSender()
 	if err != nil {
-		return nil, fmt.Errorf("open the down path socket: %w", err)
+		return nil, fmt.Errorf("open the egress path socket: %w", err)
 	}
 	lifecycle.Append(fx.StopHook(sender.Close))
-	return &downService{
-		registry: newDownRegistry(server.Port, runtime, locateDownInterface, logger),
+	return &egressService{
+		registry: newEgressRegistry(server.Port, runtime, locateEgressInterface, logger),
 		sender:   sender,
 		logger:   logger,
 	}, nil
 }
 
-func newServerControlLoop(server config.Server, registry *control.Registry, runtime *dataplane.Runtime, targets *reflectorTargets, downs *downService) loop {
+func newServerControlLoop(server config.Server, registry *control.Registry, runtime *dataplane.Runtime, targets *reflectorTargets, egresses *egressService) loop {
 	return func(ctx context.Context) error {
-		if err := serveServerControls(ctx, server, registry, runtime, targets, downs); err != nil {
+		if err := serveServerControls(ctx, server, registry, runtime, targets, egresses); err != nil {
 			return fmt.Errorf("serve control plane: %w", err)
 		}
 		return nil

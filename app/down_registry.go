@@ -17,27 +17,27 @@ import (
 )
 
 const (
-	// downProbeInterval is the time between two probes of each down path.
-	downProbeInterval = 2 * time.Second
-	// downHealthWindow is how long a down path, or a pool member of it, stays
-	// healthy after its latest probe reply. A new down path is healthy for its
+	// egressProbeInterval is the time between two probes of each egress path.
+	egressProbeInterval = 2 * time.Second
+	// egressHealthWindow is how long an egress path, or a pool member of it, stays
+	// healthy after its latest probe reply. A new egress path is healthy for its
 	// first window, before the first probe replies arrive.
-	downHealthWindow = 6 * time.Second
+	egressHealthWindow = 6 * time.Second
 )
 
-// downPlane is the part of the dataplane that the down registry writes.
-type downPlane interface {
-	SetServerDownPath(dataplane.DownPathEntry) error
-	DeleteServerDownPath(dataplane.ClientKey, uint16) error
-	SetServerDownGroup(dataplane.DownGroupEntry) error
-	DeleteServerDownGroup(dataplane.ClientKey) error
+// egressPlane is the part of the dataplane that the egress registry writes.
+type egressPlane interface {
+	SetServerEgressPath(dataplane.EgressPathEntry) error
+	DeleteServerEgressPath(dataplane.ClientKey, uint16) error
+	SetServerEgressGroup(dataplane.EgressGroupEntry) error
+	DeleteServerEgressGroup(dataplane.ClientKey) error
 	ObservePool(base netip.Addr, prefix uint8, transport protocol.TransportID) error
 	PoolMembers(dataplane.PoolKey) []netip.Addr
 }
 
-// downLocator finds the interface that sends from a server address to a
+// egressLocator finds the interface that sends from a server address to a
 // destination. It fails when the address is not an address of this host.
-type downLocator func(server, destination netip.Addr) (ifindex int, err error)
+type egressLocator func(server, destination netip.Addr) (ifindex int, err error)
 
 // bridgeRouter finds the route to a bridge: the source address and the
 // interface of the wrapped replies.
@@ -47,16 +47,16 @@ func routeToBridge(bridge netip.Addr) (netip.Addr, int, error) {
 	return systemResolver{}.Resolve(bridge, "")
 }
 
-type downKey struct {
+type egressKey struct {
 	client dataplane.ClientKey
 	id     uint16
 }
 
-// serverDownPath is one down path of one client on this server. A path with
+// serverEgressPath is one egress path of one client on this server. A path with
 // bridge goes through a MUP bridge: server is the bridge address, and the
 // wrapped replies leave from localIP.
-type serverDownPath struct {
-	key        downKey
+type serverEgressPath struct {
+	key        egressKey
 	listenPort uint16
 	bridge     bool
 	localIP    netip.Addr
@@ -72,17 +72,17 @@ type serverDownPath struct {
 	// replies holds the time of the latest probe reply through each member,
 	// or through the server address of a direct path.
 	replies map[netip.Addr]time.Time
-	written *dataplane.DownPathEntry
+	written *dataplane.EgressPathEntry
 	cursor  int
 }
 
-func (p *serverDownPath) pool() bool {
+func (p *serverEgressPath) pool() bool {
 	return p.prefix != 0
 }
 
-// sameAs reports whether a DOWN_REGISTER describes the path as it is.
-func (p *serverDownPath) sameAs(frame protocol.ControlFrame) bool {
-	return p.server == frame.DownServer && p.port == frame.ServerPort && p.transport == frame.Transport &&
+// sameAs reports whether a EGRESS_REGISTER describes the path as it is.
+func (p *serverEgressPath) sameAs(frame protocol.ControlFrame) bool {
+	return p.server == frame.EgressServer && p.port == frame.ServerPort && p.transport == frame.Transport &&
 		p.returnIP == frame.ReturnIP && p.prefix == frame.ReturnPrefix &&
 		p.perPacket == (frame.Flags&protocol.ControlFlagBalancePerPacket != 0) &&
 		p.bridge == (frame.Flags&protocol.ControlFlagBridge != 0)
@@ -91,7 +91,7 @@ func (p *serverDownPath) sameAs(frame protocol.ControlFrame) bool {
 // destination is the address that the server sends a reply of the path to:
 // the reflector of an ICMP path with a return IP or a pool, and the client
 // otherwise.
-func (p *serverDownPath) destination() netip.Addr {
+func (p *serverEgressPath) destination() netip.Addr {
 	if p.transport == protocol.TransportICMP && p.returnIP.IsValid() {
 		if p.pool() {
 			return p.returnIP.Next()
@@ -101,17 +101,17 @@ func (p *serverDownPath) destination() netip.Addr {
 	return p.key.client.AdvertisedIP
 }
 
-type serverDownGroup struct {
+type serverEgressGroup struct {
 	listenPort uint16
 	mode       config.Mode
-	written    *dataplane.DownGroupEntry
+	written    *dataplane.EgressGroupEntry
 }
 
-// downTarget is one way to send a control frame on a down path. Member is the
+// egressTarget is one way to send a control frame on an egress path. Member is the
 // reflector of a path with a return IP or a pool, and invalid for a direct
 // path. A target with bridge goes through the bridge at server, wrapped from
 // localIP.
-type downTarget struct {
+type egressTarget struct {
 	client     dataplane.ClientKey
 	pathID     uint16
 	listenPort uint16
@@ -123,61 +123,61 @@ type downTarget struct {
 	localIP    netip.Addr
 }
 
-// downRegistry holds the down paths that clients declare with DOWN_REGISTER
+// egressRegistry holds the egress paths that clients declare with EGRESS_REGISTER
 // frames. It measures the health of each path and pool member from the probe
 // replies, and it writes the paths and their health to the dataplane.
-type downRegistry struct {
+type egressRegistry struct {
 	mu     sync.Mutex
 	ports  config.PortRange
 	lease  time.Duration
-	plane  downPlane
-	locate downLocator
+	plane  egressPlane
+	locate egressLocator
 	route  bridgeRouter
 	logger *log.Logger
-	paths  map[downKey]*serverDownPath
-	groups map[dataplane.ClientKey]*serverDownGroup
+	paths  map[egressKey]*serverEgressPath
+	groups map[dataplane.ClientKey]*serverEgressGroup
 }
 
-func newDownRegistry(ports config.PortRange, plane downPlane, locate downLocator, logger *log.Logger) *downRegistry {
-	return &downRegistry{
+func newEgressRegistry(ports config.PortRange, plane egressPlane, locate egressLocator, logger *log.Logger) *egressRegistry {
+	return &egressRegistry{
 		ports:  ports,
 		lease:  registrationLeaseSeconds * time.Second,
 		plane:  plane,
 		locate: locate,
 		route:  routeToBridge,
 		logger: logger,
-		paths:  make(map[downKey]*serverDownPath),
-		groups: make(map[dataplane.ClientKey]*serverDownGroup),
+		paths:  make(map[egressKey]*serverEgressPath),
+		groups: make(map[dataplane.ClientKey]*serverEgressGroup),
 	}
 }
 
-var errDownNotLocal = errors.New("the down path server address is not an address of this host")
+var errEgressNotLocal = errors.New("the egress path server address is not an address of this host")
 
-// register keeps the down path of a DOWN_REGISTER that arrived from source.
-// A server keeps only the down paths that send from one of its addresses. It
-// keeps every down path through a bridge, because the client does not know
+// register keeps the egress path of a EGRESS_REGISTER that arrived from source.
+// A server keeps only the egress paths that send from one of its addresses. It
+// keeps every egress path through a bridge, because the client does not know
 // which server the bridge serves. The probes find that out: the bridge drops
 // the wrapped probes of the other servers.
-func (r *downRegistry) register(frame protocol.ControlFrame, source netip.Addr, now time.Time) error {
-	if frame.Type != protocol.ControlDownRegister {
-		return errors.New("not a DOWN_REGISTER frame")
+func (r *egressRegistry) register(frame protocol.ControlFrame, source netip.Addr, now time.Time) error {
+	if frame.Type != protocol.ControlEgressRegister {
+		return errors.New("not a EGRESS_REGISTER frame")
 	}
 	if source != frame.AdvertisedIP {
-		return fmt.Errorf("DOWN_REGISTER from %s names advertised IP %s", source, frame.AdvertisedIP)
+		return fmt.Errorf("EGRESS_REGISTER from %s names advertised IP %s", source, frame.AdvertisedIP)
 	}
 	bridge := frame.Flags&protocol.ControlFlagBridge != 0
 	if !bridge && !r.ports.Contains(frame.ServerPort) {
-		return fmt.Errorf("down path port %d is not a server port", frame.ServerPort)
+		return fmt.Errorf("egress path port %d is not a server port", frame.ServerPort)
 	}
-	if frame.PathID >= dataplane.MaxDownPaths {
-		return fmt.Errorf("down path ID %d is too large", frame.PathID)
+	if frame.PathID >= dataplane.MaxEgressPaths {
+		return fmt.Errorf("egress path ID %d is too large", frame.PathID)
 	}
 	client := dataplane.ClientKey{AdvertisedIP: frame.AdvertisedIP, InstanceNonce: frame.InstanceNonce}
-	key := downKey{client: client, id: frame.PathID}
+	key := egressKey{client: client, id: frame.PathID}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	path := r.paths[key]
-	// A lease of zero withdraws a down path that the client removed.
+	// A lease of zero withdraws an egress path that the client removed.
 	if frame.LeaseSeconds == 0 {
 		if path != nil && path.sameAs(frame) {
 			path.expires = time.Time{}
@@ -186,10 +186,10 @@ func (r *downRegistry) register(frame protocol.ControlFrame, source netip.Addr, 
 		return nil
 	}
 	if path == nil || !path.sameAs(frame) {
-		path = &serverDownPath{
+		path = &serverEgressPath{
 			key:        key,
 			listenPort: frame.ListenPort,
-			server:     frame.DownServer,
+			server:     frame.EgressServer,
 			port:       frame.ServerPort,
 			transport:  frame.Transport,
 			returnIP:   frame.ReturnIP,
@@ -226,26 +226,26 @@ func (r *downRegistry) register(frame protocol.ControlFrame, source netip.Addr, 
 	path.expires = now.Add(r.lease)
 	group := r.groups[client]
 	if group == nil {
-		group = &serverDownGroup{}
+		group = &serverEgressGroup{}
 		r.groups[client] = group
 	}
 	group.listenPort = frame.ListenPort
-	group.mode = config.Mode(frame.DownMode)
+	group.mode = config.Mode(frame.EgressMode)
 	r.syncClientLocked(client, now)
 	return nil
 }
 
-// confirm records a PROBE_REPLY of a down path. It names the member that the
+// confirm records a PROBE_REPLY of an egress path. It names the member that the
 // probe came through in its return IP. The server ignores a reply for an
 // unknown path or a member outside the path.
-func (r *downRegistry) confirm(frame protocol.ControlFrame, now time.Time) bool {
-	if frame.Type != protocol.ControlProbeReply || frame.Flags&protocol.ControlFlagDownPath == 0 {
+func (r *egressRegistry) confirm(frame protocol.ControlFrame, now time.Time) bool {
+	if frame.Type != protocol.ControlProbeReply || frame.Flags&protocol.ControlFlagEgressPath == 0 {
 		return false
 	}
 	client := dataplane.ClientKey{AdvertisedIP: frame.AdvertisedIP, InstanceNonce: frame.InstanceNonce}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	path := r.paths[downKey{client: client, id: frame.PathID}]
+	path := r.paths[egressKey{client: client, id: frame.PathID}]
 	if path == nil || now.After(path.expires) || frame.Transport != path.transport {
 		return false
 	}
@@ -266,8 +266,8 @@ func (r *downRegistry) confirm(frame protocol.ControlFrame, now time.Time) bool 
 	return true
 }
 
-// revoke forgets the down paths of a client that restarted.
-func (r *downRegistry) revoke(client dataplane.ClientKey, now time.Time) {
+// revoke forgets the egress paths of a client that restarted.
+func (r *egressRegistry) revoke(client dataplane.ClientKey, now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for key, path := range r.paths {
@@ -280,7 +280,7 @@ func (r *downRegistry) revoke(client dataplane.ClientKey, now time.Time) {
 
 // candidatesLocked returns the members that a path can send through: the
 // members of its pool, its return IP, or its server address.
-func (r *downRegistry) candidatesLocked(path *serverDownPath) []netip.Addr {
+func (r *egressRegistry) candidatesLocked(path *serverEgressPath) []netip.Addr {
 	switch {
 	case path.pool():
 		return r.plane.PoolMembers(dataplane.PoolKey{Base: path.returnIP, Transport: path.transport})
@@ -294,22 +294,22 @@ func (r *downRegistry) candidatesLocked(path *serverDownPath) []netip.Addr {
 // healthyLocked returns the healthy candidates of a path. A new path is healthy
 // for its first window, but a path through a bridge waits for its first probe
 // reply, because the bridge can serve another server.
-func (r *downRegistry) healthyLocked(path *serverDownPath, now time.Time) []netip.Addr {
+func (r *egressRegistry) healthyLocked(path *serverEgressPath, now time.Time) []netip.Addr {
 	candidates := r.candidatesLocked(path)
-	if !path.bridge && now.Sub(path.since) < downHealthWindow {
+	if !path.bridge && now.Sub(path.since) < egressHealthWindow {
 		return candidates
 	}
 	healthy := make([]netip.Addr, 0, len(candidates))
 	for _, candidate := range candidates {
-		if replied, ok := path.replies[candidate]; ok && now.Sub(replied) < downHealthWindow {
+		if replied, ok := path.replies[candidate]; ok && now.Sub(replied) < egressHealthWindow {
 			healthy = append(healthy, candidate)
 		}
 	}
 	return healthy
 }
 
-func (path *serverDownPath) target(member netip.Addr) downTarget {
-	target := downTarget{
+func (path *serverEgressPath) target(member netip.Addr) egressTarget {
+	target := egressTarget{
 		client:     path.key.client,
 		pathID:     path.key.id,
 		listenPort: path.listenPort,
@@ -327,10 +327,10 @@ func (path *serverDownPath) target(member netip.Addr) downTarget {
 
 // probeTargets returns one target for each live path and each of its
 // candidates, so each probe tests one member.
-func (r *downRegistry) probeTargets(now time.Time) []downTarget {
+func (r *egressRegistry) probeTargets(now time.Time) []egressTarget {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var targets []downTarget
+	var targets []egressTarget
 	for _, path := range r.paths {
 		if now.After(path.expires) {
 			continue
@@ -342,13 +342,13 @@ func (r *downRegistry) probeTargets(now time.Time) []downTarget {
 	return targets
 }
 
-// ackTargets returns one target for each live down path of a client. A pool
+// ackTargets returns one target for each live egress path of a client. A pool
 // path takes its healthy members in turn, or all its candidates in turn when
 // none is healthy.
-func (r *downRegistry) ackTargets(client dataplane.ClientKey, now time.Time) []downTarget {
+func (r *egressRegistry) ackTargets(client dataplane.ClientKey, now time.Time) []egressTarget {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var targets []downTarget
+	var targets []egressTarget
 	for key, path := range r.paths {
 		if key.client != client || now.After(path.expires) {
 			continue
@@ -368,7 +368,7 @@ func (r *downRegistry) ackTargets(client dataplane.ClientKey, now time.Time) []d
 
 // sync expires the paths whose lease ended, and writes the health of every
 // path to the dataplane.
-func (r *downRegistry) sync(now time.Time) {
+func (r *egressRegistry) sync(now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for client := range r.groups {
@@ -378,27 +378,27 @@ func (r *downRegistry) sync(now time.Time) {
 
 // syncClientLocked writes the paths and the group of one client. A failed
 // write leaves the old entry, and the next sync tries again.
-func (r *downRegistry) syncClientLocked(client dataplane.ClientKey, now time.Time) {
+func (r *egressRegistry) syncClientLocked(client dataplane.ClientKey, now time.Time) {
 	var pathMask, healthyMask, icmpMask uint8
 	for key, path := range r.paths {
 		if key.client != client {
 			continue
 		}
 		if now.After(path.expires) {
-			if err := r.plane.DeleteServerDownPath(client, key.id); err != nil {
-				r.logger.Printf("mup down path %d of %s: %v", key.id, client.AdvertisedIP, err)
+			if err := r.plane.DeleteServerEgressPath(client, key.id); err != nil {
+				r.logger.Printf("mup egress path %d of %s: %v", key.id, client.AdvertisedIP, err)
 				continue
 			}
 			delete(r.paths, key)
 			continue
 		}
 		for member, replied := range path.replies {
-			if now.Sub(replied) >= downHealthWindow {
+			if now.Sub(replied) >= egressHealthWindow {
 				delete(path.replies, member)
 			}
 		}
 		healthy := r.healthyLocked(path, now)
-		entry := dataplane.DownPathEntry{
+		entry := dataplane.EgressPathEntry{
 			Client:     client,
 			PathID:     key.id,
 			Server:     path.server,
@@ -414,9 +414,9 @@ func (r *downRegistry) syncClientLocked(client dataplane.ClientKey, now time.Tim
 		if path.pool() {
 			entry.Members = healthy
 		}
-		if path.written == nil || !sameDownEntry(*path.written, entry) {
-			if err := r.plane.SetServerDownPath(entry); err != nil {
-				r.logger.Printf("mup down path %d of %s: %v", key.id, client.AdvertisedIP, err)
+		if path.written == nil || !sameEgressEntry(*path.written, entry) {
+			if err := r.plane.SetServerEgressPath(entry); err != nil {
+				r.logger.Printf("mup egress path %d of %s: %v", key.id, client.AdvertisedIP, err)
 				continue
 			}
 			path.written = &entry
@@ -434,14 +434,14 @@ func (r *downRegistry) syncClientLocked(client dataplane.ClientKey, now time.Tim
 		return
 	}
 	if pathMask == 0 {
-		if err := r.plane.DeleteServerDownGroup(client); err != nil {
-			r.logger.Printf("mup down group of %s: %v", client.AdvertisedIP, err)
+		if err := r.plane.DeleteServerEgressGroup(client); err != nil {
+			r.logger.Printf("mup egress group of %s: %v", client.AdvertisedIP, err)
 			return
 		}
 		delete(r.groups, client)
 		return
 	}
-	entry := dataplane.DownGroupEntry{
+	entry := dataplane.EgressGroupEntry{
 		Client:      client,
 		ListenPort:  group.listenPort,
 		Mode:        group.mode,
@@ -452,14 +452,14 @@ func (r *downRegistry) syncClientLocked(client dataplane.ClientKey, now time.Tim
 	if group.written != nil && *group.written == entry {
 		return
 	}
-	if err := r.plane.SetServerDownGroup(entry); err != nil {
-		r.logger.Printf("mup down group of %s: %v", client.AdvertisedIP, err)
+	if err := r.plane.SetServerEgressGroup(entry); err != nil {
+		r.logger.Printf("mup egress group of %s: %v", client.AdvertisedIP, err)
 		return
 	}
 	group.written = &entry
 }
 
-func sameDownEntry(a, b dataplane.DownPathEntry) bool {
+func sameEgressEntry(a, b dataplane.EgressPathEntry) bool {
 	members := slices.Equal(a.Members, b.Members)
 	a.Members, b.Members = nil, nil
 	return members && a.Client == b.Client && a.PathID == b.PathID && a.Server == b.Server &&
@@ -468,19 +468,19 @@ func sameDownEntry(a, b dataplane.DownPathEntry) bool {
 		a.Bridge == b.Bridge && a.LocalIP == b.LocalIP
 }
 
-// clients returns the down paths of each client for mupctl, keyed by client.
-func (r *downRegistry) clients(now time.Time) map[dataplane.ClientKey]api.DownGroup {
+// clients returns the egress paths of each client for mupctl, keyed by client.
+func (r *egressRegistry) clients(now time.Time) map[dataplane.ClientKey]api.EgressGroup {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	result := make(map[dataplane.ClientKey]api.DownGroup, len(r.groups))
+	result := make(map[dataplane.ClientKey]api.EgressGroup, len(r.groups))
 	for client, group := range r.groups {
-		view := api.DownGroup{Mode: group.mode.String()}
+		view := api.EgressGroup{Mode: group.mode.String()}
 		for key, path := range r.paths {
 			if key.client != client || now.After(path.expires) {
 				continue
 			}
 			healthy := r.healthyLocked(path, now)
-			down := api.DownPath{
+			egress := api.EgressPath{
 				ID:             key.id,
 				Bridge:         path.bridge,
 				Server:         path.server.String(),
@@ -493,11 +493,11 @@ func (r *downRegistry) clients(now time.Time) map[dataplane.ClientKey]api.DownGr
 			}
 			switch {
 			case path.pool():
-				down.ReturnIP = netip.PrefixFrom(path.returnIP, int(path.prefix)).String()
+				egress.ReturnIP = netip.PrefixFrom(path.returnIP, int(path.prefix)).String()
 			case path.returnIP.IsValid():
-				down.ReturnIP = path.returnIP.String()
+				egress.ReturnIP = path.returnIP.String()
 			}
-			view.Paths = append(view.Paths, down)
+			view.Paths = append(view.Paths, egress)
 		}
 		sort.Slice(view.Paths, func(i, j int) bool { return view.Paths[i].ID < view.Paths[j].ID })
 		result[client] = view

@@ -241,13 +241,13 @@ func (r *Runtime) ConfigureClient(settings ClientSettings) error {
 		return err
 	}
 	return applyClientSettings(configurationMaps{
-		client:    r.objects.ClientConfig,
-		groups:    r.objects.PathGroups,
-		paths:     r.objects.PathConfig,
-		returns:   r.objects.PathReturns,
-		upReflect: r.objects.UpReflectMembers,
-		state:     r.objects.PathState,
-		downs:     r.objects.ClientDownPaths,
+		client:         r.objects.ClientConfig,
+		groups:         r.objects.PathGroups,
+		paths:          r.objects.PathConfig,
+		returns:        r.objects.PathReturns,
+		ingressReflect: r.objects.UpReflectMembers,
+		state:          r.objects.PathState,
+		downs:          r.objects.ClientDownPaths,
 	}, settings)
 }
 
@@ -280,14 +280,14 @@ func (r *Runtime) ConfigureServer(settings ServerSettings) error {
 	}, settings); err != nil {
 		return err
 	}
-	// The down paths of the previous run belong to no live registration. The
+	// The egress paths of the previous run belong to no live registration. The
 	// clients send them again within a refresh, and until then the replies
-	// follow the upstream paths.
+	// follow the ingress paths.
 	if err := clearMap[mupClientKeyV1, mupDownGroupV1](r.objects.ServerDownGroups); err != nil {
-		return fmt.Errorf("clear down groups: %w", err)
+		return fmt.Errorf("clear egress groups: %w", err)
 	}
 	if err := clearMap[mupDownPathKeyV1, mupDownPathV1](r.objects.ServerDownPaths); err != nil {
-		return fmt.Errorf("clear down paths: %w", err)
+		return fmt.Errorf("clear egress paths: %w", err)
 	}
 	if settings.Target.Addr() == settings.SourceIP {
 		return r.releaseLocalTargetPort(settings.Target.Port())
