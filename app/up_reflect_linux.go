@@ -75,7 +75,7 @@ func (s *upReflectPathConn) registerMembers(sequence uint32, sentAt time.Time) r
 	reg := s.registration
 	if reg.downs != nil {
 		for _, down := range reg.downFrames(sequence) {
-			_ = s.sendICMP(reg.advertisedIP, reg.path.Server, reg.path.ServerPort, uint16(sequence), down, sequence)
+			s.sendDownRegister(reg, down, sequence)
 		}
 	}
 	drainRouted(s.routed)
@@ -177,6 +177,39 @@ func (s *upReflectPathConn) sendViaBridge(reg pathRegistration, member netip.Add
 		inner = buildIPv4Packet(innerSource, innerDestination, unix.IPPROTO_UDP, segment, uint16(id))
 	}
 	packet := wrapForBridge(reg.advertisedIP, reg.path.ProxyBridge, reg.path.ServerPort, innerProtocol, innerSource, innerDestination, inner, uint16(id))
+	return unix.Sendto(s.fd, packet, 0, &unix.SockaddrInet4{Addr: reg.path.ProxyBridge.As4()})
+}
+
+// sendDownRegister sends one DOWN_REGISTER to the server. The server keeps a
+// down path only when the frame reaches it from the advertised IP, so a direct
+// reflect path sends it from that address itself. A bridge path cannot reach
+// the server directly, which is the reason it reflects at all, so it routes the
+// frame through the bridge, and the bridge emits it with the advertised source.
+func (s *upReflectPathConn) sendDownRegister(reg pathRegistration, frame []byte, id uint32) {
+	if reg.path.BridgeReflect() {
+		_ = s.sendDownViaBridge(reg, frame, id)
+		return
+	}
+	_ = s.sendICMP(reg.advertisedIP, reg.path.Server, reg.path.ServerPort, uint16(id), frame, id)
+}
+
+// sendDownViaBridge wraps a DOWN_REGISTER for the bridge with the advertised IP
+// as its inner source, so the bridge emits it to the server from that address.
+// The frame travels on the transport of the up path, because the server reads
+// the control frames of the path on the port of the up path.
+func (s *upReflectPathConn) sendDownViaBridge(reg pathRegistration, frame []byte, id uint32) error {
+	var innerProtocol byte
+	var inner []byte
+	if reg.path.Transport == protocol.TransportICMP {
+		echo := marshalICMPEcho(icmpEchoRequest, reg.path.ServerPort, uint16(id), frame)
+		innerProtocol = unix.IPPROTO_ICMP
+		inner = buildIPv4Packet(reg.advertisedIP, reg.path.Server, unix.IPPROTO_ICMP, echo, uint16(id))
+	} else {
+		segment := buildUDPSegment(reg.advertisedIP, reg.path.Server, reg.listenPort, reg.path.ServerPort, frame)
+		innerProtocol = unix.IPPROTO_UDP
+		inner = buildIPv4Packet(reg.advertisedIP, reg.path.Server, unix.IPPROTO_UDP, segment, uint16(id))
+	}
+	packet := wrapForBridge(reg.advertisedIP, reg.path.ProxyBridge, reg.path.ServerPort, innerProtocol, reg.advertisedIP, reg.path.Server, inner, uint16(id))
 	return unix.Sendto(s.fd, packet, 0, &unix.SockaddrInet4{Addr: reg.path.ProxyBridge.As4()})
 }
 
