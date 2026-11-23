@@ -17,7 +17,7 @@ func splitClientStatus() api.Status {
 			Generation:   2,
 			TokensFree:   4095,
 			Groups: []api.Group{
-				{ListenPort: 51820, Mode: "fallback", Paths: 1, HealthyPaths: 1, EgressMode: "burst", EgressPaths: 2, HealthyEgressPaths: 1},
+				{ListenPort: 51820, Mode: "failover", Paths: 1, HealthyPaths: 1, EgressMode: "repeater", EgressPaths: 2, HealthyEgressPaths: 1},
 				{ListenPort: 51821, Mode: "balancer", Paths: 1, HealthyPaths: 1},
 			},
 			Paths: []api.Path{
@@ -41,7 +41,7 @@ func TestStatusShowsSeparateDirections(t *testing.T) {
 		"Paths:          2/2 healthy, generation 2",
 		"Egress paths:   1/2 healthy",
 		"GROUP   MODE       PATHS         EGRESS MODE   EGRESS PATHS   PEERS",
-		"51820   fallback   1/1 healthy   burst         1/2 healthy    0",
+		"51820   failover   1/1 healthy   repeater      1/2 healthy    0",
 		"51821   balancer   1/1 healthy   -             -              0",
 		"ID   PATH      GROUP   SERVER",
 		"0    ingress   51820   203.0.113.5:9000   udp         -                 eth0        active      4s ago",
@@ -59,7 +59,7 @@ func TestEgressPathCommands(t *testing.T) {
 	t.Parallel()
 
 	daemon := fakeDaemon(t, splitClientStatus())
-	if code, stdout, stderr := runCommand(t, daemon, "add", "path", "203.0.113.8:9300/udp", "via", "198.51.100.0/28", "balance", "per-packet", "--egress", "--group", "51820"); code != 0 ||
+	if code, stdout, stderr := runCommand(t, daemon, "add", "path", "203.0.113.8:9300/udp", "via", "198.51.100.0/28", "per-packet", "--egress", "--group", "51820"); code != 0 ||
 		!strings.Contains(stdout, "egress-path/4 created in group 51820 (203.0.113.8:9300/udp via 198.51.100.0/28, unhealthy until the first probe)") {
 		t.Fatalf("add egress path = %d, %q, %q", code, stdout, stderr)
 	}
@@ -82,12 +82,12 @@ func TestClientsShowTheEgressPaths(t *testing.T) {
 		AdvertisedIP: "192.0.2.10",
 		Nonce:        "8f3a0000000000aa",
 		LeaseSeconds: 24,
-		Egress: &api.EgressGroup{Mode: "fallback", Paths: []api.EgressPath{
+		Egress: &api.EgressGroup{Mode: "failover", Paths: []api.EgressPath{
 			{ID: 0, Server: "203.0.113.5", Port: 9200, Transport: "icmp", ReturnIP: "198.51.100.0/28", Healthy: true, Members: 9, HealthyMembers: 7},
 			{ID: 1, Server: "203.0.113.5", Port: 9300, Transport: "udp"},
 		}},
 	}}, true)
-	for _, want := range []string{"1/2 healthy, fallback", "0:icmp:203.0.113.5:9200 via 198.51.100.0/28 (7/9),1:udp:203.0.113.5:9300"} {
+	for _, want := range []string{"1/2 healthy, failover", "0:icmp:203.0.113.5:9200 via 198.51.100.0/28 (7/9),1:udp:203.0.113.5:9300"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("clients output misses %q:\n%s", want, out.String())
 		}

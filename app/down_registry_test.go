@@ -90,7 +90,7 @@ func egressFrame(id uint16, port uint16, transport protocol.TransportID, mode co
 }
 
 func poolFrame(id uint16, port uint16) protocol.ControlFrame {
-	frame := egressFrame(id, port, protocol.TransportICMP, config.ModeBurst)
+	frame := egressFrame(id, port, protocol.TransportICMP, config.ModeRepeater)
 	frame.Flags = protocol.ControlFlagReturnPool | protocol.ControlFlagBalancePerPacket
 	frame.ReturnIP = egressPool
 	frame.ReturnPrefix = 28
@@ -119,7 +119,7 @@ func TestEgressRegistryKeepsAEgressPathAndItsGroup(t *testing.T) {
 	if err := registry.register(poolFrame(0, 9200), egressClient, now); err != nil {
 		t.Fatalf("register pool path: %v", err)
 	}
-	if err := registry.register(egressFrame(2, 9300, protocol.TransportUDP, config.ModeBurst), egressClient, now); err != nil {
+	if err := registry.register(egressFrame(2, 9300, protocol.TransportUDP, config.ModeRepeater), egressClient, now); err != nil {
 		t.Fatalf("register direct path: %v", err)
 	}
 	pool := plane.paths[egressKey{client: egressKeyOf, id: 0}]
@@ -130,7 +130,7 @@ func TestEgressRegistryKeepsAEgressPathAndItsGroup(t *testing.T) {
 		t.Fatalf("direct entry = %#v", direct)
 	}
 	group := plane.groups[egressKeyOf]
-	if group.ListenPort != 51820 || group.Mode != config.ModeBurst || group.PathMask != 0b101 || group.HealthyMask != 0b101 {
+	if group.ListenPort != 51820 || group.Mode != config.ModeRepeater || group.PathMask != 0b101 || group.HealthyMask != 0b101 {
 		t.Fatalf("group entry = %#v", group)
 	}
 	if len(plane.pools) != 1 || plane.pools[0].Base != egressPool {
@@ -143,14 +143,14 @@ func TestEgressRegistryRejectsBadFrames(t *testing.T) {
 
 	registry := newTestEgressRegistry(newFakeEgressPlane())
 	now := time.Unix(1000, 0)
-	notLocal := egressFrame(0, 9200, protocol.TransportUDP, config.ModeFallback)
+	notLocal := egressFrame(0, 9200, protocol.TransportUDP, config.ModeFailover)
 	notLocal.EgressServer = netip.MustParseAddr("203.0.113.99")
 	for name, test := range map[string]struct {
 		frame  protocol.ControlFrame
 		source netip.Addr
 	}{
-		"other source":    {frame: egressFrame(0, 9200, protocol.TransportUDP, config.ModeFallback), source: netip.MustParseAddr("192.0.2.11")},
-		"port outside":    {frame: egressFrame(0, 8000, protocol.TransportUDP, config.ModeFallback), source: egressClient},
+		"other source":    {frame: egressFrame(0, 9200, protocol.TransportUDP, config.ModeFailover), source: netip.MustParseAddr("192.0.2.11")},
+		"port outside":    {frame: egressFrame(0, 8000, protocol.TransportUDP, config.ModeFailover), source: egressClient},
 		"server not here": {frame: notLocal, source: egressClient},
 	} {
 		if err := registry.register(test.frame, test.source, now); err == nil {
@@ -175,7 +175,7 @@ func TestEgressRegistryHealthFollowsTheProbeReplies(t *testing.T) {
 	if err := registry.register(poolFrame(0, 9200), egressClient, start); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := registry.register(egressFrame(1, 9300, protocol.TransportUDP, config.ModeBurst), egressClient, start); err != nil {
+	if err := registry.register(egressFrame(1, 9300, protocol.TransportUDP, config.ModeRepeater), egressClient, start); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	// After the first window, only the members whose probes came back stay.
@@ -214,11 +214,11 @@ func TestEgressRegistryWithdrawsAndExpiresPaths(t *testing.T) {
 	registry := newTestEgressRegistry(plane)
 	now := time.Unix(1000, 0)
 	for id := range uint16(2) {
-		if err := registry.register(egressFrame(id, 9200+id, protocol.TransportUDP, config.ModeFallback), egressClient, now); err != nil {
+		if err := registry.register(egressFrame(id, 9200+id, protocol.TransportUDP, config.ModeFailover), egressClient, now); err != nil {
 			t.Fatalf("register: %v", err)
 		}
 	}
-	withdraw := egressFrame(1, 9201, protocol.TransportUDP, config.ModeFallback)
+	withdraw := egressFrame(1, 9201, protocol.TransportUDP, config.ModeFailover)
 	withdraw.LeaseSeconds = 0
 	if err := registry.register(withdraw, egressClient, now); err != nil {
 		t.Fatalf("withdraw: %v", err)
@@ -246,7 +246,7 @@ func TestEgressRegistryTargets(t *testing.T) {
 	if err := registry.register(poolFrame(0, 9200), egressClient, now); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := registry.register(egressFrame(1, 9300, protocol.TransportUDP, config.ModeBurst), egressClient, now); err != nil {
+	if err := registry.register(egressFrame(1, 9300, protocol.TransportUDP, config.ModeRepeater), egressClient, now); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	probes := registry.probeTargets(now)

@@ -16,7 +16,7 @@ func mustParsePath(t *testing.T, raw string) Path {
 
 func TestParsePathBridgeReflectPool(t *testing.T) {
 	t.Parallel()
-	path := mustParsePath(t, "160.119.74.33:9000/icmp via 5.6.7.0/28 balance per-packet bridge 203.0.113.9")
+	path := mustParsePath(t, "160.119.74.33:9000/icmp via 5.6.7.0/28 per-packet bridge 203.0.113.9")
 	if path.Server != netip.MustParseAddr("160.119.74.33") {
 		t.Fatalf("server = %s", path.Server)
 	}
@@ -32,7 +32,7 @@ func TestParsePathBridgeReflectPool(t *testing.T) {
 	if !path.BridgeReflect() {
 		t.Fatal("BridgeReflect = false")
 	}
-	if got := path.String(); got != "160.119.74.33:9000/icmp via 5.6.7.0/28 balance per-packet bridge 203.0.113.9" {
+	if got := path.String(); got != "160.119.74.33:9000/icmp via 5.6.7.0/28 per-packet bridge 203.0.113.9" {
 		t.Fatalf("String = %q", got)
 	}
 }
@@ -57,7 +57,7 @@ func TestParsePathBridgeRejectsBadAddress(t *testing.T) {
 
 func TestParsePathPlainRouteHasNoProxyBridge(t *testing.T) {
 	t.Parallel()
-	path := mustParsePath(t, "160.119.74.33:9000/icmp via 5.6.7.8/28 balance per-packet")
+	path := mustParsePath(t, "160.119.74.33:9000/icmp via 5.6.7.8/28 per-packet")
 	if path.ProxyBridge.IsValid() || path.BridgeReflect() {
 		t.Fatalf("plain route has a proxy bridge: %s", path.ProxyBridge)
 	}

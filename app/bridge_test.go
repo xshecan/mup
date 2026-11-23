@@ -64,7 +64,7 @@ func TestEgressRegistryKeepsAEgressBridge(t *testing.T) {
 		}
 		return local, 4, nil
 	}
-	frame := egressFrame(0, 12000, protocol.TransportICMP, config.ModeFallback)
+	frame := egressFrame(0, 12000, protocol.TransportICMP, config.ModeFailover)
 	frame.Flags = protocol.ControlFlagReturnIP | protocol.ControlFlagBridge
 	frame.ReturnIP = netip.MustParseAddr("198.51.100.9")
 	frame.EgressServer = bridge

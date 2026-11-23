@@ -7,21 +7,21 @@ import (
 	"github.com/xshecan/mup/config"
 )
 
-func TestSelectPathsFallbackUsesLowestPriority(t *testing.T) {
+func TestSelectPathsFailoverUsesLowestPriority(t *testing.T) {
 	t.Parallel()
 
-	got := SelectPaths(config.ModeFallback, 17, []uint8{20, 5, 10}, 0b111)
+	got := SelectPaths(config.ModeFailover, 17, []uint8{20, 5, 10}, 0b111)
 	if !reflect.DeepEqual(got, []int{1}) {
-		t.Fatalf("fallback selection = %v, want [1]", got)
+		t.Fatalf("failover selection = %v, want [1]", got)
 	}
 }
 
-func TestSelectPathsBurstReturnsEveryHealthyPath(t *testing.T) {
+func TestSelectPathsRepeaterReturnsEveryHealthyPath(t *testing.T) {
 	t.Parallel()
 
-	got := SelectPaths(config.ModeBurst, 17, []uint8{0, 1, 2, 3}, 0b1011)
+	got := SelectPaths(config.ModeRepeater, 17, []uint8{0, 1, 2, 3}, 0b1011)
 	if !reflect.DeepEqual(got, []int{0, 1, 3}) {
-		t.Fatalf("burst selection = %v, want [0 1 3]", got)
+		t.Fatalf("repeater selection = %v, want [0 1 3]", got)
 	}
 }
 

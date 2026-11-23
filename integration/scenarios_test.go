@@ -65,7 +65,7 @@ func TestPrivilegedModesAndFailover(t *testing.T) {
   control_socket: %s
   servers:
     - port: 51820
-      mode: burst
+      mode: repeater
       routes: [10.210.1.2:5000/udp, 10.210.5.2:5000/icmp]
 `, clientSocket)
 	if err := os.WriteFile(configuration, []byte(content), 0o600); err != nil {
@@ -93,13 +93,13 @@ func TestPrivilegedModesAndFailover(t *testing.T) {
 
 	exchange(t, peerNS, "10.210.3.1:51820", 1, logs)
 	if first, second := routeCounts(); first != 1 || second != 1 {
-		t.Fatalf("burst left %d and %d routes on the servers, want 1 and 1\n%s", first, second, state())
+		t.Fatalf("repeater left %d and %d routes on the servers, want 1 and 1\n%s", first, second, state())
 	}
 
-	setMode(t, clientAPI, "fallback")
+	setMode(t, clientAPI, "failover")
 	exchange(t, peerNS, "10.210.3.1:51820", 1, logs)
 	if first, second := routeCounts(); first != 2 || second != 1 {
-		t.Fatalf("fallback left %d and %d routes on the servers, want 2 and 1\n%s", first, second, state())
+		t.Fatalf("failover left %d and %d routes on the servers, want 2 and 1\n%s", first, second, state())
 	}
 
 	setMode(t, clientAPI, "balancer")
@@ -108,7 +108,7 @@ func TestPrivilegedModesAndFailover(t *testing.T) {
 		t.Fatalf("balancer left %d and %d routes on the servers, want 4 in all\n%s", first, second, state())
 	}
 
-	setMode(t, clientAPI, "fallback")
+	setMode(t, clientAPI, "failover")
 	_, before := routeCounts()
 	first.stop(t)
 	waitFor(t, 40*time.Second, "the first path to become unhealthy", logs, func() (bool, error) {
@@ -399,8 +399,8 @@ func TestPrivilegedReturnPool(t *testing.T) {
   control_socket: %s
   servers:
     - port: 51820
-      mode: fallback
-      routes: ["10.210.1.2:5000/udp via 10.211.9.0/30 balance %s"]
+      mode: failover
+      routes: ["10.210.1.2:5000/udp via 10.211.9.0/30 %s"]
 `, clientSocket, balance)
 			if err := os.WriteFile(configuration, []byte(content), 0o600); err != nil {
 				t.Fatalf("write client configuration: %v", err)

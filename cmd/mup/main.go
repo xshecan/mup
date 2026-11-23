@@ -21,7 +21,7 @@ const usage = `usage:
   mup --config FILE
   mup server -p PORT[-LAST] -r TARGET_IP:PORT [--target-ingress] [--control-socket PATH]
   mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP]" [-u ...] -s CLIENT_IP
-             [-r RETURN_IP] [--mode fallback|balancer|burst] [--control-socket PATH]
+             [-r RETURN_IP] [--mode failover|balancer|repeater] [--control-socket PATH]
   mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp" [--ingress ...]
              --egress "SERVER_IP:PORT/udp|icmp [via RETURN_IP]" [--egress ...] -s CLIENT_IP
              [--ingress-bridge "BRIDGE_IP[%IFACE]:PORT[-LAST]/udp|icmp"] [--ingress-bridge ...]
@@ -144,18 +144,11 @@ func parseClientArgs(args []string) (*config.Client, error) {
 	fs.Var(&rawEgress, "egress", "egress path as IPv4:PORT/udp or /icmp, for the egress only")
 	fs.Var(&rawIngressBridges, "ingress-bridge", "ingress path through a MUP bridge, as BRIDGE_IP:PORT/udp or /icmp")
 	fs.Var(&rawEgressBridges, "egress-bridge", "egress path through a MUP bridge, as BRIDGE_IP:PORT/udp or /icmp")
-	fs.StringVar(&ingressModeName, "ingress-mode", "fallback", "ingress mode: fallback, balancer, or burst")
-	fs.StringVar(&egressModeName, "egress-mode", "fallback", "egress mode: fallback, balancer, or burst")
-	// The old flag names still work.
-	fs.Var(&rawIngress, "up", "old name of --ingress")
-	fs.Var(&rawEgress, "down", "old name of --egress")
-	fs.Var(&rawIngressBridges, "up-bridge", "old name of --ingress-bridge")
-	fs.Var(&rawEgressBridges, "down-bridge", "old name of --egress-bridge")
-	fs.StringVar(&ingressModeName, "up-mode", "fallback", "old name of --ingress-mode")
-	fs.StringVar(&egressModeName, "down-mode", "fallback", "old name of --egress-mode")
+	fs.StringVar(&ingressModeName, "ingress-mode", "failover", "ingress mode: failover, balancer, or repeater")
+	fs.StringVar(&egressModeName, "egress-mode", "failover", "egress mode: failover, balancer, or repeater")
 	fs.StringVar(&advertisedText, "s", "", "advertised client IPv4")
 	fs.StringVar(&returnIPText, "r", "", "return IPv4 of each -u path without its own via")
-	fs.StringVar(&modeName, "mode", "fallback", "fallback, balancer, or burst")
+	fs.StringVar(&modeName, "mode", "failover", "failover, balancer, or repeater")
 	fs.StringVar(&controlSocket, "control-socket", api.DefaultClientSocket, "Unix socket for mupctl, or empty to disable")
 	if err := fs.Parse(args); err != nil {
 		return nil, err

@@ -74,12 +74,12 @@ type splitFixture struct {
 
 func newSplitFixture(t *testing.T) splitFixture {
 	t.Helper()
-	group := testGroup(t, 51820, config.ModeFallback, "198.51.100.1:9000/udp", "198.51.100.2:9100/icmp")
+	group := testGroup(t, 51820, config.ModeFailover, "198.51.100.1:9000/udp", "198.51.100.2:9100/icmp")
 	group.EgressMode = config.ModeBalancer
 	for _, raw := range []string{"198.51.100.1:9200/icmp via 203.0.113.0/28", "198.51.100.1:9300/udp"} {
 		group.EgressPaths = append(group.EgressPaths, mustParsePath(t, raw))
 	}
-	paired := testGroup(t, 51821, config.ModeFallback, "198.51.100.3:5000/udp")
+	paired := testGroup(t, 51821, config.ModeFailover, "198.51.100.3:5000/udp")
 	client := config.Client{AdvertisedIP: netip.MustParseAddr("192.0.2.10"), Groups: []config.Group{group, paired}}
 	if err := client.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
@@ -251,21 +251,21 @@ func TestEgressPathRuntimeChanges(t *testing.T) {
 	if group := fixture.dataplane.groups[51820]; group.DownMask != 0b101 {
 		t.Fatalf("group = %#v after the removal", group)
 	}
-	if err := controller.SetEgressMode("burst", 51820); err != nil {
+	if err := controller.SetEgressMode("repeater", 51820); err != nil {
 		t.Fatalf("SetEgressMode: %v", err)
 	}
-	if group := fixture.dataplane.groups[51820]; group.EgressMode != config.ModeBurst {
+	if group := fixture.dataplane.groups[51820]; group.EgressMode != config.ModeRepeater {
 		t.Fatalf("group = %#v after the mode change", group)
 	}
-	if err := controller.SetEgressMode("burst", 51821); statusOf(err) != http.StatusConflict {
+	if err := controller.SetEgressMode("repeater", 51821); statusOf(err) != http.StatusConflict {
 		t.Fatalf("SetEgressMode on a paired group error = %v", err)
 	}
 	frames := decodeFrames(t, fixture.registrations[0].egressFrames(3))
 	leases := map[uint16]uint32{}
 	for _, frame := range frames {
 		leases[frame.PathID] = frame.LeaseSeconds
-		if frame.EgressMode != uint8(config.ModeBurst) {
-			t.Fatalf("frame %d has egress mode %d, want burst", frame.PathID, frame.EgressMode)
+		if frame.EgressMode != uint8(config.ModeRepeater) {
+			t.Fatalf("frame %d has egress mode %d, want repeater", frame.PathID, frame.EgressMode)
 		}
 	}
 	if len(leases) != 3 || leases[0] != registrationLeaseSeconds || leases[1] != 0 || leases[2] != registrationLeaseSeconds {

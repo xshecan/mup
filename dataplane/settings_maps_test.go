@@ -35,7 +35,7 @@ func TestApplyClientSettingsPublishesHealthyStateLast(t *testing.T) {
 		InstanceNonce: 1,
 		AdvertisedIP:  netip.MustParseAddr("192.0.2.10"),
 		HealthyMask:   1,
-		Groups:        []GroupSettings{{ListenPort: 51820, Mode: config.ModeFallback, PathMask: 1}},
+		Groups:        []GroupSettings{{ListenPort: 51820, Mode: config.ModeFailover, PathMask: 1}},
 		Paths: []PathSettings{{
 			DestinationIP: netip.MustParseAddr("198.51.100.1"),
 			SourceIP:      netip.MustParseAddr("203.0.113.1"),

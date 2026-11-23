@@ -22,9 +22,9 @@ client:
           - 203.0.113.5:9000-9099/udp
           - 203.0.113.5%eth1:9100/icmp
       egress:
-        mode: burst
+        mode: repeater
         routes:
-          - 203.0.113.5:9200/icmp via 198.51.100.0/28 balance per-packet
+          - 203.0.113.5:9200/icmp via 198.51.100.0/28 per-packet
           - 203.0.113.6:9300/udp
     - port: 51821
       routes:
@@ -34,7 +34,7 @@ client:
 		t.Fatalf("Load: %v", err)
 	}
 	split := app.Client.Groups[0]
-	if !split.Split() || split.Mode != ModeBalancer || split.EgressMode != ModeBurst {
+	if !split.Split() || split.Mode != ModeBalancer || split.EgressMode != ModeRepeater {
 		t.Fatalf("split group = %#v", split)
 	}
 	if len(split.Paths) != 2 || split.Paths[0].LastPort != 9099 || split.Paths[1].Interface != "eth1" {
@@ -92,7 +92,7 @@ func TestLoadClientRejectsBadDirections(t *testing.T) {
         routes:
           - 203.0.113.5:9000/udp
       egress:
-        mode: burst`,
+        mode: repeater`,
 			want: "at least one route",
 		},
 		{
@@ -177,7 +177,7 @@ client:
       ingress:
         routes:
           - 203.0.113.5:9000/icmp via 198.51.100.1
-          - 203.0.113.5:9100/icmp via 87.107.117.192/28 balance per-packet
+          - 203.0.113.5:9100/icmp via 87.107.117.192/28 per-packet
           - 203.0.113.5:9200/udp via 194.225.72.10
       egress:
         routes:
@@ -237,58 +237,30 @@ func mustPath(t *testing.T, raw string) Path {
 	return path
 }
 
-func TestLoadClientAcceptsOldDirectionKeys(t *testing.T) {
+// TestLoadClientRejectsRemovedNames checks that the names from before the
+// ingress and egress rename, and the old mode names, do not load.
+func TestLoadClientRejectsRemovedNames(t *testing.T) {
 	t.Parallel()
 
-	app, err := Load(writeFile(t, `
+	const head = `
 client:
   advertise: 192.0.2.10
   servers:
     - port: 51820
-      upstream:
-        mode: balancer
-        routes:
-          - 203.0.113.5:9000/udp
-      downstream:
-        mode: burst
-        routes:
-          - 203.0.113.5:9200/udp
-`))
-	if err != nil {
-		t.Fatalf("Load with the old keys: %v", err)
-	}
-	group := app.Client.Groups[0]
-	if !group.Split() || group.Mode != ModeBalancer || group.EgressMode != ModeBurst ||
-		len(group.Paths) != 1 || len(group.EgressPaths) != 1 {
-		t.Fatalf("group = %#v", group)
-	}
-}
-
-func TestLoadClientRejectsNewAndOldDirectionKeys(t *testing.T) {
-	t.Parallel()
-
-	const block = `
-        mode: balancer
+`
+	const routes = `
         routes:
           - 203.0.113.5:9000/udp
 `
-	for name, keys := range map[string][2]string{
-		"ingress and upstream":  {"ingress", "upstream"},
-		"egress and downstream": {"egress", "downstream"},
+	for name, body := range map[string]string{
+		"upstream":   "      upstream:" + routes + "      egress:" + routes,
+		"downstream": "      ingress:" + routes + "      downstream:" + routes,
+		"fallback":   "      mode: fallback\n      routes:\n        - 203.0.113.5:9000/udp\n",
+		"burst":      "      mode: burst\n      routes:\n        - 203.0.113.5:9000/udp\n",
+		"balance":    "      mode: balance\n      routes:\n        - 203.0.113.5:9000/udp\n",
 	} {
-		first, second := keys[0], keys[1]
-		other := "egress"
-		if first == "egress" {
-			other = "ingress"
-		}
-		_, err := Load(writeFile(t, `
-client:
-  advertise: 192.0.2.10
-  servers:
-    - port: 51820
-      `+first+`:`+block+`      `+second+`:`+block+`      `+other+`:`+block))
-		if err == nil || !strings.Contains(err.Error(), "not both") {
-			t.Fatalf("%s: err = %v, want a not both error", name, err)
+		if _, err := Load(writeFile(t, head+body)); err == nil || !strings.Contains(err.Error(), name) {
+			t.Fatalf("%s: err = %v, want an error that names it", name, err)
 		}
 	}
 }

@@ -37,7 +37,7 @@ Commands:
   add path SERVER[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP]
                                          Add a path to a group
   delete path ID                         Remove a path from a client
-  set mode fallback|balancer|burst       Change the path mode of a group
+  set mode failover|balancer|repeater    Change the path mode of a group
   version                                Print the version of mupctl
 
   Each list command also works after get, for example get paths.
@@ -55,7 +55,6 @@ Flags:
   --group LISTEN_PORT The group for add and set. A client with one group does
                       not need it.
   --egress            Add, delete, or set an egress path or the egress mode.
-  --down              Old name of --egress.
   --bridge            Add a path through a MUP bridge.
 `
 
@@ -140,7 +139,7 @@ func parseOptions(args []string) (options, error) {
 		switch {
 		case arg == "-w" || arg == "--watch":
 			opts.watch = true
-		case arg == "--egress" || arg == "--down":
+		case arg == "--egress":
 			opts.egress = true
 		case arg == "--bridge":
 			opts.bridge = true
@@ -232,8 +231,8 @@ func parseCommand(opts options) (command, error) {
 		return resetDrops, nil
 	case "add":
 		if len(args) != 3 && !(len(args) == 5 && args[3] == "via") &&
-			!(len(args) == 7 && args[3] == "via" && args[5] == "balance") {
-			return nil, fmt.Errorf("add path takes SERVER[%%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP | via POOL_CIDR balance MODE]")
+			!(len(args) == 6 && args[3] == "via") {
+			return nil, fmt.Errorf("add path takes SERVER[%%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP | via POOL_CIDR [per-peer|per-packet]]")
 		}
 		if !isPathResource(args[1]) {
 			return nil, fmt.Errorf("add supports only paths")

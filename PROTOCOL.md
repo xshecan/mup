@@ -170,7 +170,7 @@ An egress bridge carries the replies of an egress path. The server rewrites each
 | Inner header | 8 | The UDP or ICMP header of the reply, with no change. |
 | Payload | n | The WireGuard message or the control frame, with no change. |
 
-The transport header and the payload do not move. So the inner checksum stays valid, and a partial checksum stays partial. The server sends the wrapped reply from the source address of its route to the bridge, through the interface of that route. If the wrapped reply does not fit the MTU of that interface, the server drops it and counts reason 25. In an egress burst, the server removes the wrapper again after the copy of an egress bridge. So the next egress path gets the reply as it was.
+The transport header and the payload do not move. So the inner checksum stays valid, and a partial checksum stays partial. The server sends the wrapped reply from the source address of its route to the bridge, through the interface of that route. If the wrapped reply does not fit the MTU of that interface, the server drops it and counts reason 25. In the egress repeater mode, the server removes the wrapper again after the copy of an egress bridge. So the next egress path gets the reply as it was.
 
 The bridge program handles each packet to an address of the bridge host and a port of the bridge:
 
@@ -195,11 +195,11 @@ A peer sends a UDP packet to the listen port of a group. The client program then
 
 1. It makes sure that the packet is a valid WireGuard message with zero reserved bytes.
 2. It looks ingress the token of the peer endpoint. A new peer gets a token from `free_peer_tokens`. If the source IP of the new peer already has 1024 routes, the program drops the packet and counts reason 21.
-3. It picks one healthy path of the group. In burst mode, it picks every healthy path of the group.
+3. It picks one healthy path of the group. In repeater mode, it picks every healthy path of the group.
 4. It writes the token and rewrites the headers for the path.
 5. It sends the packet out of the path interface with `bpf_redirect_neigh`, which resolves the next hop.
 
-In burst mode, the program sends a clone on each healthy path of the group except the last one. For each clone, a FIB lookup gives the output interface and the MAC addresses. The original packet goes out on the last healthy path.
+In repeater mode, the program sends a clone on each healthy path of the group except the last one. For each clone, a FIB lookup gives the output interface and the MAC addresses. The original packet goes out on the last healthy path.
 
 ### Server ingress
 
@@ -259,26 +259,26 @@ A packet with a nonzero token arrives at the advertised IP. The client program t
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".docs/images/modes-dark.svg">
-  <img alt="Fallback, balancer, and burst modes" src=".docs/images/modes-light.svg">
+  <img alt="Failover, balancer, and repeater modes" src=".docs/images/modes-light.svg">
 </picture>
 
 The client program reads the healthy path mask from `path_state` for each packet. It keeps only the bits in the path mask of the group of the peer. The mode of the group then selects one of three rules:
 
-- Fallback: The program uses the healthy path with the lowest priority. The priority is the position of the path in the configuration.
+- Failover: The program uses the healthy path with the lowest priority. The priority is the position of the path in the configuration.
 - Balancer: The program computes a hash of the token and the mask, and uses it to pick one healthy path.
-- Burst: The program sends the packet on every healthy path.
+- Repeater: The program sends the packet on every healthy path.
 
 The balancer hash is `h = token * 0x9e3779b1 ^ mask * 0x85ebca6b`, then `h ^= h >> 16`. The index of the path in the list of healthy paths is `h % count`. A peer thus stays on one path until the set of healthy paths in its group changes. A health change in another group does not move the peer.
 
-Without egress paths, the server does not select paths. It replies on the path of the latest ingress packet of each route. After a failover, the first ingress packet on the new path moves the egress traffic too. In burst mode, the first copy to arrive sets the return path.
+Without egress paths, the server does not select paths. It replies on the path of the latest ingress packet of each route. After a failover, the first ingress packet on the new path moves the egress traffic too. In repeater mode, the first copy to arrive sets the return path.
 
 For a group with egress paths, the server picks the egress path of each reply from the healthy egress paths of the client. The egress mode uses the rules of the client:
 
-- Fallback: The server uses the healthy egress path with the lowest ID.
+- Failover: The server uses the healthy egress path with the lowest ID.
 - Balancer: The server hashes the token and the mask with the formula above.
-- Burst: The server sends the reply on every healthy egress path.
+- Repeater: The server sends the reply on every healthy egress path.
 
-In burst mode, the client keeps the first copy of each message for 2 seconds and drops the other copies with reason 16. If the client has no healthy egress path on the server, the server drops the reply and counts reason 15.
+In repeater mode, the client keeps the first copy of each message for 2 seconds and drops the other copies with reason 16. If the client has no healthy egress path on the server, the server drops the reply and counts reason 15.
 
 ## Control plane
 
@@ -341,7 +341,7 @@ The control frame is 48 bytes long, and all integers are big-endian.
 | 12 | 2 | path ID | 0 to 7, the slot of the path in the client. |
 | 14 | 2 | listen port | The listen port of the group of the path. |
 | 16 | 2 | server port | The server port. |
-| 18 | 1 | egress mode | In a EGRESS_REGISTER, the egress mode: 0 is fallback, 1 is balancer, and 2 is burst. Zero otherwise. |
+| 18 | 1 | egress mode | In a EGRESS_REGISTER, the egress mode: 0 is failover, 1 is balancer, and 2 is repeater. Zero otherwise. |
 | 19 | 1 | pool prefix | The prefix length of the return pool, 1 to 31, with flag bit 1. Zero otherwise. |
 | 20 | 4 | advertised IP | The client `-s` address. |
 | 24 | 4 | return IP | The return IP or the pool base of the path, or zero. In a PROBE_REPLY, the reflector that reached the client. |
@@ -385,12 +385,12 @@ Pinned BPF maps hold all dataplane state. Go writes the configuration and the re
 | Map | Type | Capacity | Key and value | Writer |
 | --- | --- | ---: | --- | --- |
 | `client_config` | array | 1 | Nonce, `-s`, and generation. | Go |
-| `path_groups` | hash | 8 | Listen port to mode, path mask, egress path mask, and flags. Flag bit 0 turns on the duplicate filter of an egress burst. The return IP field is not used. | Go |
+| `path_groups` | hash | 8 | Listen port to mode, path mask, egress path mask, and flags. Flag bit 0 turns on the duplicate filter of the egress repeater mode. The return IP field is not used. | Go |
 | `path_config` | array | 8 | Destination, source, interface, port, transport, and priority of each path. | Go |
 | `path_returns` | array | 8 | Return IP and flags of each path. | Go |
 | `path_state` | array | 1 | Healthy mask and generation. | Go |
 | `client_down_paths` | array | 8 | Server, return IP or pool, port, and transport of each egress path, and the time of its latest reply. | Both |
-| `client_duplicate_cache` | LRU hash | 16384 | Token and first 24 WireGuard bytes to the time seen, for an egress burst. | Program |
+| `client_duplicate_cache` | LRU hash | 16384 | Token and first 24 WireGuard bytes to the time seen, for the egress repeater mode. | Program |
 | `client_peer_by_endpoint` | hash | 4096 | Peer endpoint to token and last-seen time. | Program |
 | `client_endpoint_by_token` | hash | 4096 | Token to peer endpoint, interface, and last-seen time. | Program |
 | `free_peer_tokens` | queue | 4095 | Unused tokens. | Both |
@@ -445,7 +445,7 @@ The sweep copies each map before it deletes entries, because a deletion restarts
 | Registration lease | 30 s | Life of a registration without a new REGISTER. |
 | Route idle timeout | 180 s | Life of a route without traffic. |
 | Quarantine | 120 s | Wait before a token or port goes back into use. |
-| Duplicate window | 2 s | Time in which the server drops a burst copy, and the client drops an egress burst copy. |
+| Duplicate window | 2 s | Time in which the server drops a repeater copy, and the client drops an egress repeater copy. |
 | Egress path probe | 2 s | Time between two probes of each egress path. |
 | Egress path health | 6 s | Life of the health of an egress path or a pool member without a probe reply. |
 | Sweep | 1 s | Time between two sweeps. |
@@ -469,10 +469,10 @@ A program returns `TCX_NEXT` for traffic that it does not own. This traffic incl
 
 | Reason | Name | Meaning |
 | ---: | --- | --- |
-| 1 | `MALFORMED_IPV4` | The IPv4 header is short, or its length is wrong. Only the burst code counts it, after a clone. |
-| 2 | `IPV4_OPTIONS` | The IPv4 header has options. Only the burst code counts it, after a clone. |
-| 3 | `IPV4_FRAGMENT` | The packet is a fragment. Only the burst code counts it, after a clone. |
-| 4 | `MALFORMED_L4` | The UDP or ICMP header is short, or the UDP length is wrong. Only the burst code counts it, after a clone. |
+| 1 | `MALFORMED_IPV4` | The IPv4 header is short, or its length is wrong. Only the repeater code counts it, after a clone. |
+| 2 | `IPV4_OPTIONS` | The IPv4 header has options. Only the repeater code counts it, after a clone. |
+| 3 | `IPV4_FRAGMENT` | The packet is a fragment. Only the repeater code counts it, after a clone. |
+| 4 | `MALFORMED_L4` | The UDP or ICMP header is short, or the UDP length is wrong. Only the repeater code counts it, after a clone. |
 | 5 | `WG_TYPE` | The WireGuard type is not 1 to 4. |
 | 6 | `WG_LENGTH` | The WireGuard length does not match the type. |
 | 7 | `WG_RESERVED` | The reserved bytes are not zero from WireGuard, or not a token from 1 to 4095 between MUP endpoints. |
@@ -484,9 +484,9 @@ A program returns `TCX_NEXT` for traffic that it does not own. This traffic incl
 | 13 | `MAP_INVARIANT` | A forward entry and its reverse entry disagree, or a map update failed. |
 | 14 | `ROUTE_MISS` | The server has no route for the target port, or the client has no peer for the token. |
 | 15 | `NO_PATH` | The group of the peer has no healthy path, or the client has no healthy egress path on the server. |
-| 16 | `DUPLICATE` | The server already forwarded this burst copy, or the client already passed this egress burst copy. |
-| 17 | `FIB` | A burst clone got no FIB result for its path. MUP skips the clone, not the packet. |
-| 18 | `NEIGHBOR` | A burst clone failed to redirect. MUP skips the clone, not the packet. |
+| 16 | `DUPLICATE` | The server already forwarded this repeater copy, or the client already passed this egress repeater copy. |
+| 17 | `FIB` | A repeater clone got no FIB result for its path. MUP skips the clone, not the packet. |
+| 18 | `NEIGHBOR` | A repeater clone failed to redirect. MUP skips the clone, not the packet. |
 | 19 | `TAIL_CALL` | Reserved. Version 1 does not count it. |
 | 20 | `CHECKSUM` | A rewrite failed, for example on a UDP packet without a checksum and with a payload longer than 9216 bytes. |
 | 21 | `SOURCE_LIMIT` | The source IP of a new peer already has 1024 routes on the client. |
@@ -551,7 +551,7 @@ The API is JSON over HTTP/1.1. The file `api/api.go` defines the request and res
 | `GET` | `/v1/paths` | Client | The paths with their health. |
 | `POST` | `/v1/paths` | Client | Adds a path. The body is `{"path": "SERVER[%IFACE]:PORT/udp", "listen_port": 51820}`. With `"egress": true`, it adds an egress path. With `"bridge": true`, the path goes through the bridge that it names. |
 | `DELETE` | `/v1/paths/{id}` | Client | Removes a path. With `?direction=egress`, it removes an egress path. |
-| `PUT` | `/v1/mode` | Client | Changes the mode of a group. The body is `{"mode": "burst", "listen_port": 51820}`. With `"egress": true`, it changes the egress mode. |
+| `PUT` | `/v1/mode` | Client | Changes the mode of a group. The body is `{"mode": "repeater", "listen_port": 51820}`. With `"egress": true`, it changes the egress mode. |
 | `GET` | `/v1/peers` | Both | The peers of a client, or the peer routes of a server. |
 | `GET` | `/v1/clients` | Server | The registered clients with their paths. |
 | `GET` | `/v1/reflectors` | Server | The members of the return pools and their health. |
@@ -563,7 +563,7 @@ A failed request returns a JSON object with an `error` field. The status is 400 
 
 ### Runtime path changes
 
-A client has eight path slots. The slot number is the path ID in REGISTER frames, the bit in the healthy mask, and the index in `path_config`. A new path takes the lowest free slot and the next free priority. In fallback mode, a new path thus comes after the existing paths of its group. The groups do not change while the daemon runs.
+A client has eight path slots. The slot number is the path ID in REGISTER frames, the bit in the healthy mask, and the index in `path_config`. A new path takes the lowest free slot and the next free priority. In failover mode, a new path thus comes after the existing paths of its group. The groups do not change while the daemon runs.
 
 The client adds a path in this order:
 
@@ -597,7 +597,7 @@ MUP has no keys and no authentication of its own. It relies on these facts:
 
 A host can spoof the source address of a registered client. That host can then register paths for the client, change its return mode, and drop or misroute its traffic. It cannot read or forge WireGuard payloads. Use MUP only on networks where you control the hosts and the routing.
 
-The duplicate cache is a filter for burst copies, not a replay defense. WireGuard provides replay protection for its transport data.
+The duplicate cache is a filter for repeater copies, not a replay defense. WireGuard provides replay protection for its transport data.
 
 A bridge keeps the source of each ingress packet, and it sends only MUP packets and only to its server. So the ingress through a bridge gives no host a new way to spoof an address. On the egress, a bridge sends packets with any source. So it takes wrapped replies only from its server and its `allow` ranges, and only with a MUP packet inside. A host that spoofs the address of the server can still make the bridge send MUP packets to any address.
 

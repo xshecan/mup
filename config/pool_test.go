@@ -13,8 +13,8 @@ func TestParsePathPool(t *testing.T) {
 		prefix  uint8
 		balance Balance
 	}{
-		{"203.0.113.5:5300/icmp via 194.225.72.0/24 balance per-peer", "194.225.72.0", 24, BalancePerPeer},
-		{"203.0.113.5:5300/udp via 198.51.100.0/24 balance per-packet", "198.51.100.0", 24, BalancePerPacket},
+		{"203.0.113.5:5300/icmp via 194.225.72.0/24 per-peer", "194.225.72.0", 24, BalancePerPeer},
+		{"203.0.113.5:5300/udp via 198.51.100.0/24 per-packet", "198.51.100.0", 24, BalancePerPacket},
 	}
 	for _, tt := range tests {
 		path, err := ParsePath(tt.raw)
@@ -36,14 +36,14 @@ func TestParsePathPool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if path.Balance != BalancePerPeer || path.String() != "203.0.113.5:5300/icmp via 10.0.0.0/30 balance per-peer" {
+	if path.Balance != BalancePerPeer || path.String() != "203.0.113.5:5300/icmp via 10.0.0.0/30 per-peer" {
 		t.Fatalf("default balance string = %q", path.String())
 	}
 }
 
 func TestParsePathPoolNormalizesBase(t *testing.T) {
 	t.Parallel()
-	path, err := ParsePath("203.0.113.5:5300/icmp via 194.225.72.33/24 balance per-peer")
+	path, err := ParsePath("203.0.113.5:5300/icmp via 194.225.72.33/24 per-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,12 +55,13 @@ func TestParsePathPoolNormalizesBase(t *testing.T) {
 func TestParsePathErrors(t *testing.T) {
 	t.Parallel()
 	bad := []string{
-		"203.0.113.5:5300/udp via 194.225.72.0/24 balance bogus",
-		"203.0.113.5:5300/udp via 194.225.72.10 balance per-peer",
+		"203.0.113.5:5300/udp via 194.225.72.0/24 bogus",
+		"203.0.113.5:5300/udp via 194.225.72.10 per-peer",
 		"203.0.113.5:5300/udp via 194.225.72.0/33",
 		"203.0.113.5:5300/udp via 194.225.72.0/32",
 		"203.0.113.5:5300/udp via 0.0.0.0/24",
 		"203.0.113.5:5300/udp via 194.225.72.0/24 drop per-peer",
+		"203.0.113.5:5300/udp via 194.225.72.0/24 balance per-peer",
 		"203.0.113.5:5300/udp via 194.225.72.0/24 balance",
 	}
 	for _, raw := range bad {
@@ -72,7 +73,7 @@ func TestParsePathErrors(t *testing.T) {
 
 func TestSameRouteIgnoresThePool(t *testing.T) {
 	t.Parallel()
-	path, err := ParsePath("203.0.113.5:5300/icmp via 194.225.72.0/24 balance per-packet")
+	path, err := ParsePath("203.0.113.5:5300/icmp via 194.225.72.0/24 per-packet")
 	if err != nil {
 		t.Fatal(err)
 	}

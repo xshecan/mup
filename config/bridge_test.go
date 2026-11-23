@@ -67,7 +67,7 @@ func TestLoadClientRejectsBadBridges(t *testing.T) {
       ingress:
         bridges: [5.6.7.8:9000/udp]
       egress:
-        mode: burst`, "at least one route or bridge"},
+        mode: repeater`, "at least one route or bridge"},
 	} {
 		_, err := Load(writeFile(t, "client:\n  advertise: 192.0.2.10\n  servers:"+test.servers+"\n"))
 		if err == nil || !strings.Contains(err.Error(), test.want) {

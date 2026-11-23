@@ -17,9 +17,9 @@
 <rect x="112" y="32" width="152" height="200" rx="8" fill="#f5f7fa" stroke="#d9dde4" stroke-width="1"/>
 <path d="M112 138 L264 138" fill="none" stroke="#d9dde4" stroke-width="1"/>
 <text class="s" x="188" y="80" font-size="16" font-weight="500" fill="#111827" text-anchor="middle">port 51820</text>
-<text class="s" x="188" y="100" font-size="14" font-weight="400" fill="#4b5565" text-anchor="middle">fallback</text>
+<text class="s" x="188" y="100" font-size="14" font-weight="400" fill="#4b5565" text-anchor="middle">failover</text>
 <text class="s" x="188" y="180" font-size="16" font-weight="500" fill="#111827" text-anchor="middle">port 51821</text>
-<text class="s" x="188" y="200" font-size="14" font-weight="400" fill="#4b5565" text-anchor="middle">burst</text>
+<text class="s" x="188" y="200" font-size="14" font-weight="400" fill="#4b5565" text-anchor="middle">repeater</text>
 <text class="m" x="356" y="52" font-size="14" font-weight="400" fill="#4b5565" text-anchor="middle">udp</text>
 <path d="M270 60 L442 60" fill="none" stroke="#b45309" stroke-width="2"/>
 <polygon points="448,60 440,56 440,64" fill="#b45309"/>

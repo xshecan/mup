@@ -27,8 +27,8 @@ func testClientSettings() ClientSettings {
 		Generation:    7,
 		HealthyMask:   0b111,
 		Groups: []GroupSettings{
-			{ListenPort: 51820, Mode: config.ModeBurst, PathMask: 0b011},
-			{ListenPort: 51821, Mode: config.ModeFallback, PathMask: 0b100},
+			{ListenPort: 51820, Mode: config.ModeRepeater, PathMask: 0b011},
+			{ListenPort: 51821, Mode: config.ModeFailover, PathMask: 0b100},
 		},
 		Paths: []PathSettings{
 			path("198.51.100.5", 5000, protocol.TransportICMP, 0),
@@ -52,11 +52,11 @@ func TestEncodeClientSettings(t *testing.T) {
 		t.Fatalf("advertised IP bytes = %v", got)
 	}
 	first := groups[51820]
-	if first.Mode != uint8(config.ModeBurst) || first.PathMask != 0b011 {
+	if first.Mode != uint8(config.ModeRepeater) || first.PathMask != 0b011 {
 		t.Fatalf("first group = %#v", first)
 	}
 	second := groups[51821]
-	if second.Mode != uint8(config.ModeFallback) || second.Flags != 0 || second.PathMask != 0b100 || second.ReturnIp != 0 {
+	if second.Mode != uint8(config.ModeFailover) || second.Flags != 0 || second.PathMask != 0b100 || second.ReturnIp != 0 {
 		t.Fatalf("second group = %#v", second)
 	}
 	if len(paths) != 8 || paths[0].Ifindex != 4 ||
@@ -73,7 +73,7 @@ func TestEncodeClientSettingsRejectsInvalidGroups(t *testing.T) {
 		"no groups":        func(s *ClientSettings) { s.Groups = nil },
 		"zero listen port": func(s *ClientSettings) { s.Groups[0].ListenPort = 0 },
 		"duplicate port":   func(s *ClientSettings) { s.Groups[1].ListenPort = s.Groups[0].ListenPort },
-		"invalid mode":     func(s *ClientSettings) { s.Groups[0].Mode = config.ModeBurst + 1 },
+		"invalid mode":     func(s *ClientSettings) { s.Groups[0].Mode = config.ModeRepeater + 1 },
 		"empty mask":       func(s *ClientSettings) { s.Groups[1].PathMask = 0 },
 		"shared path":      func(s *ClientSettings) { s.Groups[1].PathMask = 0b110 },
 		"path in no group": func(s *ClientSettings) { s.Groups[0].PathMask = 0b001 },

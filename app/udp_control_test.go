@@ -462,7 +462,7 @@ func TestSplitUDPPathTakesItsACKFromAEgressPath(t *testing.T) {
 	listener := &fakeUDPListener{}
 	sockets := newUDPControlSockets(listener.listen)
 	registration := testUDPRegistration(testServerA, 0)
-	registration.egresses = newEgressSet(config.ModeFallback)
+	registration.egresses = newEgressSet(config.ModeFailover)
 	registration.egresses.set(0, config.Path{Server: testServerA.Addr(), ServerPort: 9200, Transport: protocol.TransportUDP})
 	path, err := sockets.openPath(registration, 0)
 	if err != nil {

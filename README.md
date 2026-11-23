@@ -31,10 +31,10 @@ One client can also serve several WireGuard targets. A path group joins one list
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".docs/images/modes-dark.svg">
-  <img alt="Fallback, balancer, and burst modes" src=".docs/images/modes-light.svg">
+  <img alt="Failover, balancer, and repeater modes" src=".docs/images/modes-light.svg">
 </picture>
 
-Each group has one of three path modes. Fallback uses the first healthy path. Balancer spreads the peers over the healthy paths. Burst sends a copy on every healthy path, and the server keeps the first copy that arrives.
+Each group has one of three path modes. Failover uses the first healthy path. Balancer spreads the peers over the healthy paths. Repeater sends a copy on every healthy path, and the server keeps the first copy that arrives.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".docs/images/return-modes-dark.svg">
@@ -121,12 +121,12 @@ client:
   advertise: 192.0.2.10
   servers:
     - port: 51820
-      mode: fallback
+      mode: failover
       routes:
         - 203.0.113.5:5000/udp
         - 203.0.113.6:5000/icmp
     - port: 51821
-      mode: burst
+      mode: repeater
       routes:
         - 198.51.100.20:6000/udp via 1.1.1.1
         - 198.51.100.20:6000/icmp via 9.9.9.9
@@ -143,7 +143,7 @@ server:
 | `client.advertise` | `-s` | The advertised IP. |
 | `client.control_socket` | `--control-socket` | Optional. The socket for `mupctl`. An empty value turns the socket off. |
 | `client.servers[].port` | `-p` | The port where the group receives packets from its peers. |
-| `client.servers[].mode` | `--mode` | Optional. The path mode of the group. The default is `fallback`. |
+| `client.servers[].mode` | `--mode` | Optional. The path mode of the group. The default is `failover`. |
 | `client.servers[].ingress`, `client.servers[].egress` | `--ingress`, `--egress` | Optional. A `mode` and `routes` for each direction, in place of `mode` and `routes`. See [Separate ingress and egress paths](#separate-ingress-and-egress-paths). |
 | `client.servers[].ingress.bridges`, `client.servers[].egress.bridges` | `--ingress-bridge`, `--egress-bridge` | Optional. The paths through a bridge in each direction. See [Bridges](#bridges). |
 | `client.servers[].routes` | `-u` | The paths of the group, in the form of the `-u` flag. A path can end with `via RETURN_IP`. The server port of a path can be a range, `FIRST-LAST`. See [Server port ranges](#server-port-ranges). |
@@ -188,14 +188,14 @@ client:
   servers:
     - port: 51820
       ingress:
-        mode: fallback
+        mode: failover
         routes:
           - 203.0.113.5:5000-5099/udp
           - 203.0.113.5:5100/icmp
       egress:
         mode: balancer
         routes:
-          - 203.0.113.5:5200/icmp via 198.51.100.0/28 balance per-packet
+          - 203.0.113.5:5200/icmp via 198.51.100.0/28 per-packet
           - 203.0.113.6:5300/udp
 ```
 
@@ -212,7 +212,7 @@ An ingress route can take a `via`, which reflects the ingress to the server. See
 
 The server probes each egress path every 2 seconds, through each member of a pool, and the client answers on an ingress path. An egress path, or a member of its pool, is healthy while these probes come back. So a reflector that answers the ping of the server but does not reach the client carries no replies. The server also sends each ACK on the egress paths, so an ingress path stays healthy even with no packet back on its own flow.
 
-In the egress burst mode, the server sends each reply on every healthy egress path, and the client passes the first copy to the peer. A server without egress path support ignores the egress paths, and its replies come back on the ingress paths.
+In the egress repeater mode, the server sends each reply on every healthy egress path, and the client passes the first copy to the peer. A server without egress path support ignores the egress paths, and its replies come back on the ingress paths.
 
 ### Ingress reflect
 
@@ -222,7 +222,7 @@ A `via` on an ingress route reflects the path, in the other direction from an eg
       ingress:
         routes:
           - 160.119.74.88:9000/icmp via 6.7.8.9
-          - 160.119.74.88:9100/icmp via 87.107.117.192/28 balance per-packet
+          - 160.119.74.88:9100/icmp via 87.107.117.192/28 per-packet
           - 160.119.74.88:9200/udp via 194.225.72.10
 ```
 
@@ -230,7 +230,7 @@ These rules apply:
 
 - An ICMP ingress route reflects. The client sends an Echo Request to the via host, with the server as the source. The via host then answers the server with an Echo Reply, and the server accepts the reply as the ingress.
 - A UDP ingress route forges the source. The client sends to the server with the via as the source, because a plain host does not reflect a UDP packet.
-- `via BASE/PREFIX balance per-peer` or `per-packet` reflects through a pool, as an egress route does.
+- `via BASE/PREFIX`, with an optional `per-peer` or `per-packet` after it, reflects through a pool, as an egress route does. The default is `per-peer`.
 - A `via` on an ingress route is valid only in a group with `ingress` and `egress`. A symmetric route in `routes` keeps the return meaning of `via`.
 
 The client sends each REGISTER reflected through every member, so the server registers one path for each member that reflects. The client keeps the members whose ACK comes back, and spreads the ingress over them. A member that stops reflecting loses its registration and drops out, so the path carries no ingress through a dead member.
@@ -269,7 +269,7 @@ A bridge entry has the form of a route, with the bridge address in place of the 
 
 - An ingress bridge has no `via`. It can have a port range and `%IFACE`.
 - An egress bridge can have `via`. It has one port and no `%IFACE`. Without `via`, it sends the replies from the bridge address.
-- The routes and the bridges of a direction share its 8 path slots, and the routes come first. So in the fallback mode, a healthy route carries the traffic before a bridge.
+- The routes and the bridges of a direction share its 8 path slots, and the routes come first. So in the failover mode, a healthy route carries the traffic before a bridge.
 - The `port` range of the bridge must include the ports of all bridge entries. The bridge sends the ingress to its server on the same port.
 
 The bridge takes wrapped replies only from its server. A server behind NAT reaches the bridge from its NAT address, so put that address in `bridge.allow`. The bridge passes every other packet to the kernel, so a normal ping to the bridge still gets its reply.
@@ -332,7 +332,7 @@ The command `mup --config FILE` reads a [configuration file](#configuration-file
 
 ```text
 mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP]" [-u ...] -s CLIENT_IP
-           [-r RETURN_IP] [--mode fallback|balancer|burst] [--control-socket PATH]
+           [-r RETURN_IP] [--mode failover|balancer|repeater] [--control-socket PATH]
 mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp" [--ingress ...]
            --egress "SERVER_IP:PORT/udp|icmp [via RETURN_IP]" [--egress ...] -s CLIENT_IP
            [--ingress-bridge "BRIDGE_IP[%IFACE]:PORT[-LAST]/udp|icmp"] [--ingress-bridge ...]
@@ -346,11 +346,11 @@ mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp" [--
 | `-u` | `SERVER_IP[%IFACE]:PORT/udp` or `/icmp`, then optionally `via RETURN_IP` | One path to a server. Repeat the flag for up to 8 paths. The optional `%IFACE` binds the path to one interface. The optional `via RETURN_IP` sets the return IP of the path. `PORT` can be a range `FIRST-LAST`, see [Server port ranges](#server-port-ranges). |
 | `-s` | IPv4 | The advertised IP. It must be an address of the client host, and no other active client of the server can use it. |
 | `-r` | IPv4 | Optional. The return IP of each `-u` path without its own `via`. On UDP paths, it is the spoofed source of replies. On ICMP paths, it is the reflector host. |
-| `--mode` | `fallback`, `balancer`, `burst` | The path mode. The default is `fallback`. |
+| `--mode` | `failover`, `balancer`, `repeater` | The path mode. The default is `failover`. |
 | `--ingress` | `SERVER_IP[%IFACE]:PORT/udp` or `/icmp` | One ingress path of a group with separate egress paths. Use it with `--egress`, and not with `-u`. |
 | `--egress` | `SERVER_IP:PORT/udp` or `/icmp`, then optionally `via RETURN_IP` | One egress path. See [Separate ingress and egress paths](#separate-ingress-and-egress-paths). |
 | `--ingress-bridge`, `--egress-bridge` | `BRIDGE_IP:PORT/udp` or `/icmp` | One ingress path or egress path through a bridge. An egress bridge can end with `via RETURN_IP`. See [Bridges](#bridges). |
-| `--ingress-mode`, `--egress-mode` | `fallback`, `balancer`, `burst` | The ingress mode and the egress mode. The default is `fallback`. |
+| `--ingress-mode`, `--egress-mode` | `failover`, `balancer`, `repeater` | The ingress mode and the egress mode. The default is `failover`. |
 | `--control-socket` | path | The socket for `mupctl`. The default is `/run/mup/client.sock`. An empty value turns the socket off. |
 
 ### Server
@@ -389,7 +389,7 @@ mup bridge -s SERVER_IP -p PORT[-LAST] [-a CIDR] [-a ...] [--control-socket PATH
 | --- | --- | --- |
 | `mupctl status` | all | Shows an overview. A client lists its groups and paths, and a server lists its clients. A bridge shows its server and the packets that it sent in each direction. |
 | `mupctl groups` | client | Lists the groups with their mode, healthy paths, and peers. |
-| `mupctl paths` | client | Lists the paths with their server port, return IP, health, last ACK, and round-trip time. With `-o wide`, it also shows the port range, the priority, and the missed ACKs. |
+| `mupctl paths` | client | Lists the paths with their server port, return IP, state, the age of the last answer, and round-trip time. With `-o wide`, it also shows the port range, the priority, and the missed ACKs. |
 | `mupctl peers` | both | Lists the WireGuard peers of a client, or the peer routes of a server. |
 | `mupctl clients` | server | Lists the registered clients with their paths, peers, and lease. |
 | `mupctl reflectors` | server | Lists the members of the return pools and their health. |
@@ -397,7 +397,7 @@ mup bridge -s SERVER_IP -p PORT[-LAST] [-a CIDR] [-a ...] [--control-socket PATH
 | `mupctl reset drops` | all | Sets every drop counter to zero. The counters also start from zero at each new map, for example after an upgrade that changes their layout. |
 | `mupctl add path SERVER[%IFACE]:PORT[-LAST]/udp [via RETURN_IP]` | client | Adds a path to a group. The value uses the form of the `-u` flag. |
 | `mupctl delete path ID` | client | Removes a path. |
-| `mupctl set mode burst` | client | Changes the path mode of a group to `fallback`, `balancer`, or `burst`. |
+| `mupctl set mode repeater` | client | Changes the path mode of a group to `failover`, `balancer`, or `repeater`. |
 | `mupctl add path --egress SERVER:PORT/udp [via RETURN_IP]` | client | Adds an egress path to a group with separate egress paths. `delete path --egress ID` removes one, and `set mode --egress MODE` changes the egress mode. |
 | `mupctl add path --bridge BRIDGE:PORT/udp` | client | Adds an ingress path through a bridge. With `--egress`, it adds an egress path through a bridge. `delete path` removes either one. |
 
@@ -414,16 +414,16 @@ Tokens:   3/4095
 Drops:    37 (NO_PATH 30, WG_LENGTH 7)
 
 GROUP   MODE       PATHS         PEERS
-51820   fallback   2/2 healthy   2
-51821   burst      0/1 healthy   1
+51820   failover   2/2 healthy   2
+51821   repeater   0/1 healthy   1
 
-ID   GROUP   SERVER               TRANSPORT   VIA       INTERFACE   STATUS      IN USE   LAST ACK   RTT
-0    51820   203.0.113.5:5000     udp         -         eth0        healthy     yes      4s         12.3ms
-1    51820   203.0.113.6:5000     icmp        -         eth1        healthy     no       7s         18.7ms
-2    51821   198.51.100.20:6000   udp         1.1.1.1   eth2        unhealthy   no       2m10s      64.1ms
+ID   GROUP   SERVER               TRANSPORT   VIA       INTERFACE   STATE       SEEN        RTT
+0    51820   203.0.113.5:5000     udp         -         eth0        active      4s ago      12.3ms
+1    51820   203.0.113.6:5000     icmp        -         eth1        standby     7s ago      18.7ms
+2    51821   198.51.100.20:6000   udp         1.1.1.1   eth2        unhealthy   2m10s ago   64.1ms
 ```
 
-The IN USE column shows the paths that carry traffic in the mode of their group. In fallback mode, only the first healthy path of the group carries traffic.
+The STATE column joins the health of a path and its use. A healthy path is `active` while its group sends traffic on it, and `standby` while it waits. In failover mode, only the first healthy path of the group is active. The SEEN column shows the age of the last answer of the server.
 
 ```text
 $ sudo mupctl peers
@@ -510,11 +510,11 @@ The integration tests create disposable network namespaces and private bpffs mou
 
 - UDP and ICMP round trips in the direct and reflected modes.
 - Two groups that lead to two WireGuard targets.
-- The burst, fallback, and balancer modes, and a failover after a server stops.
+- The repeater, failover, and balancer modes, and a failover after a server stops.
 - A target on the server host, on the loopback address and on another address.
 - The limit of routes for one source IP.
 - A normal ping with the server port as its identifier.
-- Separate ingress and egress paths: a failover of the egress paths only, and an egress burst.
+- Separate ingress and egress paths: a failover of the egress paths only, and an egress repeater.
 - A bridge for the ingress and for a reflected egress, with a server that cannot spoof, and the failure and return of the bridge.
 
 These tests pass on Linux 6.8 (Ubuntu 24.04) and on Linux 6.12 (Debian 13). To run them with a daemon that you built before, set `MUP_BINARY` to its path. To measure real PPS, bandwidth, drops, and CPU, use the namespace topology with the production NICs.

@@ -67,7 +67,7 @@ client:
   control_socket: ""
   servers:
     - port: 51820
-      mode: burst
+      mode: repeater
       routes:
         - 203.0.113.5:5000/udp via 1.1.1.1
         - 203.0.113.6%eth1:5000/icmp via 9.9.9.9
@@ -89,14 +89,14 @@ client:
 		t.Fatalf("control socket = %q, want it turned off", client.ControlSocket)
 	}
 	first, second := client.Groups[0], client.Groups[1]
-	if first.ListenPort != 51820 || first.Mode != ModeBurst || first.Paths[0].ReturnIP != netip.MustParseAddr("1.1.1.1") {
+	if first.ListenPort != 51820 || first.Mode != ModeRepeater || first.Paths[0].ReturnIP != netip.MustParseAddr("1.1.1.1") {
 		t.Fatalf("first group = %#v", first)
 	}
 	want := Path{Server: netip.MustParseAddr("203.0.113.6"), ServerPort: 5000, Transport: protocol.TransportICMP, Interface: "eth1", ReturnIP: netip.MustParseAddr("9.9.9.9")}
 	if len(first.Paths) != 2 || first.Paths[1] != want {
 		t.Fatalf("first group paths = %#v", first.Paths)
 	}
-	if second.ListenPort != 51821 || second.Mode != ModeFallback || second.Paths[0].ReturnIP.IsValid() || second.Paths[0].ServerPort != 6000 {
+	if second.ListenPort != 51821 || second.Mode != ModeFailover || second.Paths[0].ReturnIP.IsValid() || second.Paths[0].ServerPort != 6000 {
 		t.Fatalf("second group = %#v", second)
 	}
 }
@@ -153,7 +153,7 @@ func TestLoadRejectsInvalidFiles(t *testing.T) {
 		{"null path", client + "      routes: [~]\n", "server 51820: route 0"},
 		{"no paths", client, "at least one route"},
 		{"no groups", "client:\n  advertise: 192.0.2.10\n", "at least one server"},
-		{"unknown group key", client + "      routes: [203.0.113.5:5000/udp]\n      moode: burst\n", "moode"},
+		{"unknown group key", client + "      routes: [203.0.113.5:5000/udp]\n      moode: repeater\n", "moode"},
 		{"port overflow", "server:\n  port: 70000\n  target: 198.51.100.7:51820\n", "70000"},
 		{"zero port", "server:\n  port: 0\n  target: 198.51.100.7:51820\n", "server port"},
 		{"IPv6 target", "server:\n  port: 5000\n  target: \"[2001:db8::1]:51820\"\n", "server target"},

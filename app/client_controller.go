@@ -987,7 +987,7 @@ func (c *clientController) pathLocked(slot int, inUse [config.MaxPaths]bool) api
 }
 
 // inUseSlotsLocked mirrors the path choice of the client program in each group.
-// Fallback uses the healthy path with the lowest priority. The other modes use
+// Failover uses the healthy path with the lowest priority. The other modes use
 // every healthy path.
 func (c *clientController) inUseSlotsLocked() [config.MaxPaths]bool {
 	var inUse [config.MaxPaths]bool
@@ -1001,7 +1001,7 @@ func (c *clientController) inUseSlotsLocked() [config.MaxPaths]bool {
 			if !health.Healthy {
 				continue
 			}
-			if group.settings.Mode != config.ModeFallback {
+			if group.settings.Mode != config.ModeFailover {
 				inUse[slot] = true
 				continue
 			}

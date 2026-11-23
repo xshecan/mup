@@ -148,19 +148,19 @@ func encodeGroupSettings(group GroupSettings) (mupPathGroupV1, error) {
 	if group.ListenPort == 0 {
 		return mupPathGroupV1{}, errors.New("path group listen port must be nonzero")
 	}
-	if group.Mode > config.ModeBurst {
+	if group.Mode > config.ModeRepeater {
 		return mupPathGroupV1{}, fmt.Errorf("invalid mode %d for listen port %d", group.Mode, group.ListenPort)
 	}
 	if group.PathMask == 0 {
 		return mupPathGroupV1{}, fmt.Errorf("path group of listen port %d has no paths", group.ListenPort)
 	}
-	if group.EgressMode > config.ModeBurst {
+	if group.EgressMode > config.ModeRepeater {
 		return mupPathGroupV1{}, fmt.Errorf("invalid egress mode %d for listen port %d", group.EgressMode, group.ListenPort)
 	}
 	encoded := mupPathGroupV1{Mode: uint8(group.Mode), PathMask: group.PathMask, DownMask: group.DownMask}
-	// An egress burst sends copies on several egress paths, so the client
+	// An egress repeater sends copies on several egress paths, so the client
 	// drops the later copies.
-	if group.DownMask != 0 && group.EgressMode == config.ModeBurst {
+	if group.DownMask != 0 && group.EgressMode == config.ModeRepeater {
 		encoded.Flags = groupFlagDedup
 	}
 	return encoded, nil

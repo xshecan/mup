@@ -9,7 +9,7 @@ func SelectPaths(mode config.Mode, peerToken uint32, priorities []uint8, healthy
 		return nil
 	}
 	switch mode {
-	case config.ModeFallback:
+	case config.ModeFailover:
 		selected := -1
 		var selectedPriority uint8
 		for path, priority := range priorities {
@@ -38,7 +38,7 @@ func SelectPaths(mode config.Mode, peerToken uint32, priorities []uint8, healthy
 		hash := peerToken*0x9e3779b1 ^ uint32(healthyMask)*0x85ebca6b
 		hash ^= hash >> 16
 		return []int{healthy[int(hash%uint32(len(healthy)))]}
-	case config.ModeBurst:
+	case config.ModeRepeater:
 		selected := make([]int, 0, len(priorities))
 		for path := range priorities {
 			if path < 8 && healthyMask&(1<<path) != 0 {

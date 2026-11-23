@@ -44,7 +44,7 @@ func TestClientTalksOverAUnixSocket(t *testing.T) {
 	if err != nil || status.Role != RoleServer || status.Server.Port != 5000 {
 		t.Fatalf("Status = %#v, %v", status, err)
 	}
-	err = client.SetMode(context.Background(), "burst", 0)
+	err = client.SetMode(context.Background(), "repeater", 0)
 	var response *ResponseError
 	if !errors.As(err, &response) || response.StatusCode != http.StatusConflict || response.Message != "the daemon runs as a server" {
 		t.Fatalf("SetMode error = %#v", err)

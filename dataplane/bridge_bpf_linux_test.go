@@ -250,9 +250,9 @@ func TestServerWrapsTheReplyOfAEgressBridge(t *testing.T) {
 	assertReflectedICMP(t, append(bytes.Clone(output[:14]), inner...))
 }
 
-// In a burst, the copy of an egress bridge loses its wrapper after the clone, so
+// In repeater mode, the copy of an egress bridge loses its wrapper after the clone, so
 // the next path gets the reply as it was.
-func TestServerBurstUnwrapsAfterTheBridgeCopy(t *testing.T) {
+func TestServerRepeaterUnwrapsAfterTheBridgeCopy(t *testing.T) {
 	collection := egressBridgeCollection(t, 2, 0b11)
 	defer collection.Close()
 	result, output := targetReply(t, collection)

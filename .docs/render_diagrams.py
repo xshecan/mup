@@ -297,7 +297,7 @@ def groups():
 
     d.rect(112, 32, 152, 200, fill="raised")
     d.line(112, 138, 264, 138)
-    for y, port, mode in ((80, "port 51820", "fallback"), (180, "port 51821", "burst")):
+    for y, port, mode in ((80, "port 51820", "failover"), (180, "port 51821", "repeater")):
         d.name_text(188, y, port, anchor="middle")
         d.text(188, y + 20, mode, fill="secondary", anchor="middle")
 
@@ -319,17 +319,17 @@ def groups():
 def modes():
     d = Diagram(
         "modes", 372, "Path modes",
-        "Fallback uses the first healthy path. Balancer hashes each peer token to one healthy path. "
-        "Burst sends a copy on every healthy path, and the server keeps the first copy.",
+        "Failover uses the first healthy path. Balancer hashes each peer token to one healthy path. "
+        "Repeater sends a copy on every healthy path, and the server keeps the first copy.",
     )
     rows = [
-        ("Fallback", "--mode fallback", ["Uses the first healthy path,", "in the order of the -u flags."], [
+        ("Failover", "--mode failover", ["Uses the first healthy path,", "in the order of the -u flags."], [
             ("path 0, unhealthy", "down"), ("path 1, in use", "live"), ("path 2, standby", "idle"),
         ]),
         ("Balancer", "--mode balancer", ["Hashes each peer token to one", "healthy path."], [
             ("token 7", "live"), ("token 3", "live"), ("token 12", "live"),
         ]),
-        ("Burst", "--mode burst", ["Copies to every healthy path.", "The server keeps the first copy."], [
+        ("Repeater", "--mode repeater", ["Copies to every healthy path.", "The server keeps the first copy."], [
             ("copy", "live"), ("copy", "live"), ("copy", "live"),
         ]),
     ]
@@ -371,7 +371,7 @@ def return_modes():
     ]
     left, right = 216, 798
     center = (left + right) / 2
-    for index, (name, flags, upstream, downstream) in enumerate(rows):
+    for index, (name, flags, ingress, egress) in enumerate(rows):
         top = index * 112
         if index:
             d.line(0, top, WIDTH, top)
@@ -382,11 +382,11 @@ def return_modes():
         d.text(right, top + 16, "server", fill="muted", anchor="end")
         d.line(left, top + 24, left, top + 100, stroke="text", stroke_width=2)
         d.line(right, top + 24, right, top + 100, stroke="text", stroke_width=2)
-        d.text(center, top + 28, upstream, fill="secondary", anchor="middle", mono=True)
+        d.text(center, top + 28, ingress, fill="secondary", anchor="middle", mono=True)
         d.arrow(left + 1, top + 36, right - 1, top + 36)
-        if downstream:
+        if egress:
             d.arrow(right - 1, top + 64, left + 1, top + 64)
-            d.text(center, top + 84, downstream, fill="secondary", anchor="middle", mono=True)
+            d.text(center, top + 84, egress, fill="secondary", anchor="middle", mono=True)
         else:
             d.rect(center - 28, top + 52, 56, 24, fill="raised")
             d.text(center, top + 69, "-r", anchor="middle", mono=True)
@@ -401,7 +401,7 @@ def packet_flow():
     d = Diagram(
         "packet-flow", 576, "Packet flow",
         "A WireGuard packet goes from a peer to the MUP client, over a path to the MUP server, and to the "
-        "target. The reply returns on the latest upstream path. Only the legs between client and server carry a peer token.",
+        "target. The reply returns on the latest ingress path. Only the legs between client and server carry a peer token.",
     )
     peer, client, server, target = 64, 304, 528, 732
     for x, name in ((peer, "WireGuard peer"), (client, "MUP client"), (server, "MUP server"), (target, "WireGuard target")):
@@ -425,7 +425,7 @@ def packet_flow():
     leg(280, server, target, "3  UDP from the target port", NO_TOKEN)
     leg(344, target, server, "4  WireGuard reply", NO_TOKEN)
     note(server, 392, ["find route by port", "write token, pick return"])
-    leg(452, server, client, "5  On the latest upstream path", TOKEN)
+    leg(452, server, client, "5  On the latest ingress path", TOKEN)
     note(client, 500, ["check source, look up token", "clear token, rewrite to UDP"])
     leg(536, client, peer, "6  UDP from the listen port", NO_TOKEN)
     return d

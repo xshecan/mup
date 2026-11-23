@@ -88,19 +88,19 @@ func (r PortRange) MarshalText() ([]byte, error) {
 type Mode uint8
 
 const (
-	ModeFallback Mode = iota
+	ModeFailover Mode = iota
 	ModeBalancer
-	ModeBurst
+	ModeRepeater
 )
 
 func (m Mode) String() string {
 	switch m {
-	case ModeFallback:
-		return "fallback"
+	case ModeFailover:
+		return "failover"
 	case ModeBalancer:
 		return "balancer"
-	case ModeBurst:
-		return "burst"
+	case ModeRepeater:
+		return "repeater"
 	default:
 		return fmt.Sprintf("mode(%d)", uint8(m))
 	}
@@ -237,24 +237,9 @@ func (g *Group) UnmarshalYAML(unmarshal func(any) error) error {
 		Paths      []Path     `yaml:"routes"`
 		Ingress    *Direction `yaml:"ingress"`
 		Egress     *Direction `yaml:"egress"`
-		// Upstream and Downstream are the deprecated names of Ingress and Egress.
-		Upstream   *Direction `yaml:"upstream"`
-		Downstream *Direction `yaml:"downstream"`
 	}
 	if err := unmarshal(&raw); err != nil {
 		return err
-	}
-	if raw.Ingress != nil && raw.Upstream != nil {
-		return fmt.Errorf("server %d: use ingress or upstream, not both", raw.ListenPort)
-	}
-	if raw.Egress != nil && raw.Downstream != nil {
-		return fmt.Errorf("server %d: use egress or downstream, not both", raw.ListenPort)
-	}
-	if raw.Ingress == nil {
-		raw.Ingress = raw.Upstream
-	}
-	if raw.Egress == nil {
-		raw.Egress = raw.Downstream
 	}
 	*g = Group{ListenPort: raw.ListenPort, Paths: raw.Paths}
 	if raw.Mode != nil {
@@ -342,7 +327,7 @@ func (g Group) validate() error {
 	if g.ListenPort == 0 {
 		return errors.New("server listen port must be between 1 and 65535")
 	}
-	if g.Mode > ModeBurst {
+	if g.Mode > ModeRepeater {
 		return fmt.Errorf("server %d: invalid mode %d", g.ListenPort, uint8(g.Mode))
 	}
 	if len(g.Paths) == 0 {
@@ -370,7 +355,7 @@ func (g Group) validate() error {
 			}
 		}
 	}
-	if g.EgressMode > ModeBurst {
+	if g.EgressMode > ModeRepeater {
 		return fmt.Errorf("server %d: invalid egress mode %d", g.ListenPort, uint8(g.EgressMode))
 	}
 	for index, path := range g.EgressPaths {
@@ -483,7 +468,7 @@ func (p Path) String() string {
 	}
 	text := fmt.Sprintf("%s:%s/%s", host, p.Ports(), p.Transport)
 	if p.IsPool() {
-		text += fmt.Sprintf(" via %s/%d balance %s", p.ReturnIP, p.ReturnPrefix, p.Balance)
+		text += fmt.Sprintf(" via %s/%d %s", p.ReturnIP, p.ReturnPrefix, p.Balance)
 	} else if p.ReturnIP.IsValid() {
 		text += " via " + p.ReturnIP.String()
 	}
@@ -560,7 +545,7 @@ func (p Path) validate() error {
 		}
 	}
 	if p.Balance != BalancePerPeer && !p.IsPool() {
-		return errors.New("balance applies only to a return pool")
+		return errors.New("per-peer and per-packet apply only to a return pool")
 	}
 	return nil
 }
@@ -652,15 +637,14 @@ func (b Bridge) Validate() error {
 
 // ParsePath parses SERVER[%IFACE]:PORT/udp or SERVER[%IFACE]:PORT/icmp, where
 // PORT can be a range FIRST-LAST. It accepts an optional "via RETURN_IP", or
-// "via POOL_CIDR" with an optional "balance per-peer" or "balance per-packet"
-// after the pool.
+// "via POOL_CIDR" with an optional "per-peer" or "per-packet" after the pool.
 func ParsePath(raw string) (Path, error) {
 	fields := strings.Fields(raw)
 	var returnIP netip.Addr
 	var returnPrefix uint8
 	var proxyBridge netip.Addr
 	balance := BalancePerPeer
-	usage := errors.New("path must use IPv4:PORT/udp or /icmp, with an optional via RETURN_IP, or via POOL_CIDR balance MODE")
+	usage := errors.New("path must use IPv4:PORT/udp or /icmp, with an optional via RETURN_IP, or via POOL_CIDR with an optional per-peer or per-packet")
 	// A trailing "bridge BRIDGE" names a bridge that emits the reflected ingress.
 	if n := len(fields); n >= 2 && fields[n-2] == "bridge" {
 		address, err := netip.ParseAddr(fields[n-1])
@@ -672,7 +656,7 @@ func ParsePath(raw string) (Path, error) {
 	}
 	switch {
 	case len(fields) == 1:
-	case (len(fields) == 3 || len(fields) == 5) && fields[1] == "via":
+	case (len(fields) == 3 || len(fields) == 4) && fields[1] == "via":
 		target := fields[2]
 		if strings.Contains(target, "/") {
 			prefix, err := netip.ParsePrefix(target)
@@ -691,14 +675,11 @@ func ParsePath(raw string) (Path, error) {
 			}
 			returnIP = address
 		}
-		if len(fields) == 5 {
-			if fields[3] != "balance" {
-				return Path{}, usage
-			}
+		if len(fields) == 4 {
 			if returnPrefix == 0 {
-				return Path{}, errors.New("balance applies only to a return pool")
+				return Path{}, errors.New("per-peer and per-packet apply only to a return pool")
 			}
-			parsed, err := ParseBalance(fields[4])
+			parsed, err := ParseBalance(fields[3])
 			if err != nil {
 				return Path{}, err
 			}
@@ -746,14 +727,14 @@ func ParsePath(raw string) (Path, error) {
 
 func ParseMode(raw string) (Mode, error) {
 	switch raw {
-	case "fallback":
-		return ModeFallback, nil
+	case "failover":
+		return ModeFailover, nil
 	case "balancer":
 		return ModeBalancer, nil
-	case "burst":
-		return ModeBurst, nil
+	case "repeater":
+		return ModeRepeater, nil
 	default:
-		return 0, fmt.Errorf("invalid mode %q: use fallback, balancer, or burst", raw)
+		return 0, fmt.Errorf("invalid mode %q: use failover, balancer, or repeater", raw)
 	}
 }
 

@@ -2,7 +2,7 @@
 # needs IPv4 forwarding, and its network must accept packets with a source
 # address that is not its own.
 bridge:
-  # The MUP server. The bridge sends the upstream of the clients to it, and it
+  # The MUP server. The bridge sends the ingress traffic of the clients to it, and it
   # takes wrapped replies only from it.
   server: 198.51.100.7
   # The UDP ports and the ICMP Echo identifiers that the bridge takes. They

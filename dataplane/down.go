@@ -175,7 +175,7 @@ func encodeEgressGroupEntry(entry EgressGroupEntry) (mupClientKeyV1, mupDownGrou
 	if err != nil {
 		return key, mupDownGroupV1{}, err
 	}
-	if entry.ListenPort == 0 || entry.Mode > config.ModeBurst {
+	if entry.ListenPort == 0 || entry.Mode > config.ModeRepeater {
 		return key, mupDownGroupV1{}, errors.New("egress group needs a listen port and a valid mode")
 	}
 	return key, mupDownGroupV1{

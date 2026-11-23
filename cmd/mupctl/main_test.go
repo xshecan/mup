@@ -25,8 +25,8 @@ func clientStatus() api.Status {
 			Peers:        14,
 			TokensFree:   4081,
 			Groups: []api.Group{
-				{ListenPort: 51820, Mode: "fallback", Paths: 2, HealthyPaths: 2, Peers: 12},
-				{ListenPort: 51821, Mode: "burst", Paths: 1, Peers: 2},
+				{ListenPort: 51820, Mode: "failover", Paths: 2, HealthyPaths: 2, Peers: 12},
+				{ListenPort: 51821, Mode: "repeater", Paths: 1, Peers: 2},
 			},
 			Paths: []api.Path{
 				{ID: 0, ListenPort: 51820, Server: "203.0.113.5", Port: 5000, Transport: "udp", Interface: "eth0", Healthy: true, InUse: true, LastACK: testNow.Add(-4 * time.Second), RTTSeconds: 0.0123},
@@ -135,8 +135,8 @@ func TestStatusShowsTheClientOverview(t *testing.T) {
 		"Tokens:   14/4095",
 		"Drops:    37 (NO_PATH 30, WG_LENGTH 7)",
 		"GROUP   MODE       PATHS         PEERS",
-		"51820   fallback   2/2 healthy   12",
-		"51821   burst      0/1 healthy   2",
+		"51820   failover   2/2 healthy   12",
+		"51821   repeater   0/1 healthy   2",
 		"ID   GROUP   SERVER              TRANSPORT   VIA       INTERFACE   STATE       SEEN     RTT",
 		"0    51820   203.0.113.5:5000    udp         -         eth0        active      4s ago   12.3ms",
 		"1    51820   203.0.113.6:5000    icmp        -         eth1        standby     never    -",
@@ -220,13 +220,13 @@ func TestGroupCommands(t *testing.T) {
 
 	daemon := fakeDaemon(t, clientStatus())
 	code, stdout, stderr := runCommand(t, daemon, "get", "groups")
-	if code != 0 || !strings.Contains(stdout, "51821   burst      0/1 healthy") {
+	if code != 0 || !strings.Contains(stdout, "51821   repeater   0/1 healthy") {
 		t.Fatalf("get groups = %d, %q, %q", code, stdout, stderr)
 	}
-	if code, stdout, stderr := runCommand(t, daemon, "set", "mode", "burst", "--group=51821"); code != 0 || stdout != "mode set to burst\n" {
+	if code, stdout, stderr := runCommand(t, daemon, "set", "mode", "repeater", "--group=51821"); code != 0 || stdout != "mode set to repeater\n" {
 		t.Fatalf("set mode = %d, %q, %q", code, stdout, stderr)
 	}
-	if code, _, stderr := runCommand(t, daemon, "set", "mode", "burst"); code != 1 || !strings.Contains(stderr, "listen port") {
+	if code, _, stderr := runCommand(t, daemon, "set", "mode", "repeater"); code != 1 || !strings.Contains(stderr, "listen port") {
 		t.Fatalf("set mode without a group = %d, %q", code, stderr)
 	}
 	server := fakeDaemon(t, api.Status{Role: api.RoleServer, Server: &api.ServerStatus{Port: 5000}})

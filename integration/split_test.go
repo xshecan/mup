@@ -15,7 +15,7 @@ import (
 // TestPrivilegedSplitPaths runs a group with one UDP ingress path and two egress
 // paths: an ICMP path that reflects through 10.210.1.3, and a direct UDP path.
 // The egress moves to the second egress path when the reflector fails,
-// while the ingress path stays healthy, and an egress burst reaches each peer
+// while the ingress path stays healthy, and an egress repeater reaches each peer
 // once.
 func TestPrivilegedSplitPaths(t *testing.T) {
 	requirePrivilegedLinux(t)
@@ -64,7 +64,7 @@ func TestPrivilegedSplitPaths(t *testing.T) {
       ingress:
         routes: [10.210.1.2:5000/udp]
       egress:
-        mode: fallback
+        mode: failover
         routes:
           - "10.210.1.2:5010/icmp via 10.210.1.3"
           - 10.210.1.2:5020/udp
@@ -126,7 +126,7 @@ func TestPrivilegedSplitPaths(t *testing.T) {
 	waitForEgress("both egress paths to become healthy", [2]bool{true, true})
 	exchange(t, peerNS, "10.210.3.1:51820", 3, state)
 	if current, _ := view(); current.inUse != [2]bool{true, false} {
-		t.Fatalf("fallback uses egress paths %v, want only the reflected path\n%s", current.inUse, state())
+		t.Fatalf("failover uses egress paths %v, want only the reflected path\n%s", current.inUse, state())
 	}
 
 	// Without the reflector, the egress moves to the direct path, and the
@@ -148,20 +148,20 @@ func TestPrivilegedSplitPaths(t *testing.T) {
 		}
 	}
 
-	// An egress burst sends each reply on both egress paths, and the client
+	// An egress repeater sends each reply on both egress paths, and the client
 	// passes one copy to the peer.
 	runIP(t, "-n", reflectorNS, "link", "set", "mr"+suffix, "up")
 	waitForEgress("the reflected egress path to come back", [2]bool{true, true})
-	if err := clientAPI.SetEgressMode(context.Background(), "burst", 0); err != nil {
+	if err := clientAPI.SetEgressMode(context.Background(), "repeater", 0); err != nil {
 		t.Fatalf("set egress mode: %v", err)
 	}
-	waitFor(t, 20*time.Second, "the server to take the burst mode", state, func() (bool, error) {
+	waitFor(t, 20*time.Second, "the server to take the repeater mode", state, func() (bool, error) {
 		clients, err := serverAPI.Clients(context.Background())
 		if err != nil {
 			return false, err
 		}
 		for _, registered := range clients {
-			if registered.Egress != nil && registered.Egress.Mode == "burst" {
+			if registered.Egress != nil && registered.Egress.Mode == "repeater" {
 				return true, nil
 			}
 		}

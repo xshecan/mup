@@ -145,7 +145,7 @@ func TestRewriteChainKeepsChecksumsValid(t *testing.T) {
 		if err := RewritePeerToken(packet, token); err != nil {
 			t.Fatalf("iteration %d: RewritePeerToken: %v", iteration, err)
 		}
-		// Burst mode rewrites one packet once for every healthy path.
+		// Repeater mode rewrites one packet once for every healthy path.
 		for range 1 + random.IntN(8) {
 			output := []uint8{IPProtocolUDP, IPProtocolICMP}[random.IntN(2)]
 			rewriteTo(t, packet, output, token)

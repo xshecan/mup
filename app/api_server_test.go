@@ -22,7 +22,7 @@ type fakeClientAPI struct {
 }
 
 func (f *fakeClientAPI) Status() (api.Status, error) {
-	return api.Status{Role: api.RoleClient, Client: &api.ClientStatus{Groups: []api.Group{{ListenPort: 51820, Mode: "fallback"}}}}, nil
+	return api.Status{Role: api.RoleClient, Client: &api.ClientStatus{Groups: []api.Group{{ListenPort: 51820, Mode: "failover"}}}}, nil
 }
 
 func (f *fakeClientAPI) Paths() ([]api.Path, error) {
@@ -122,7 +122,7 @@ func TestClientAPIServesPathsAndMode(t *testing.T) {
 	ctx := context.Background()
 
 	status, err := client.Status(ctx)
-	if err != nil || status.Role != api.RoleClient || status.Client.Groups[0].Mode != "fallback" {
+	if err != nil || status.Role != api.RoleClient || status.Client.Groups[0].Mode != "failover" {
 		t.Fatalf("Status = %#v, %v", status, err)
 	}
 	added, err := client.AddPath(ctx, "198.51.100.3:5000/udp", 51821)
@@ -141,7 +141,7 @@ func TestClientAPIServesPathsAndMode(t *testing.T) {
 	if backend.group != 51821 {
 		t.Fatalf("AddPath group = %d, want 51821", backend.group)
 	}
-	if err := client.SetMode(ctx, "burst", 51822); err != nil || backend.mode != "burst" || backend.group != 51822 {
+	if err := client.SetMode(ctx, "repeater", 51822); err != nil || backend.mode != "repeater" || backend.group != 51822 {
 		t.Fatalf("SetMode = %v, mode %q, group %d", err, backend.mode, backend.group)
 	}
 	if _, err := client.Clients(ctx); responseStatus(err) != http.StatusConflict {
@@ -157,7 +157,7 @@ func TestServerAPIRefusesClientCommands(t *testing.T) {
 	if _, err := client.Paths(ctx); responseStatus(err) != http.StatusConflict {
 		t.Fatalf("Paths on a server error = %v, want status 409", err)
 	}
-	if err := client.SetMode(ctx, "burst", 0); responseStatus(err) != http.StatusConflict {
+	if err := client.SetMode(ctx, "repeater", 0); responseStatus(err) != http.StatusConflict {
 		t.Fatalf("SetMode on a server error = %v, want status 409", err)
 	}
 	peers, err := client.Peers(ctx)
@@ -175,7 +175,7 @@ func TestAPIRejectsUnknownRequestFields(t *testing.T) {
 
 	server := httptest.NewServer(newAPIHandler(&fakeClientAPI{}, nil))
 	t.Cleanup(server.Close)
-	request, err := http.NewRequest(http.MethodPut, server.URL+"/v1/mode", strings.NewReader(`{"mode":"burst","extra":1}`))
+	request, err := http.NewRequest(http.MethodPut, server.URL+"/v1/mode", strings.NewReader(`{"mode":"repeater","extra":1}`))
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}

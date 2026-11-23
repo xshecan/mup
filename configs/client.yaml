@@ -8,7 +8,7 @@ client:
   servers:
     # Peers that use port 51820 reach the WireGuard target behind these servers.
     - port: 51820
-      mode: fallback
+      mode: failover
       routes:
         - 203.0.113.5:5000/udp
         - 203.0.113.6:5000/icmp
@@ -18,7 +18,7 @@ client:
     # with the via address as the source. An ICMP route gets its replies from
     # the via address, which answers an Echo Request of the server.
     - port: 51821
-      mode: burst
+      mode: repeater
       routes:
         - 198.51.100.20:6000/udp via 1.1.1.1
         - 198.51.100.20:6000/icmp via 9.9.9.9

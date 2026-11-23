@@ -149,7 +149,7 @@ type controllerFixture struct {
 
 func newControllerFixture(t *testing.T, paths ...string) controllerFixture {
 	t.Helper()
-	return newGroupsFixture(t, testGroup(t, 51820, config.ModeFallback, paths...))
+	return newGroupsFixture(t, testGroup(t, 51820, config.ModeFailover, paths...))
 }
 
 func testGroup(t *testing.T, listenPort uint16, mode config.Mode, paths ...string) config.Group {
@@ -253,7 +253,7 @@ func TestControllerStartsWithHealthyPaths(t *testing.T) {
 		t.Fatalf("Paths = %v, %v", paths, err)
 	}
 	if !paths[0].InUse || paths[1].InUse {
-		t.Fatalf("fallback in-use flags = %v, %v, want true, false", paths[0].InUse, paths[1].InUse)
+		t.Fatalf("failover in-use flags = %v, %v, want true, false", paths[0].InUse, paths[1].InUse)
 	}
 }
 
@@ -384,22 +384,22 @@ func TestSetModeChangesInUsePaths(t *testing.T) {
 	if err := fixture.controller.SetMode("sideways", 0); statusOf(err) != http.StatusBadRequest {
 		t.Fatalf("SetMode(sideways) error = %v, want status 400", err)
 	}
-	if err := fixture.controller.SetMode("burst", 0); err != nil {
+	if err := fixture.controller.SetMode("repeater", 0); err != nil {
 		t.Fatalf("SetMode: %v", err)
 	}
 	status, err := fixture.controller.Status()
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	if fixture.dataplane.groups[51820].Mode != config.ModeBurst || status.Client.Groups[0].Mode != "burst" {
-		t.Fatalf("mode = %v/%q, want burst", fixture.dataplane.groups[51820].Mode, status.Client.Groups[0].Mode)
+	if fixture.dataplane.groups[51820].Mode != config.ModeRepeater || status.Client.Groups[0].Mode != "repeater" {
+		t.Fatalf("mode = %v/%q, want repeater", fixture.dataplane.groups[51820].Mode, status.Client.Groups[0].Mode)
 	}
 	if got := fixture.dataplane.groups[51820].PathMask; got != 0b11 {
 		t.Fatalf("SetMode changed the group mask to %#b", got)
 	}
 	for _, path := range status.Client.Paths {
 		if !path.InUse {
-			t.Fatalf("burst mode does not use path %d", path.ID)
+			t.Fatalf("repeater mode does not use path %d", path.ID)
 		}
 	}
 	if status.Drops[protocol.DropNoPath-1].Count != 4 || status.Drops[protocol.DropNoPath-1].Name != "NO_PATH" {
@@ -409,8 +409,8 @@ func TestSetModeChangesInUsePaths(t *testing.T) {
 
 func twoGroupsFixture(t *testing.T) controllerFixture {
 	t.Helper()
-	first := testGroup(t, 51820, config.ModeFallback, "198.51.100.1:5000/udp", "198.51.100.2:5000/icmp")
-	second := testGroup(t, 51821, config.ModeBurst, "203.0.113.1:6000/udp via 1.1.1.1", "203.0.113.2:6000/udp via 1.1.1.1")
+	first := testGroup(t, 51820, config.ModeFailover, "198.51.100.1:5000/udp", "198.51.100.2:5000/icmp")
+	second := testGroup(t, 51821, config.ModeRepeater, "203.0.113.1:6000/udp via 1.1.1.1", "203.0.113.2:6000/udp via 1.1.1.1")
 	return newGroupsFixture(t, first, second)
 }
 
@@ -453,10 +453,10 @@ func TestSetModeChangesOneGroup(t *testing.T) {
 	t.Parallel()
 
 	fixture := twoGroupsFixture(t)
-	if err := fixture.controller.SetMode("burst", 0); statusOf(err) != http.StatusBadRequest {
+	if err := fixture.controller.SetMode("repeater", 0); statusOf(err) != http.StatusBadRequest {
 		t.Fatalf("SetMode without a group error = %v, want status 400", err)
 	}
-	if err := fixture.controller.SetMode("burst", 9); statusOf(err) != http.StatusNotFound {
+	if err := fixture.controller.SetMode("repeater", 9); statusOf(err) != http.StatusNotFound {
 		t.Fatalf("SetMode with an unknown group error = %v, want status 404", err)
 	}
 	if err := fixture.controller.SetMode("balancer", 51820); err != nil {
@@ -490,7 +490,7 @@ func TestAddPathGoesToTheNamedGroup(t *testing.T) {
 	if added.ID != 4 || added.ListenPort != 51821 || added.Port != 7000 || added.ReturnIP != "192.0.2.77" {
 		t.Fatalf("added path = %#v", added)
 	}
-	if got := fixture.dataplane.groups[51821]; got.PathMask != 0b11100 || got.Mode != config.ModeBurst {
+	if got := fixture.dataplane.groups[51821]; got.PathMask != 0b11100 || got.Mode != config.ModeRepeater {
 		t.Fatalf("group settings = %#v", got)
 	}
 	if got := fixture.dataplane.paths[4]; got.ReturnIP != netip.MustParseAddr("192.0.2.77") {
@@ -505,7 +505,7 @@ func TestAddPathKeepsTheReturnPool(t *testing.T) {
 	t.Parallel()
 
 	fixture := newControllerFixture(t, "198.51.100.1:5000/udp")
-	added, err := fixture.controller.AddPath("198.51.100.3:5000/udp via 203.0.113.16/28 balance per-packet", 0)
+	added, err := fixture.controller.AddPath("198.51.100.3:5000/udp via 203.0.113.16/28 per-packet", 0)
 	if err != nil {
 		t.Fatalf("AddPath: %v", err)
 	}
@@ -522,8 +522,8 @@ func TestRemovePathKeepsTheLastPathOfEachGroup(t *testing.T) {
 	t.Parallel()
 
 	fixture := newGroupsFixture(t,
-		testGroup(t, 51820, config.ModeFallback, "198.51.100.1:5000/udp"),
-		testGroup(t, 51821, config.ModeFallback, "203.0.113.1:6000/udp", "203.0.113.2:6000/udp"),
+		testGroup(t, 51820, config.ModeFailover, "198.51.100.1:5000/udp"),
+		testGroup(t, 51821, config.ModeFailover, "203.0.113.1:6000/udp", "203.0.113.2:6000/udp"),
 	)
 	if err := fixture.controller.RemovePath(0); statusOf(err) != http.StatusConflict {
 		t.Fatalf("RemovePath of the last path of a group error = %v, want status 409", err)
@@ -553,8 +553,8 @@ func TestStatusReportsEachGroup(t *testing.T) {
 		t.Fatalf("Status: %v", err)
 	}
 	want := []api.Group{
-		{ListenPort: 51820, Mode: "fallback", Paths: 2, HealthyPaths: 2, Peers: 1},
-		{ListenPort: 51821, Mode: "burst", Paths: 2, HealthyPaths: 2, Peers: 2},
+		{ListenPort: 51820, Mode: "failover", Paths: 2, HealthyPaths: 2, Peers: 1},
+		{ListenPort: 51821, Mode: "repeater", Paths: 2, HealthyPaths: 2, Peers: 2},
 	}
 	if !slices.Equal(status.Client.Groups, want) {
 		t.Fatalf("groups = %#v, want %#v", status.Client.Groups, want)

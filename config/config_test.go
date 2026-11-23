@@ -13,7 +13,7 @@ func TestParsePathRoundTrip(t *testing.T) {
 
 	for _, raw := range []string{
 		"198.51.100.1:5000/udp", "198.51.100.2%eth1:5000/icmp", "198.51.100.1:9000-9099/udp",
-		"198.51.100.1:9000-9001/icmp via 194.225.72.0/28 balance per-peer",
+		"198.51.100.1:9000-9001/icmp via 194.225.72.0/28 per-peer",
 	} {
 		path, err := ParsePath(raw)
 		if err != nil {
@@ -74,7 +74,7 @@ func TestParsePathPortRange(t *testing.T) {
 func TestParseMode(t *testing.T) {
 	t.Parallel()
 
-	for _, mode := range []Mode{ModeFallback, ModeBalancer, ModeBurst} {
+	for _, mode := range []Mode{ModeFailover, ModeBalancer, ModeRepeater} {
 		parsed, err := ParseMode(mode.String())
 		if err != nil || parsed != mode {
 			t.Fatalf("ParseMode(%q) = %v, %v", mode, parsed, err)
@@ -146,7 +146,7 @@ func TestClientValidateRejectsInvalidGroups(t *testing.T) {
 		"zero listen port": testClient(t, Group{Paths: one}),
 		"bad return IP":    testClient(t, Group{ListenPort: 51820, Paths: []Path{{Server: netip.MustParseAddr("198.51.100.1"), ServerPort: 5000, ReturnIP: netip.MustParseAddr("0.0.0.0")}}}),
 		"same route twice": testClient(t, Group{ListenPort: 51820, Paths: append(testPaths(t, "198.51.100.1:5000/udp via 192.0.2.77"), one...)}),
-		"bad mode":         testClient(t, Group{ListenPort: 51820, Mode: ModeBurst + 1, Paths: one}),
+		"bad mode":         testClient(t, Group{ListenPort: 51820, Mode: ModeRepeater + 1, Paths: one}),
 		"no paths":         testClient(t, Group{ListenPort: 51820}),
 		"duplicate group port": testClient(t,
 			Group{ListenPort: 51820, Paths: one},

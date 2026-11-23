@@ -28,8 +28,8 @@ var (
 // allControlFlags holds every defined control flag bit.
 const allControlFlags = ControlFlagReturnIP | ControlFlagReturnPool | ControlFlagBalancePerPacket | ControlFlagEgressPath | ControlFlagBridge | ControlFlagIngressReflect
 
-// MaxEgressMode is the largest egress mode of a EGRESS_REGISTER: 0 is fallback, 1
-// is balancer, and 2 is burst.
+// MaxEgressMode is the largest egress mode of a EGRESS_REGISTER: 0 is failover, 1
+// is balancer, and 2 is repeater.
 const MaxEgressMode = 2
 
 type ControlFrame struct {

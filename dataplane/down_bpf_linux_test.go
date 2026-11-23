@@ -87,7 +87,7 @@ func assertReflectedICMP(t *testing.T, frame []byte) {
 }
 
 func TestServerSendsTheReplyOnAHealthyEgressPath(t *testing.T) {
-	// Fallback takes the lowest healthy egress path.
+	// Failover takes the lowest healthy egress path.
 	collection := egressReplyCollection(t, 0, 0b10)
 	result, output := targetReply(t, collection)
 	if result != tcActOK && result != tcActRedirect {
@@ -114,12 +114,12 @@ func TestServerSendsTheReplyOnAHealthyEgressPath(t *testing.T) {
 	}
 	collection.Close()
 
-	// Burst sends a copy on each healthy path, and the packet itself on the
+	// Repeater sends a copy on each healthy path, and the packet itself on the
 	// highest one.
 	collection = egressReplyCollection(t, 2, 0b11)
 	result, output = targetReply(t, collection)
 	if result != tcActOK && result != tcActRedirect {
-		t.Fatalf("burst return value = %d", int32(result))
+		t.Fatalf("repeater return value = %d", int32(result))
 	}
 	assertReflectedICMP(t, output)
 	collection.Close()
@@ -243,7 +243,7 @@ func TestClientAcceptsRepliesFromItsEgressPaths(t *testing.T) {
 	}
 }
 
-func TestClientDropsTheSecondCopyOfAEgressBurst(t *testing.T) {
+func TestClientDropsTheSecondCopyOfAEgressRepeater(t *testing.T) {
 	collection := egressClientCollection(t, groupFlagDedup)
 	defer collection.Close()
 	program := collection.Programs["mup_client_ingress"]

@@ -61,10 +61,10 @@ func TestBuildClientPlan(t *testing.T) {
 	plan, err := buildPlan(config.App{Client: &config.Client{
 		AdvertisedIP: netip.MustParseAddr("192.0.2.10"),
 		Groups: []config.Group{
-			{ListenPort: 51820, Mode: config.ModeFallback, Paths: []config.Path{
+			{ListenPort: 51820, Mode: config.ModeFailover, Paths: []config.Path{
 				{Server: netip.MustParseAddr("198.51.100.1"), ServerPort: 5000, Transport: protocol.TransportUDP, Interface: "eth9"},
 			}},
-			{ListenPort: 51821, Mode: config.ModeBurst, Paths: []config.Path{
+			{ListenPort: 51821, Mode: config.ModeRepeater, Paths: []config.Path{
 				{Server: netip.MustParseAddr("198.51.100.2"), ServerPort: 6000, Transport: protocol.TransportICMP, ReturnIP: netip.MustParseAddr("1.1.1.1")},
 			}},
 		},
@@ -85,8 +85,8 @@ func TestBuildClientPlan(t *testing.T) {
 		t.Fatalf("healthy mask = %#b, want 0b11", plan.client.HealthyMask)
 	}
 	want := []dataplane.GroupSettings{
-		{ListenPort: 51820, Mode: config.ModeFallback, PathMask: 0b01},
-		{ListenPort: 51821, Mode: config.ModeBurst, PathMask: 0b10},
+		{ListenPort: 51820, Mode: config.ModeFailover, PathMask: 0b01},
+		{ListenPort: 51821, Mode: config.ModeRepeater, PathMask: 0b10},
 	}
 	if !slices.Equal(plan.client.Groups, want) {
 		t.Fatalf("groups = %#v, want %#v", plan.client.Groups, want)
@@ -201,7 +201,7 @@ func TestBuildServerPlanTargetIngress(t *testing.T) {
 	}
 }
 
-func TestBuildClientPlanAcceptsBurst(t *testing.T) {
+func TestBuildClientPlanAcceptsRepeater(t *testing.T) {
 	t.Parallel()
 
 	resolver := fakeResolver{
@@ -212,7 +212,7 @@ func TestBuildClientPlanAcceptsBurst(t *testing.T) {
 	}
 	plan, err := buildPlan(config.App{Client: &config.Client{
 		AdvertisedIP: netip.MustParseAddr("192.0.2.10"),
-		Groups: []config.Group{{ListenPort: 51820, Mode: config.ModeBurst, Paths: []config.Path{{
+		Groups: []config.Group{{ListenPort: 51820, Mode: config.ModeRepeater, Paths: []config.Path{{
 			Server:     netip.MustParseAddr("198.51.100.1"),
 			ServerPort: 5000,
 			Transport:  protocol.TransportUDP,
@@ -221,7 +221,7 @@ func TestBuildClientPlanAcceptsBurst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildPlan: %v", err)
 	}
-	if plan.client == nil || plan.client.Groups[0].Mode != config.ModeBurst {
-		t.Fatalf("client plan = %#v, want burst mode", plan.client)
+	if plan.client == nil || plan.client.Groups[0].Mode != config.ModeRepeater {
+		t.Fatalf("client plan = %#v, want repeater mode", plan.client)
 	}
 }

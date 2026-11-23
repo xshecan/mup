@@ -82,16 +82,16 @@ func TestPrivilegedIngressReflectEgressReflect(t *testing.T) {
   control_socket: %s
   servers:
     - port: 51821
-      mode: fallback
+      mode: failover
       routes:
-        - "10.210.1.2:5020/icmp via 10.210.1.8/29 balance per-packet"
+        - "10.210.1.2:5020/icmp via 10.210.1.8/29 per-packet"
     - port: 51820
       ingress:
         routes:
-          - "10.210.1.2:5000/udp via 10.210.1.8/29 balance per-packet bridge 10.210.1.4"
+          - "10.210.1.2:5000/udp via 10.210.1.8/29 per-packet bridge 10.210.1.4"
       egress:
         routes:
-          - "10.210.1.20:5010/icmp via 10.210.1.8/29 balance per-packet"
+          - "10.210.1.20:5010/icmp via 10.210.1.8/29 per-packet"
 `, clientSocket)
 	if err := os.WriteFile(configuration, []byte(content), 0o600); err != nil {
 		t.Fatalf("write client configuration: %v", err)
