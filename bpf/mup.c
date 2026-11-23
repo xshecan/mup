@@ -764,7 +764,9 @@ static __always_inline int redirect_packet(__u32 ifindex)
  * the IPv4 header into a UDP packet from local_ip to bridge_ip, on port at
  * both ends. The bridge header keeps the protocol and the addresses of the
  * packet. The transport header and the payload do not move, so the inner
- * checksum stays valid, and a partial checksum stays partial. The outer UDP
+ * checksum stays valid, and a partial checksum stays partial. Not every
+ * device completes a partial checksum behind the wrapper, so the bridge
+ * completes one that arrives incomplete. The outer UDP
  * checksum is zero. The function returns MUP_DROP_BRIDGE_SIZE without a
  * change if the wrapped packet does not fit the MTU of ifindex, and another
  * drop reason if it fails after the change. The verifier checks this global
@@ -2292,6 +2294,22 @@ int mup_bridge_ingress(struct __sk_buff *skb)
 		if (parse_ipv4_l4(skb, &packet) != MUP_DROP_NONE ||
 		    !bridge_is_mup(&packet))
 			return count_and_drop(skb, MUP_DROP_BRIDGE_PACKET);
+		/*
+		 * The sender leaves the UDP checksum of a packet from a local
+		 * socket to its device. A device that finds the UDP header by
+		 * the IPv4 header, for example vmxnet3, does not complete a
+		 * checksum behind the wrapper, so the inner packet still holds
+		 * the pseudo-header sum only, and its receiver would drop it.
+		 * The bridge computes the checksum of such a packet.
+		 */
+		if (mup_udp_is_partial(&packet)) {
+			__u8 *check = packet.l4;
+
+			check[6] = 0;
+			check[7] = 0;
+			if (complete_udp_checksum(skb, &packet))
+				return count_and_drop(skb, MUP_DROP_CHECKSUM);
+		}
 		bridge_count(MUP_BRIDGE_DOWN_PACKETS, skb->len);
 		return bridge_send(skb, &packet);
 	}

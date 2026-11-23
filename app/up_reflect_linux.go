@@ -58,8 +58,8 @@ func (s *upReflectPathConn) Run(ctx context.Context, report probeReporter) error
 	for {
 		sequence++
 		sentAt := time.Now()
-		result := s.registerMembers(sequence, sentAt)
-		if err := report(ctx, sequence, sentAt, result); err != nil {
+		result, repliedAt := s.registerMembers(sequence, sentAt)
+		if err := report(ctx, sequence, sentAt, repliedAt, result); err != nil {
 			return err
 		}
 		if err := sleepContext(ctx, registrationDelay(result == registerAcked)); err != nil {
@@ -69,9 +69,9 @@ func (s *upReflectPathConn) Run(ctx context.Context, report probeReporter) error
 }
 
 // registerMembers sends the down registrations to the server, a REGISTER
-// reflected through each member, and returns whether any member answered. It
-// publishes the members that answered.
-func (s *upReflectPathConn) registerMembers(sequence uint32, sentAt time.Time) registerResult {
+// reflected through each member, and returns whether any member answered, with
+// the time of the first answer. It publishes the members that answered.
+func (s *upReflectPathConn) registerMembers(sequence uint32, sentAt time.Time) (registerResult, time.Time) {
 	reg := s.registration
 	if reg.downs != nil {
 		for _, down := range reg.downFrames(sequence) {
@@ -97,28 +97,31 @@ func (s *upReflectPathConn) registerMembers(sequence uint32, sentAt time.Time) r
 			_ = s.sendUDP(member, reg.path.Server, reg.listenPort, reg.path.ServerPort, frame, sequence)
 		}
 	}
-	healthy := s.collectHealthy(sequence, sentAt)
+	healthy, repliedAt := s.collectHealthy(sequence, sentAt)
 	if reg.writeMembers != nil {
 		_ = reg.writeMembers(healthy)
 	}
 	if len(healthy) == 0 {
-		return registerMissed
+		return registerMissed, time.Time{}
 	}
-	return registerAcked
+	return registerAcked, repliedAt
 }
 
 // collectHealthy reads the REGISTER_ACK frames that arrive on the down paths
 // until the reply window ends. Each ACK names the member that answered in its
-// return IP, because the member reflected the REGISTER to the server.
-func (s *upReflectPathConn) collectHealthy(sequence uint32, sentAt time.Time) []netip.Addr {
+// return IP, because the member reflected the REGISTER to the server. The
+// function also returns the time of the first ACK, which gives the round-trip
+// time of the path. The wait for the other members is not part of it.
+func (s *upReflectPathConn) collectHealthy(sequence uint32, sentAt time.Time) ([]netip.Addr, time.Time) {
 	seen := make(map[netip.Addr]bool)
 	var healthy []netip.Addr
+	var repliedAt time.Time
 	timer := time.NewTimer(time.Until(sentAt.Add(controlReplyTimeout)))
 	defer timer.Stop()
 	for {
 		select {
 		case <-timer.C:
-			return healthy
+			return healthy, repliedAt
 		case reply := <-s.routed.replies:
 			frame, err := protocol.DecodeControlFrame(reply)
 			if err != nil {
@@ -130,6 +133,9 @@ func (s *upReflectPathConn) collectHealthy(sequence uint32, sentAt time.Time) []
 				continue
 			}
 			if frame.ReturnIP.IsValid() && !seen[frame.ReturnIP] {
+				if repliedAt.IsZero() {
+					repliedAt = time.Now()
+				}
 				seen[frame.ReturnIP] = true
 				healthy = append(healthy, frame.ReturnIP)
 			}
@@ -198,6 +204,15 @@ func (s *upReflectPathConn) sendDownRegister(reg pathRegistration, frame []byte,
 // The frame travels on the transport of the up path, because the server reads
 // the control frames of the path on the port of the up path.
 func (s *upReflectPathConn) sendDownViaBridge(reg pathRegistration, frame []byte, id uint32) error {
+	return unix.Sendto(s.fd, bridgeControlPacket(reg, frame, id), 0, &unix.SockaddrInet4{Addr: reg.path.ProxyBridge.As4()})
+}
+
+// bridgeControlPacket wraps a control frame of the client itself for the
+// bridge of an up path. The inner packet goes from the advertised IP to the
+// server of the path, on the transport of the path, so the server sees the
+// frame from the client address, as it requires for a DOWN_REGISTER and for
+// the PROBE_REPLY of a down path.
+func bridgeControlPacket(reg pathRegistration, frame []byte, id uint32) []byte {
 	var innerProtocol byte
 	var inner []byte
 	if reg.path.Transport == protocol.TransportICMP {
@@ -209,8 +224,7 @@ func (s *upReflectPathConn) sendDownViaBridge(reg pathRegistration, frame []byte
 		innerProtocol = unix.IPPROTO_UDP
 		inner = buildIPv4Packet(reg.advertisedIP, reg.path.Server, unix.IPPROTO_UDP, segment, uint16(id))
 	}
-	packet := wrapForBridge(reg.advertisedIP, reg.path.ProxyBridge, reg.path.ServerPort, innerProtocol, reg.advertisedIP, reg.path.Server, inner, uint16(id))
-	return unix.Sendto(s.fd, packet, 0, &unix.SockaddrInet4{Addr: reg.path.ProxyBridge.As4()})
+	return wrapForBridge(reg.advertisedIP, reg.path.ProxyBridge, reg.path.ServerPort, innerProtocol, reg.advertisedIP, reg.path.Server, inner, uint16(id))
 }
 
 // wrapForBridge wraps an inner IPv4 packet in the MUP bridge wrapper, from

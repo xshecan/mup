@@ -172,6 +172,30 @@ func TestBridgeUnwrapsTheRepliesOfItsServer(t *testing.T) {
 	}
 }
 
+// A sender leaves the UDP checksum of a packet from a local socket to its
+// device. A device that finds the UDP header by the IPv4 header does not
+// complete it behind the wrapper, so the inner packet arrives with the
+// pseudo-header sum only, and the bridge completes the checksum.
+func TestBridgeCompletesAPartialInnerChecksum(t *testing.T) {
+	collection := bridgeCollection(t)
+	defer collection.Close()
+
+	inner := udpWireGuardFrame(t, bridgeMember, bridgeServer, 51820, 9300, 9)
+	ip := inner[14:]
+	binary.BigEndian.PutUint16(ip[26:28], ^onesComplement(nil, pseudoHeaderSum(ip)))
+	if onesComplement(ip[20:], pseudoHeaderSum(ip)) == 0 {
+		t.Fatal("the test packet must start with an incomplete checksum")
+	}
+	result, output := runBridge(t, collection, wrappedFrame(inner, bridgeAllowed, 9300))
+	if result != tcActRedirect {
+		t.Fatalf("return value = %d, want a redirect", int32(result))
+	}
+	assertUDPHeader(t, output, bridgeMember, bridgeServer, 51820, 9300)
+	if !bytes.Equal(output[14+28:], inner[14+28:]) {
+		t.Fatal("the inner payload changed")
+	}
+}
+
 // downBridgeCollection is downReplyCollection with path 0 through a bridge
 // that reflects through the pool, and path 1 a direct UDP path.
 func downBridgeCollection(t *testing.T, mode uint8, healthy uint8) *ebpf.Collection {

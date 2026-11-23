@@ -35,8 +35,10 @@ const (
 	portMoveMaxDoublings = 4
 )
 
-// probeReporter passes the result of one REGISTER to the controller.
-type probeReporter func(ctx context.Context, sequence uint32, sentAt time.Time, result registerResult) error
+// probeReporter passes the result of one REGISTER to the controller. repliedAt
+// is the time of the first answer. It is zero when the path reports right
+// after the answer, and the controller then takes the time of the report.
+type probeReporter func(ctx context.Context, sequence uint32, sentAt, repliedAt time.Time, result registerResult) error
 
 // pathConn owns the control socket of one path.
 type pathConn interface {
@@ -95,7 +97,10 @@ type pathProbeResult struct {
 	epoch    uint64
 	sequence uint32
 	sentAt   time.Time
-	result   registerResult
+	// repliedAt is the time of the first answer, or zero for the time of
+	// the report.
+	repliedAt time.Time
+	result    registerResult
 }
 
 type clientPath struct {
@@ -331,11 +336,11 @@ func (c *clientController) launchLocked(slot int, current *clientPath, conn path
 	current.epoch = epoch
 	current.cancel = cancel
 	c.slots[slot] = current
-	report := func(ctx context.Context, sequence uint32, sentAt time.Time, result registerResult) error {
+	report := func(ctx context.Context, sequence uint32, sentAt, repliedAt time.Time, result registerResult) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case c.probes <- pathProbeResult{slot: slot, epoch: epoch, sequence: sequence, sentAt: sentAt, result: result}:
+		case c.probes <- pathProbeResult{slot: slot, epoch: epoch, sequence: sequence, sentAt: sentAt, repliedAt: repliedAt, result: result}:
 			return nil
 		}
 	}
@@ -377,7 +382,14 @@ func (c *clientController) handleProbe(probe pathProbeResult) error {
 	// A path without a healthy reflector counts as missed, because the
 	// server cannot return replies on it.
 	if probe.result == registerAcked {
-		transition, _, err := c.health.Reply(probe.slot, probe.sequence, time.Now())
+		// An up reflect path collects the answers of its members for a whole
+		// reply window before it reports, so it names the time of the first
+		// answer. Without it, the round-trip time would be the window.
+		repliedAt := probe.repliedAt
+		if repliedAt.IsZero() {
+			repliedAt = time.Now()
+		}
+		transition, _, err := c.health.Reply(probe.slot, probe.sequence, repliedAt)
 		if err != nil {
 			return err
 		}

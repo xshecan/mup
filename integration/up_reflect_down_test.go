@@ -60,7 +60,9 @@ func TestPrivilegedUpReflectDownReflect(t *testing.T) {
 	addressLink(t, peerNS, "pc"+suffix, "10.210.3.2/24")
 	runInNamespace(t, bridgeNS, "sysctl", "-qw", "net.ipv4.ip_forward=1")
 
-	target := startEchoTarget(t, targetNS, "10.210.2.2:51820")
+	// The target is a local server address, as in production, so the echo
+	// target runs in the server namespace and takes the ingress delivery.
+	target := startEchoTarget(t, serverNS, "10.210.1.2:51820")
 	defer target.stop(t)
 
 	directory := t.TempDir()
@@ -95,12 +97,14 @@ func TestPrivilegedUpReflectDownReflect(t *testing.T) {
 		t.Fatalf("write client configuration: %v", err)
 	}
 	// Production reaches the server only through the reflection, never directly,
-	// which is the reason the up path uses a bridge. A rule that drops the direct
-	// output to the up server makes the test match that: a client control frame
-	// that the client sends straight to the server is lost, so the down
-	// registration and the probe replies must travel through the bridge to
-	// arrive. The route stays, so the client still resolves the path at start.
-	runInNamespace(t, clientNS, "iptables", "-A", "OUTPUT", "-d", "10.210.1.2", "-j", "DROP")
+	// which is the reason the up path uses a bridge. The switch drops every
+	// IPv4 packet from the port of the client to the up server, so a control
+	// frame that the client sends straight to the server is lost in transit,
+	// whatever socket sends it. The down registration and the probe replies
+	// must travel through the bridge to arrive.
+	runInNamespace(t, switchNS, "nft", "add", "table", "bridge", "mup")
+	runInNamespace(t, switchNS, "nft", "add", "chain", "bridge", "mup", "forward", "{ type filter hook forward priority 0 ; }")
+	runInNamespace(t, switchNS, "nft", "add", "rule", "bridge", "mup", "forward", "iifname", "bmc"+suffix, "ip", "daddr", "10.210.1.2", "drop")
 	client := startNamespaced(t, clientNS, binaryPath, "--config", configuration)
 	defer client.stop(t)
 
@@ -135,4 +139,18 @@ func TestPrivilegedUpReflectDownReflect(t *testing.T) {
 	waitFor(t, 30*time.Second, "the reflected down path to become healthy", state, directionHealthy("down"))
 	// The up path becomes healthy once its member ACK returns on the down path.
 	waitFor(t, 30*time.Second, "the up bridge reflect path to become healthy", state, directionHealthy("up"))
+
+	// The server takes a new down path as healthy for its first 6 seconds.
+	// After that it sends a reply only through a member that a probe reply of
+	// the client confirmed, and that reply reaches the server only through the
+	// bridge. The wait passes the first window, so the exchange needs it.
+	time.Sleep(8 * time.Second)
+	exchange(t, peerNS, "10.210.3.1:51820", 3, state)
+	waitFor(t, 5*time.Second, "the paths to stay healthy after the exchange", state, func() (bool, error) {
+		up, err := directionHealthy("up")()
+		if err != nil || !up {
+			return false, err
+		}
+		return directionHealthy("down")()
+	})
 }

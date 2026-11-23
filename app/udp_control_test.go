@@ -140,7 +140,7 @@ type probeOutcome struct {
 func runOneRound(path pathConn) <-chan probeOutcome {
 	outcomes := make(chan probeOutcome, 1)
 	go func() {
-		_ = path.Run(context.Background(), func(_ context.Context, sequence uint32, _ time.Time, result registerResult) error {
+		_ = path.Run(context.Background(), func(_ context.Context, sequence uint32, _, _ time.Time, result registerResult) error {
 			outcomes <- probeOutcome{sequence: sequence, success: result == registerAcked}
 			return errStopPath
 		})
@@ -423,7 +423,7 @@ func TestUDPPathsRunAndCloseConcurrently(t *testing.T) {
 			group.Add(1)
 			go func() {
 				defer group.Done()
-				_ = path.Run(ctx, func(context.Context, uint32, time.Time, registerResult) error { return nil })
+				_ = path.Run(ctx, func(context.Context, uint32, time.Time, time.Time, registerResult) error { return nil })
 			}()
 		}
 		go func() {

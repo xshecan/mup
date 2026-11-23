@@ -210,6 +210,29 @@ func (f controllerFixture) reply(t *testing.T, slot int, sequence uint32) {
 	}
 }
 
+// An up reflect path reports after its whole reply window, so the round-trip
+// time comes from the time of the first answer, not from the time of the
+// report.
+func TestRoundTripTimeUsesTheTimeOfTheFirstAnswer(t *testing.T) {
+	t.Parallel()
+	fixture := newControllerFixture(t, "198.51.100.1:5000/udp")
+	fixture.controller.mu.Lock()
+	epoch := fixture.controller.slots[0].epoch
+	fixture.controller.mu.Unlock()
+	sentAt := time.Now().Add(-900 * time.Millisecond)
+	probe := pathProbeResult{slot: 0, epoch: epoch, sequence: 1, sentAt: sentAt, repliedAt: sentAt.Add(80 * time.Millisecond), result: registerAcked}
+	if err := fixture.controller.handleProbe(probe); err != nil {
+		t.Fatalf("handleProbe: %v", err)
+	}
+	health, err := fixture.controller.health.Path(0)
+	if err != nil {
+		t.Fatalf("health: %v", err)
+	}
+	if health.RTT != 80*time.Millisecond {
+		t.Fatalf("round-trip time = %s, want 80ms", health.RTT)
+	}
+}
+
 func statusOf(err error) int {
 	var failure *apiError
 	if errors.As(err, &failure) {

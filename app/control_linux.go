@@ -39,6 +39,9 @@ type linuxClientControls struct {
 
 	mu   sync.Mutex
 	icmp *net.IPConn
+	// raw sends the frames that go through a bridge. It opens on first use.
+	raw     int
+	rawOpen bool
 }
 
 func newClientPathOpener() clientControls {
@@ -146,6 +149,9 @@ func readDownICMP(connection *net.IPConn, nonce uint64, router *ackRouter, handl
 }
 
 func (c *linuxClientControls) sendUp(registration pathRegistration, frame []byte) error {
+	if registration.path.BridgeReflect() {
+		return c.sendUpViaBridge(registration, frame)
+	}
 	ifindex := 0
 	if name := registration.path.Interface; name != "" {
 		networkInterface, err := net.InterfaceByName(name)
@@ -175,6 +181,28 @@ func (c *linuxClientControls) sendUp(registration pathRegistration, frame []byte
 	}
 	_, _, err := connection.WriteMsgIP(echo, oob, &net.IPAddr{IP: net.IP(registration.path.Server.AsSlice())})
 	return err
+}
+
+// sendUpViaBridge sends a control frame on an up path that reflects through a
+// bridge. Such a client does not reach the server directly, which is the
+// reason for the bridge, so a frame that it sends straight to the server is
+// lost. The bridge emits the frame to the server from the advertised IP.
+func (c *linuxClientControls) sendUpViaBridge(registration pathRegistration, frame []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.rawOpen {
+		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_RAW)
+		if err != nil {
+			return fmt.Errorf("open raw socket for the bridge: %w", err)
+		}
+		c.raw, c.rawOpen = fd, true
+	}
+	// The socket serves every bridge path, so each send sets its interface.
+	if err := unix.BindToDevice(c.raw, registration.path.Interface); err != nil {
+		return fmt.Errorf("bind the bridge socket to %q: %w", registration.path.Interface, err)
+	}
+	packet := bridgeControlPacket(registration, frame, 0)
+	return unix.Sendto(c.raw, packet, 0, &unix.SockaddrInet4{Addr: registration.path.ProxyBridge.As4()})
 }
 
 // dropAllInput attaches a socket filter that drops every packet, for a raw
@@ -289,7 +317,7 @@ func (s *icmpPathConn) Run(ctx context.Context, report probeReporter) error {
 			return err
 		}
 		result := s.register(frame, sentAt, sequence)
-		if err := report(ctx, sequence, sentAt, result); err != nil {
+		if err := report(ctx, sequence, sentAt, time.Time{}, result); err != nil {
 			return err
 		}
 		if err := sleepContext(ctx, registrationDelay(result == registerAcked)); err != nil {

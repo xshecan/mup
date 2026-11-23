@@ -304,7 +304,7 @@ func (s *udpPathConn) Run(ctx context.Context, report probeReporter) error {
 		if err != nil {
 			return err
 		}
-		if err := report(ctx, sequence, sentAt, result); err != nil {
+		if err := report(ctx, sequence, sentAt, time.Time{}, result); err != nil {
 			return err
 		}
 		if err := sleepContext(ctx, registrationDelay(result == registerAcked)); err != nil {

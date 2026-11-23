@@ -67,7 +67,7 @@ func startLoopbackPath(t *testing.T, sockets *udpControlSockets, registration pa
 	ctx, cancel := context.WithCancel(context.Background())
 	running := &runningPath{outcomes: make(chan probeOutcome, 16), cancel: cancel, done: make(chan error, 1)}
 	go func() {
-		running.done <- path.Run(ctx, func(ctx context.Context, sequence uint32, _ time.Time, result registerResult) error {
+		running.done <- path.Run(ctx, func(ctx context.Context, sequence uint32, _, _ time.Time, result registerResult) error {
 			select {
 			case running.outcomes <- probeOutcome{sequence: sequence, success: result == registerAcked}:
 			default:
