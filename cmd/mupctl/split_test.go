@@ -44,9 +44,9 @@ func TestStatusShowsSeparateDirections(t *testing.T) {
 		"51820   fallback   1/1 healthy   burst         1/2 healthy    0",
 		"51821   balancer   1/1 healthy   -             -              0",
 		"ID   PATH      GROUP   SERVER",
-		"0    ingress   51820   203.0.113.5:9000   udp         -                 eth0        healthy     yes      ack 4s",
-		"0    egress    51820   203.0.113.5:9200   icmp        198.51.100.0/28   -           healthy     yes      probe 1s",
-		"1    egress    51820   203.0.113.5:9300   udp         -                 -           unhealthy   no       probe never",
+		"0    ingress   51820   203.0.113.5:9000   udp         -                 eth0        active      4s ago",
+		"0    egress    51820   203.0.113.5:9200   icmp        198.51.100.0/28   -           active      1s ago",
+		"1    egress    51820   203.0.113.5:9300   udp         -                 -           unhealthy   never",
 		"1    -         51821   203.0.113.6:5000   icmp",
 	} {
 		if !strings.Contains(stdout, want) {

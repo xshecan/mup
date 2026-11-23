@@ -137,9 +137,10 @@ func TestStatusShowsTheClientOverview(t *testing.T) {
 		"GROUP   MODE       PATHS         PEERS",
 		"51820   fallback   2/2 healthy   12",
 		"51821   burst      0/1 healthy   2",
-		"ID   GROUP   SERVER              TRANSPORT   VIA       INTERFACE   STATUS      IN USE   LAST ACK   RTT",
-		"0    51820   203.0.113.5:5000    udp         -         eth0        healthy     yes      4s         12.3ms",
-		"2    51821   198.51.100.7:6000   udp         1.1.1.1   -           unhealthy   no       never      -",
+		"ID   GROUP   SERVER              TRANSPORT   VIA       INTERFACE   STATE       SEEN     RTT",
+		"0    51820   203.0.113.5:5000    udp         -         eth0        active      4s ago   12.3ms",
+		"1    51820   203.0.113.6:5000    icmp        -         eth1        standby     never    -",
+		"2    51821   198.51.100.7:6000   udp         1.1.1.1   -           unhealthy   never    -",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("status output misses %q:\n%s", want, stdout)

@@ -167,10 +167,13 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 		bridged = bridged || path.Bridge
 	}
 	table := newTable(w)
-	header := []string{"ID", "GROUP", "SERVER", "TRANSPORT", "VIA", "INTERFACE", "STATUS", "IN USE", "LAST ACK", "RTT"}
+	// STATE joins the health of a path and its use: a healthy path is active
+	// when the group sends on it, and standby when it waits. SEEN is the age of
+	// the latest answer of the server: the ACK of an ingress path, or the probe
+	// of an egress path.
+	header := []string{"ID", "GROUP", "SERVER", "TRANSPORT", "VIA", "INTERFACE", "STATE", "SEEN", "RTT"}
 	if split {
-		// An ingress path shows its latest ACK, and an egress path its latest probe.
-		header = []string{"ID", "PATH", "GROUP", "SERVER", "TRANSPORT", "VIA", "INTERFACE", "STATUS", "IN USE", "LAST", "RTT"}
+		header = []string{"ID", "PATH", "GROUP", "SERVER", "TRANSPORT", "VIA", "INTERFACE", "STATE", "SEEN", "RTT"}
 	}
 	if bridged {
 		// A bridge path shows the bridge address in the SERVER column.
@@ -181,18 +184,13 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 	}
 	row(table, header...)
 	for _, path := range paths {
-		lastACK := "never"
-		if !path.LastACK.IsZero() {
-			lastACK = humanDuration(now.Sub(path.LastACK))
+		latest := path.LastACK
+		if path.Direction == "egress" {
+			latest = path.LastProbe
 		}
-		if split {
-			lastACK = "ack " + lastACK
-			if path.Direction == "egress" {
-				lastACK = "probe never"
-				if !path.LastProbe.IsZero() {
-					lastACK = "probe " + humanDuration(now.Sub(path.LastProbe))
-				}
-			}
+		seen := "never"
+		if !latest.IsZero() {
+			seen = humanDuration(now.Sub(latest)) + " ago"
 		}
 		cells := []string{strconv.Itoa(path.ID)}
 		if split {
@@ -211,9 +209,8 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 			path.Transport,
 			orDash(path.ReturnIP),
 			orDash(path.Interface),
-			pathStatusText(path),
-			yesNo(path.InUse),
-			lastACK,
+			pathStateText(path),
+			seen,
 			formatRTT(path.RTTSeconds),
 		)
 		if wide {
@@ -475,6 +472,19 @@ func orDash(value string) string {
 
 // pathStatusText shows the health of a path, and the reason of an unhealthy
 // path when the daemon knows it.
+// pathStateText gives one word for the health and the use of a path: active
+// for a healthy path that the group sends on, standby for a healthy path that
+// waits, and unhealthy, with the reason if the daemon gave one.
+func pathStateText(path api.Path) string {
+	if !path.Healthy {
+		return pathStatusText(path)
+	}
+	if path.InUse {
+		return "active"
+	}
+	return "standby"
+}
+
 func pathStatusText(path api.Path) string {
 	text := healthText(path.Healthy)
 	if !path.Healthy && path.Reason != "" {
