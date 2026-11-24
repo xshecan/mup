@@ -59,8 +59,7 @@ func (r *Runtime) Snapshot() (StatsSnapshot, error) {
 		r.objects.RegistrationByKey, "registrations"); err != nil {
 		return StatsSnapshot{}, err
 	}
-	if snapshot.RegisteredPaths, err = countEntries[mupRegisteredPathKeyV1, mupRegisteredPathValueV1](
-		r.objects.RegisteredPaths, "registered paths"); err != nil {
+	if snapshot.RegisteredPaths, err = r.countExactRegisteredPaths(); err != nil {
 		return StatsSnapshot{}, err
 	}
 	if snapshot.ClientRoutes, err = countEntries[mupPeerEndpointKeyV1, mupPeerTokenValueV1](
@@ -133,4 +132,22 @@ func (r *Runtime) ConsumeEvents(ctx context.Context, consume func(Event)) error 
 		}
 		consume(event)
 	}
+}
+
+// countExactRegisteredPaths counts the registered paths without their tagged
+// entries, so a path with a tagged twin counts once.
+func (r *Runtime) countExactRegisteredPaths() (uint64, error) {
+	iterator := r.objects.RegisteredPaths.Iterate()
+	var key mupRegisteredPathKeyV1
+	var value mupRegisteredPathValueV1
+	var count uint64
+	for iterator.Next(&key, &value) {
+		if key.Tag == 0 {
+			count++
+		}
+	}
+	if err := iterator.Err(); err != nil && !errors.Is(err, ebpf.ErrIterationAborted) {
+		return 0, fmt.Errorf("count registered paths: %w", err)
+	}
+	return count, nil
 }

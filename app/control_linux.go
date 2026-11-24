@@ -711,6 +711,8 @@ func acceptRegistration(
 			ServerPort: serverPort,
 			Transport:  transport,
 			PathID:     frame.PathID,
+			SrcFirst:   frame.SrcFirst,
+			SrcLast:    frame.SrcLast,
 		},
 	}
 	if err := sink.RegisterPath(settings); err != nil {
@@ -750,6 +752,10 @@ func acceptRegistration(
 	ackFrame.Type = protocol.ControlRegisterACK
 	ackFrame.Status = status
 	ackFrame.LeaseSeconds = registrationLeaseSeconds
+	// Only a REGISTER carries the source range, so an ACK with it would not
+	// encode.
+	ackFrame.Flags &^= protocol.ControlFlagSourceRange
+	ackFrame.SrcFirst, ackFrame.SrcLast = 0, 0
 	ack := make([]byte, protocol.ControlFrameLength)
 	if err := protocol.EncodeControlFrame(ack, ackFrame); err != nil {
 		return nil, err

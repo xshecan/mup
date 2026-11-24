@@ -19,7 +19,7 @@ func (r *Runtime) SetPath(slot int, path PathSettings) error {
 	if r.closed {
 		return errors.New("set path: MUP dataplane is closed")
 	}
-	return applyPath(r.objects.PathConfig, r.objects.PathReturns, r.objects.UpReflectMembers, slot, path)
+	return applyPath(r.objects.PathConfig, r.objects.PathReturns, r.objects.UpReflectMembers, r.objects.ClientPathSrc, slot, path)
 }
 
 // ClearPath removes the configuration of one client path slot.
@@ -29,7 +29,7 @@ func (r *Runtime) ClearPath(slot int) error {
 	if r.closed {
 		return errors.New("clear path: MUP dataplane is closed")
 	}
-	return clearPath(r.objects.PathConfig, r.objects.PathReturns, r.objects.UpReflectMembers, slot)
+	return clearPath(r.objects.PathConfig, r.objects.PathReturns, r.objects.UpReflectMembers, r.objects.ClientPathSrc, slot)
 }
 
 // SetIngressReflect writes the healthy reflect members of an ingress reflect path slot.
@@ -135,7 +135,8 @@ func (r *Runtime) Registrations() ([]Registration, error) {
 	return registrations, nil
 }
 
-// RegisteredPaths lists the registered client paths of a server.
+// RegisteredPaths lists the registered client paths of a server. A tagged
+// entry is the twin of an exact entry, so the list skips it.
 func (r *Runtime) RegisteredPaths() ([]RegisteredPath, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -152,6 +153,9 @@ func (r *Runtime) RegisteredPaths() ([]RegisteredPath, error) {
 	}
 	paths := make([]RegisteredPath, 0, len(entries))
 	for key, value := range entries {
+		if key.Tag != 0 {
+			continue
+		}
 		paths = append(paths, decodeRegisteredPath(key, value, uint64(now)))
 	}
 	slices.SortFunc(paths, func(a, b RegisteredPath) int {

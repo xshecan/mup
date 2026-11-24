@@ -47,6 +47,11 @@ type PathSettings struct {
 	// ProxyBridge is set on an ingress reflect path that a bridge emits. The client
 	// wraps the reflected packet for the bridge instead of sending it itself.
 	ProxyBridge netip.Addr
+	// SrcFirst and SrcLast are the source range of the path. Each data packet
+	// takes a random UDP source port or ICMP identifier from it. Zero means
+	// no range.
+	SrcFirst uint16
+	SrcLast  uint16
 }
 
 type ServerSettings struct {
@@ -252,6 +257,18 @@ func encodePathSettings(index int, path PathSettings) (mupPathConfigV1, error) {
 		Priority:      path.Priority,
 		Bridge:        bridge,
 	}, nil
+}
+
+// encodePathSrc encodes the source range of a client path or egress path.
+// Zero for both encodes no range.
+func encodePathSrc(name string, first, last uint16) (mupPathSrcV1, error) {
+	if first == 0 && last == 0 {
+		return mupPathSrcV1{}, nil
+	}
+	if first == 0 || last < first {
+		return mupPathSrcV1{}, fmt.Errorf("%s source range %d-%d must have FIRST from 1 and not above LAST", name, first, last)
+	}
+	return mupPathSrcV1{First: first, Last: last}, nil
 }
 
 func encodeServerSettings(settings ServerSettings) (mupServerConfigV1, mupServerPortsV1, error) {

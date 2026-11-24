@@ -248,6 +248,8 @@ func (r *Runtime) ConfigureClient(settings ClientSettings) error {
 		ingressReflect: r.objects.UpReflectMembers,
 		state:          r.objects.PathState,
 		downs:          r.objects.ClientDownPaths,
+		pathSrc:        r.objects.ClientPathSrc,
+		downSrc:        r.objects.ClientDownSrc,
 	}, settings)
 }
 

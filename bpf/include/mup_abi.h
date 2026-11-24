@@ -59,6 +59,23 @@
  * several down paths, so the client drops the later copies.
  */
 #define MUP_GROUP_FLAG_DEDUP (1U << 0)
+/*
+ * The Echo sequence of an ICMP data packet holds the peer token in bits 0 to
+ * 11 and a path tag in bits 12 to 15. A packet of a path with a source range
+ * has the tag of its path slot plus one, 1 to MUP_MAX_PATH_TAG. Every other
+ * packet has tag 0, so its sequence is the token alone. A device that
+ * completes a partial checksum can write 0xffff into the sequence, so a tag
+ * above MUP_MAX_PATH_TAG counts as tag 0.
+ */
+#define MUP_ICMP_TAG_SHIFT 12
+#define MUP_ICMP_TOKEN_MASK 0x0fffU
+#define MUP_MAX_PATH_TAG 8U
+#define MUP_ICMP_SEQUENCE(tag, token) \
+	((((__u32)(tag)) << MUP_ICMP_TAG_SHIFT) | \
+	 ((__u32)(token) & MUP_ICMP_TOKEN_MASK))
+#define MUP_ICMP_SEQUENCE_TAG(sequence) \
+	(((__u32)(sequence) >> MUP_ICMP_TAG_SHIFT) & 0xfU)
+#define MUP_ICMP_SEQUENCE_TOKEN(sequence) ((__u32)(sequence) & MUP_ICMP_TOKEN_MASK)
 
 enum mup_mode {
 	MUP_MODE_FALLBACK = 0,
@@ -143,12 +160,18 @@ struct server_route_key_v1 {
 	__u32 padding;
 };
 
+/*
+ * An exact key has the server port of the path and tag 0. The tagged key of
+ * an ICMP path with a source range has a server_port of 0 and the path tag,
+ * the path slot plus one. The server looks up the tagged key for an Echo
+ * packet with a tag, because its identifier is a random value of the range.
+ */
 struct registered_path_key_v1 {
 	__be32 source_ip;
 	__be32 local_ip;
 	__be16 server_port;
 	__u8 transport;
-	__u8 padding;
+	__u8 tag;
 };
 
 struct client_config_v1 {
@@ -241,6 +264,13 @@ struct down_path_v1 {
 	__u32 count;
 	__be32 local_ip;
 	__be32 members[MUP_MAX_POOL];
+	/*
+	 * The source range of the path in host order, or a src_first of 0 for
+	 * none. Each reply then takes a random UDP source port or ICMP
+	 * identifier of the range, and an ICMP reply has the tag of the path.
+	 */
+	__u16 src_first;
+	__u16 src_last;
 };
 
 /*
@@ -321,7 +351,16 @@ struct registered_path_value_v1 {
 	__be32 return_ip;
 	/* The listen port of the group whose REGISTER frame made the path. */
 	__be16 listen_port;
-	__u8 padding[6];
+	/*
+	 * The source range of the path, or a src_first of 0 for none. A tagged
+	 * Echo packet is data of the path only when its identifier is in the
+	 * range. server_port is the server port of the path, because a tagged
+	 * key does not hold it. All three are in host order, like listen_port,
+	 * which Go writes as a plain number although its type says __be16.
+	 */
+	__u16 src_first;
+	__u16 src_last;
+	__u16 server_port;
 };
 
 struct peer_endpoint_key_v1 {
@@ -356,7 +395,13 @@ struct server_route_value_v1 {
 	__u64 last_seen_ns;
 	/* The listen port of the group of the path that the route follows. */
 	__be16 listen_port;
-	__u8 padding[6];
+	/*
+	 * The source range of the path that the route follows, in host order,
+	 * from the registered path. A src_first of 0 means none.
+	 */
+	__u16 src_first;
+	__u16 src_last;
+	__u8 padding[2];
 };
 
 struct server_reverse_value_v1 {
@@ -390,6 +435,17 @@ struct path_return_v1 {
 	__u8 flags;
 	__u8 prefix;
 	__u8 padding[2];
+};
+
+/*
+ * path_src_v1 is the source range of one client path, in host order. Each data
+ * packet of the path takes a random UDP source port or ICMP identifier from
+ * first to last. A first of 0 means no range. client_path_src holds it by path
+ * slot, and client_down_src by down path slot.
+ */
+struct path_src_v1 {
+	__u16 first;
+	__u16 last;
 };
 
 /*
@@ -481,7 +537,8 @@ _Static_assert(sizeof(struct client_duplicate_key_v1) == 28, "client_duplicate_k
 _Static_assert(sizeof(struct down_group_key_v1) == 24, "down_group_key_v1 ABI");
 _Static_assert(sizeof(struct down_group_v1) == 4, "down_group_v1 ABI");
 _Static_assert(sizeof(struct down_path_key_v1) == 24, "down_path_key_v1 ABI");
-_Static_assert(sizeof(struct down_path_v1) == 88, "down_path_v1 ABI");
+_Static_assert(sizeof(struct down_path_v1) == 92, "down_path_v1 ABI");
+_Static_assert(sizeof(struct path_src_v1) == 4, "path_src_v1 ABI");
 _Static_assert(sizeof(struct bridge_config_v1) == 8, "bridge_config_v1 ABI");
 _Static_assert(sizeof(struct bridge_allow_key_v1) == 12, "bridge_allow_key_v1 ABI");
 _Static_assert(sizeof(struct event_limit_v1) == 16, "event_limit_v1 ABI");

@@ -185,5 +185,7 @@ func clientPathSettings(path config.Path, advertisedIP netip.Addr, ifindex int, 
 		ReturnPrefix:  path.ReturnPrefix,
 		Balance:       path.Balance,
 		ProxyBridge:   path.ProxyBridge,
+		SrcFirst:      path.SrcFirst,
+		SrcLast:       path.SrcLast,
 	}
 }

@@ -124,6 +124,10 @@ type Path struct {
 	LastACK    time.Time `json:"last_ack,omitzero"`
 	LastProbe  time.Time `json:"last_probe,omitzero"`
 	RTTSeconds float64   `json:"rtt_seconds,omitzero"`
+	// SrcFirst and SrcLast are the source range of the data packets of the
+	// path, or zero for none.
+	SrcFirst uint16 `json:"src_first,omitempty"`
+	SrcLast  uint16 `json:"src_last,omitempty"`
 }
 
 // Peer is one WireGuard peer of a client.
@@ -212,6 +216,10 @@ type EgressPath struct {
 	Members        int     `json:"members"`
 	HealthyMembers int     `json:"healthy_members"`
 	LeaseSeconds   float64 `json:"lease_seconds"`
+	// SrcFirst and SrcLast are the source range of the replies, or zero for
+	// none.
+	SrcFirst uint16 `json:"src_first,omitempty"`
+	SrcLast  uint16 `json:"src_last,omitempty"`
 }
 
 type RegisteredPath struct {
@@ -222,6 +230,10 @@ type RegisteredPath struct {
 	Transport    string  `json:"transport"`
 	ReturnIP     string  `json:"return_ip,omitempty"`
 	LeaseSeconds float64 `json:"lease_seconds"`
+	// SrcFirst and SrcLast are the source range of the path, or zero for
+	// none.
+	SrcFirst uint16 `json:"src_first,omitempty"`
+	SrcLast  uint16 `json:"src_last,omitempty"`
 }
 
 type Drop struct {

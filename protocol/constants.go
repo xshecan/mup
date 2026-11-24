@@ -89,6 +89,11 @@ const (
 	// source, and the bridge sends the reply from its own address. It needs
 	// ControlFlagBridge and ControlFlagReturnIP or ControlFlagReturnPool.
 	ControlFlagBridgeVia uint8 = 1 << 6
+	// ControlFlagSourceRange marks a REGISTER or an EGRESS_REGISTER of a path with a
+	// source range. The frame then holds the first and the last value of the
+	// range, and every data packet of the path takes its source port or its
+	// ICMP identifier from it. The control frames keep the fixed port.
+	ControlFlagSourceRange uint8 = 1 << 7
 )
 
 type DropReason uint32

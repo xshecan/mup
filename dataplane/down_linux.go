@@ -17,7 +17,7 @@ func (r *Runtime) SetEgressPath(slot int, path *EgressPathSettings) error {
 	if r.closed {
 		return errors.New("set egress path: MUP dataplane is closed")
 	}
-	return applyEgressPath(r.objects.ClientDownPaths, slot, path)
+	return applyEgressPath(r.objects.ClientDownPaths, r.objects.ClientDownSrc, slot, path)
 }
 
 // EgressPathsSeen returns, for each client egress path slot, the time since the

@@ -31,6 +31,8 @@ type fakeClientDataplane struct {
 	attached   []int
 	routes     []dataplane.ClientRoute
 	reflect    map[int][]netip.Addr
+	// egresses holds the egress path slots that are set.
+	egresses map[int]dataplane.EgressPathSettings
 }
 
 func (f *fakeClientDataplane) record(entry string) {
@@ -75,11 +77,16 @@ func (f *fakeClientDataplane) SetIngressReflect(slot int, members []netip.Addr, 
 func (f *fakeClientDataplane) SetEgressPath(slot int, path *dataplane.EgressPathSettings) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.egresses == nil {
+		f.egresses = map[int]dataplane.EgressPathSettings{}
+	}
 	if path == nil {
 		f.record(fmt.Sprintf("egress %d clear", slot))
+		delete(f.egresses, slot)
 		return nil
 	}
 	f.record(fmt.Sprintf("egress %d %s:%d", slot, path.Server, path.ServerPort))
+	f.egresses[slot] = *path
 	return nil
 }
 

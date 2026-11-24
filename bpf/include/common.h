@@ -164,6 +164,7 @@ static long (*bpf_map_update_elem)(const void *map, const void *key,
 				   const void *value, __u64 flags) = (void *)2;
 static long (*bpf_map_delete_elem)(const void *map, const void *key) = (void *)3;
 static __u64 (*bpf_ktime_get_ns)(void) = (void *)5;
+static __u32 (*bpf_get_prandom_u32)(void) = (void *)7;
 static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *)23;
 static long (*bpf_clone_redirect)(struct __sk_buff *skb, __u32 ifindex,
 				  __u64 flags) = (void *)13;

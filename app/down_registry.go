@@ -69,8 +69,12 @@ type serverEgressPath struct {
 	prefix     uint8
 	perPacket  bool
 	ifindex    int
-	since      time.Time
-	expires    time.Time
+	// srcFirst and srcLast are the source range of the replies, or zero for
+	// none. The probes and the ACKs keep port.
+	srcFirst uint16
+	srcLast  uint16
+	since    time.Time
+	expires  time.Time
 	// replies holds the time of the latest probe reply through each member,
 	// or through the server address of a direct path.
 	replies map[netip.Addr]time.Time
@@ -100,7 +104,8 @@ func (p *serverEgressPath) sameAs(frame protocol.ControlFrame) bool {
 		p.returnIP == frame.ReturnIP && p.prefix == frame.ReturnPrefix &&
 		p.perPacket == (frame.Flags&protocol.ControlFlagBalancePerPacket != 0) &&
 		p.bridge == (frame.Flags&protocol.ControlFlagBridge != 0) &&
-		p.bridgeVia == (frame.Flags&protocol.ControlFlagBridgeVia != 0)
+		p.bridgeVia == (frame.Flags&protocol.ControlFlagBridgeVia != 0) &&
+		p.srcFirst == frame.SrcFirst && p.srcLast == frame.SrcLast
 }
 
 // destination is the address that the server sends a reply of the path to:
@@ -216,6 +221,8 @@ func (r *egressRegistry) register(frame protocol.ControlFrame, now time.Time) er
 			perPacket:  frame.Flags&protocol.ControlFlagBalancePerPacket != 0,
 			bridge:     bridge,
 			bridgeVia:  frame.Flags&protocol.ControlFlagBridgeVia != 0,
+			srcFirst:   frame.SrcFirst,
+			srcLast:    frame.SrcLast,
 			since:      now,
 			replies:    make(map[netip.Addr]time.Time),
 		}
@@ -441,6 +448,8 @@ func (r *egressRegistry) syncClientLocked(client dataplane.ClientKey, now time.T
 			Bridge:     path.bridge,
 			BridgeVia:  path.bridgeVia,
 			LocalIP:    path.localIP,
+			SrcFirst:   path.srcFirst,
+			SrcLast:    path.srcLast,
 		}
 		if path.pool() {
 			entry.Members = healthy
@@ -503,7 +512,8 @@ func sameEgressEntry(a, b dataplane.EgressPathEntry) bool {
 	return members && a.Client == b.Client && a.PathID == b.PathID && a.Server == b.Server &&
 		a.ServerPort == b.ServerPort && a.Transport == b.Transport && a.Ifindex == b.Ifindex &&
 		a.ReturnIP == b.ReturnIP && a.Pool == b.Pool && a.PerPacket == b.PerPacket &&
-		a.Bridge == b.Bridge && a.BridgeVia == b.BridgeVia && a.LocalIP == b.LocalIP
+		a.Bridge == b.Bridge && a.BridgeVia == b.BridgeVia && a.LocalIP == b.LocalIP &&
+		a.SrcFirst == b.SrcFirst && a.SrcLast == b.SrcLast
 }
 
 // clients returns the egress groups of each client for mupctl, keyed by client
@@ -530,6 +540,8 @@ func (r *egressRegistry) clients(now time.Time) map[dataplane.ClientKey][]api.Eg
 				Members:        len(r.candidatesLocked(path)),
 				HealthyMembers: len(healthy),
 				LeaseSeconds:   path.expires.Sub(now).Seconds(),
+				SrcFirst:       path.srcFirst,
+				SrcLast:        path.srcLast,
 			}
 			switch {
 			case path.pool():

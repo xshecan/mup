@@ -68,7 +68,8 @@ func releaseResource[T uint16 | uint32, V any](queue, owners *ebpf.Map, value T)
 }
 
 // expireRegistrations deletes expired registrations, and the registered paths
-// of expired or revoked registrations. It returns the live registrations.
+// of expired or revoked registrations, with their tagged entries. It returns
+// the live registrations.
 // Only Go writes these maps, and r.mu serializes the writers.
 func (r *Runtime) expireRegistrations(nowNS uint64) (map[mupClientKeyV1]mupRegistrationValueV1, error) {
 	registrations, err := mapEntries[mupClientKeyV1, mupRegistrationValueV1](r.objects.RegistrationByKey)
@@ -95,6 +96,14 @@ func (r *Runtime) expireRegistrations(nowNS uint64) (map[mupClientKeyV1]mupRegis
 		}
 		if err := deleteEntry(r.objects.RegisteredPaths, key); err != nil {
 			return nil, fmt.Errorf("delete expired path: %w", err)
+		}
+		delete(paths, key)
+	}
+	// A tagged entry and its exact twin expire together above. This also
+	// deletes a tagged entry whose twin went away or changed without it.
+	for _, key := range staleTaggedPaths(paths) {
+		if err := deleteEntry(r.objects.RegisteredPaths, key); err != nil {
+			return nil, fmt.Errorf("delete stale tagged path: %w", err)
 		}
 	}
 	return registrations, nil

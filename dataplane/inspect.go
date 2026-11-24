@@ -32,7 +32,11 @@ type ServerRoute struct {
 	Ifindex    int
 	// ListenPort is the listen port of the client group that the route follows.
 	ListenPort uint16
-	Idle       time.Duration
+	// SrcFirst and SrcLast are the source range of the path of the route, or
+	// zero for none.
+	SrcFirst uint16
+	SrcLast  uint16
+	Idle     time.Duration
 }
 
 // Registration is one client registration on a server. ExpiresIn is
@@ -61,6 +65,10 @@ type RegisteredPath struct {
 	// nonzero.
 	ReturnIP     netip.Addr
 	ReturnPrefix uint8
+	// SrcFirst and SrcLast are the source range of the path, or zero for
+	// none.
+	SrcFirst uint16
+	SrcLast  uint16
 }
 
 // sinceNS returns how long ago a monotonic timestamp was, and zero for a
@@ -111,6 +119,8 @@ func decodeServerRoute(reverse mupServerReverseValueV1, nowNS uint64) ServerRout
 		ServerLocal:  ipv4FromWord(value.ServerLocalIp),
 		Ifindex:      int(value.Ifindex),
 		ListenPort:   value.ListenPort,
+		SrcFirst:     value.SrcFirst,
+		SrcLast:      value.SrcLast,
 		Idle:         sinceNS(value.LastSeenNs, nowNS),
 	}
 	route.ReturnIP, route.ReturnPool = decodeReturn(value.Flags, value.ReturnIp)
@@ -150,6 +160,8 @@ func decodeRegisteredPath(key mupRegisteredPathKeyV1, value mupRegisteredPathVal
 		PathID:     value.PathId,
 		ListenPort: value.ListenPort,
 		ExpiresIn:  untilNS(value.ExpiresAtNs, nowNS),
+		SrcFirst:   value.SrcFirst,
+		SrcLast:    value.SrcLast,
 	}
 	var pool bool
 	path.ReturnIP, pool = decodeReturn(value.Flags, value.ReturnIp)

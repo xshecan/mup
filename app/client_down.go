@@ -197,6 +197,12 @@ func egressRegisterFrame(registration pathRegistration, slot uint16, path config
 	if path.BridgeVia {
 		frame.Flags |= protocol.ControlFlagBridgeVia
 	}
+	// The source range takes the bytes of the sequence, and the server does
+	// not read the sequence of a EGRESS_REGISTER.
+	setSourceRange(&frame, path)
+	if frame.Flags&protocol.ControlFlagSourceRange != 0 {
+		frame.Sequence = 0
+	}
 	packet := make([]byte, protocol.ControlFrameLength)
 	if err := protocol.EncodeControlFrame(packet, frame); err != nil {
 		return nil, err

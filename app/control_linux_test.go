@@ -359,3 +359,45 @@ func TestAcceptRegistrationReportsAPoolWithoutReflector(t *testing.T) {
 		}
 	}
 }
+
+func TestAcceptRegistrationPassesTheSourceRangeAndSendsAnACKWithoutIt(t *testing.T) {
+	t.Parallel()
+
+	client := netip.MustParseAddr("192.0.2.10")
+	local := netip.MustParseAddr("198.51.100.1")
+	for _, transport := range []protocol.TransportID{protocol.TransportUDP, protocol.TransportICMP} {
+		frame, err := registrationFrame(pathRegistration{
+			advertisedIP: client,
+			listenPort:   51820,
+			path:         config.Path{Server: local, ServerPort: 5001, Transport: transport, SrcFirst: 20000, SrcLast: 20999},
+			nonce:        1,
+			pathID:       3,
+		}, 7)
+		if err != nil {
+			t.Fatalf("%s: registrationFrame: %v", transport, err)
+		}
+		registry := control.NewRegistry(5000, 5001, 30*time.Second)
+		sink := &recordingSink{}
+		ack, err := acceptRegistration(frame, transport, 5001, client, local, registry, sink, newReflectorTargets(), nil)
+		if err != nil {
+			t.Fatalf("%s: acceptRegistration: %v", transport, err)
+		}
+		if len(sink.registered) != 1 {
+			t.Fatalf("%s: registered = %#v, want one path", transport, sink.registered)
+		}
+		if path := sink.registered[0].Path; path.SrcFirst != 20000 || path.SrcLast != 20999 || path.PathID != 3 {
+			t.Fatalf("%s: registered path = %#v, want the range 20000-20999 on path 3", transport, path)
+		}
+		decoded, err := protocol.DecodeControlFrame(ack)
+		if err != nil {
+			t.Fatalf("%s: decode ACK: %v", transport, err)
+		}
+		if decoded.Type != protocol.ControlRegisterACK || decoded.Flags&protocol.ControlFlagSourceRange != 0 ||
+			decoded.SrcFirst != 0 || decoded.SrcLast != 0 || decoded.Sequence != 7 {
+			t.Fatalf("%s: ACK = %#v, want a REGISTER_ACK of sequence 7 without the source range", transport, decoded)
+		}
+		if err := validateRegistrationACK(ack, 1, 3, 7); err != nil {
+			t.Fatalf("%s: the client refuses the ACK: %v", transport, err)
+		}
+	}
+}

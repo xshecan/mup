@@ -146,7 +146,7 @@ server:
 | `client.servers[].mode` | `--mode` | Optional. The path mode of the group. The default is `failover`. |
 | `client.servers[].ingress`, `client.servers[].egress` | `--ingress`, `--egress` | Optional. A `mode` and `routes` for each direction, in place of `mode` and `routes`. See [Separate ingress and egress paths](#separate-ingress-and-egress-paths). |
 | `client.servers[].ingress.bridges`, `client.servers[].egress.bridges` | `--ingress-bridge`, `--egress-bridge` | Optional. The paths through a bridge in each direction. An egress bridge can have `via`. See [Bridges](#bridges). |
-| `client.servers[].routes` | `-u` | The paths of the group, in the form of the `-u` flag. A path can end with `via RETURN_IP`. The server port of a path can be a range, `FIRST-LAST`. See [Server port ranges](#server-port-ranges). |
+| `client.servers[].routes` | `-u` | The paths of the group, in the form of the `-u` flag. A path can end with `via RETURN_IP`. The server port of a path can be a range, `FIRST-LAST`. See [Server port ranges](#server-port-ranges). A path can also end with `src FIRST-LAST`. See [Source range](#source-range). |
 | `server.port` | `-p` | The UDP ports and the ICMP Echo identifiers that the server accepts, as `PORT` or `FIRST-LAST`, for example `5000-6000`. |
 | `server.target` | `-r` | The WireGuard target that receives all traffic. |
 | `server.control_socket` | `--control-socket` | Optional. The socket for `mupctl`. An empty value turns the socket off. |
@@ -205,7 +205,7 @@ The client picks the ingress path of each packet with the ingress mode. The serv
 An egress route has the form of a path, with these differences:
 
 - `SERVER` is an address of the server host. A direct egress path sends the replies from it, and the server sends through the interface that holds it.
-- `PORT` is one port of `server.port`. It is the UDP source port of the replies, or the identifier of ICMP replies.
+- `PORT` is one port of `server.port`. Without a source range, it is the UDP source port of the replies, or the identifier of ICMP replies.
 - `via` is optional, as in a path. The server reflects the replies through the return IP or the pool.
 - An egress route has no `%IFACE` and no port range.
 
@@ -237,6 +237,42 @@ These rules apply:
 The client sends each REGISTER reflected through every member, so the server registers one path for each member that reflects. The client keeps the members whose ACK comes back, and spreads the ingress over them. A member that stops reflecting loses its registration and drops out, so the path carries no ingress through a dead member.
 
 The client must send a packet whose source is not the client address, which is the same spoofing that a reflected egress path needs. An old server rejects an ingress reflect REGISTER, so the path stays unhealthy.
+
+## Source range
+
+Every data packet that MUP sends has a source value. It is the UDP source port, or the ICMP Echo identifier. Without a source range, this value is fixed for each path:
+
+- An ingress UDP packet leaves the client from the listen port of its group.
+- An egress UDP packet leaves the server from the server port of the path.
+- An ICMP packet of either direction has the server port of the path as its identifier.
+
+A network can limit or block one flow and pass the other flows. To spread a path over many flows, end its route with `src FIRST-LAST`. Each data packet of the path then takes a random value of the range. A different value for each packet can also send the packets over different roads of the network, so they can arrive out of order.
+
+```yaml
+routes:
+  - 160.119.74.99:9000/udp src 20000-29999
+  - 160.119.74.99:9000/icmp via 87.107.117.192/28 per-packet src 20000-29999
+```
+
+```yaml
+egress:
+  bridges:
+    - 91.216.217.188:5000/udp via 178.160.228.1 src 5000-50000
+```
+
+These rules apply:
+
+- `FIRST` and `LAST` are between 1 and 65535. The route `src 6000` has a range of one value. The range comes after `via` and before `bridge`.
+- The option works for UDP and ICMP, and for ingress and egress. On a route of a group without separate directions, the range applies to both directions. On a route in an `ingress` or `egress` block, it applies to that direction.
+- The control frames keep the fixed port of the route. So the REGISTER frames no longer share one flow with the data of such a path.
+- A UDP ingress path needs the option only on the client, because the server does not look at the source port. The other three cases need a server of v0.5.1 or later, like the client.
+- The client accepts a UDP egress reply when its source port is in the range. Two UDP egress routes of one client from the same server address must not have overlapping ranges. A range must not hold the fixed port of another such route. The client refuses the configuration otherwise.
+- An ICMP path with a range puts a path tag in the Echo sequence. Each side finds the path by the tag, so the identifier can vary. See [PROTOCOL.md](PROTOCOL.md).
+- A bridge allows the option on most forms. See [Rules](#rules).
+- A client behind NAT cannot use the option.
+- A server before v0.5.1 refuses the REGISTER of a path with a range, so the path does not come up there.
+
+`mupctl paths -o wide` shows the range of each path in the SRC column.
 
 ## Bridges
 
@@ -345,6 +381,8 @@ A bridge entry has the form of a route, with the bridge address in place of the 
 - An ingress bridge has no `via`. It can have a port range and `%IFACE`.
 - An egress bridge has one port and no `%IFACE`. In `bridges`, it can have `via`. Without `via`, the bridge sends the replies from the bridge address and the server wraps them from its own address.
 - The routes and the bridges of a direction share its 8 path slots, and the routes come first. So in the failover mode, a healthy route carries the traffic before a bridge.
+- A route or a bridge entry can end with `src FIRST-LAST`. An ICMP ingress entry in `bridges` cannot have it, because the bridge finds its entry by the identifier. See [Source range](#source-range).
+- On an egress path through a bridge with a range, the wrapper to the bridge also takes a source port of the range. Its destination port stays the port of the entry.
 - The `port` of the bridge must include the ports of all bridge entries. The bridge sends the ingress to the server of the entry that holds the port, on the same port.
 
 The bridge takes wrapped replies from the server of their entry and from the ranges in the `allow` of that entry. So one entry can pass the replies of more than one server, with each server address in its `allow`. A server behind NAT reaches the bridge from its NAT address, so put that address in `bridge.allow`. The bridge passes every other packet to the kernel, so a normal ping to the bridge still gets its reply.
@@ -406,25 +444,25 @@ The command `mup --config FILE` reads a [configuration file](#configuration-file
 ### Client
 
 ```text
-mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP]" [-u ...] -s CLIENT_IP
+mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP] [src FIRST-LAST]" [-u ...] -s CLIENT_IP
            [-r RETURN_IP] [--mode failover|balancer|repeater] [--control-socket PATH]
-mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp" [--ingress ...]
-           --egress "SERVER_IP:PORT/udp|icmp [via RETURN_IP [bridge BRIDGE_IP]]" [--egress ...] -s CLIENT_IP
-           [--ingress-bridge "BRIDGE_IP[%IFACE]:PORT[-LAST]/udp|icmp"] [--ingress-bridge ...]
-           [--egress-bridge "BRIDGE_IP:PORT/udp|icmp [via RETURN_IP]"] [--egress-bridge ...]
+mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP] [src FIRST-LAST]" [--ingress ...]
+           --egress "SERVER_IP:PORT/udp|icmp [via RETURN_IP] [src FIRST-LAST] [bridge BRIDGE_IP]" [--egress ...] -s CLIENT_IP
+           [--ingress-bridge "BRIDGE_IP[%IFACE]:PORT[-LAST]/udp|icmp [src FIRST-LAST]"] [--ingress-bridge ...]
+           [--egress-bridge "BRIDGE_IP:PORT/udp|icmp [via RETURN_IP] [src FIRST-LAST]"] [--egress-bridge ...]
            [--ingress-mode MODE] [--egress-mode MODE] [--control-socket PATH]
 ```
 
 | Flag | Value | Meaning |
 | --- | --- | --- |
 | `-p` | port | The UDP port where the client receives WireGuard packets from the peers. |
-| `-u` | `SERVER_IP[%IFACE]:PORT/udp` or `/icmp`, then optionally `via RETURN_IP` | One path to a server. Repeat the flag for up to 8 paths. The optional `%IFACE` binds the path to one interface. The optional `via RETURN_IP` sets the return IP of the path. `PORT` can be a range `FIRST-LAST`, see [Server port ranges](#server-port-ranges). |
+| `-u` | `SERVER_IP[%IFACE]:PORT/udp` or `/icmp`, then optionally `via RETURN_IP` | One path to a server. Repeat the flag for up to 8 paths. The optional `%IFACE` binds the path to one interface. The optional `via RETURN_IP` sets the return IP of the path. `PORT` can be a range `FIRST-LAST`, see [Server port ranges](#server-port-ranges). The optional `src FIRST-LAST` sets the [source range](#source-range). |
 | `-s` | IPv4 | The advertised IP. It must be an address of the client host, and no other active client of the server can use it. |
 | `-r` | IPv4 | Optional. The return IP of each `-u` path without its own `via`. On UDP paths, it is the spoofed source of replies. On ICMP paths, it is the reflector host. |
 | `--mode` | `failover`, `balancer`, `repeater` | The path mode. The default is `failover`. |
-| `--ingress` | `SERVER_IP[%IFACE]:PORT/udp` or `/icmp` | One ingress path of a group with separate egress paths. Use it with `--egress`, and not with `-u`. |
-| `--egress` | `SERVER_IP:PORT/udp` or `/icmp`, then optionally `via RETURN_IP` and `bridge BRIDGE_IP` | One egress path. With `bridge BRIDGE_IP`, the bridge spoofs the reply, and `via` is required. See [Separate ingress and egress paths](#separate-ingress-and-egress-paths) and [Bridges](#bridges). |
-| `--ingress-bridge`, `--egress-bridge` | `BRIDGE_IP:PORT/udp` or `/icmp` | One ingress path or egress path through a bridge. An egress bridge can end with `via RETURN_IP`, and then the server spoofs the wrapper. See [Bridges](#bridges). |
+| `--ingress` | `SERVER_IP[%IFACE]:PORT/udp` or `/icmp` | One ingress path of a group with separate egress paths. It can end with `via RETURN_IP` and `src FIRST-LAST`. Use it with `--egress`, and not with `-u`. |
+| `--egress` | `SERVER_IP:PORT/udp` or `/icmp`, then optionally `via RETURN_IP`, `src FIRST-LAST`, and `bridge BRIDGE_IP` | One egress path. With `bridge BRIDGE_IP`, the bridge spoofs the reply, and `via` is required. See [Separate ingress and egress paths](#separate-ingress-and-egress-paths) and [Bridges](#bridges). |
+| `--ingress-bridge`, `--egress-bridge` | `BRIDGE_IP:PORT/udp` or `/icmp` | One ingress path or egress path through a bridge. An egress bridge can end with `via RETURN_IP`, and then the server spoofs the wrapper. Both can end with `src FIRST-LAST`. See [Bridges](#bridges) and [Source range](#source-range). |
 | `--ingress-mode`, `--egress-mode` | `failover`, `balancer`, `repeater` | The ingress mode and the egress mode. The default is `failover`. |
 | `--control-socket` | path | The socket for `mupctl`. The default is `/run/mup/client.sock`. An empty value turns the socket off. |
 
@@ -464,7 +502,7 @@ mup bridge -s SERVER_IP -p PORT[-LAST] [-a CIDR] [-a ...] [--control-socket PATH
 | --- | --- | --- |
 | `mupctl status` | all | Shows an overview. A client lists its groups and paths, and a server lists its clients. A bridge shows its server and the packets that it sent in each direction. A bridge with more than one entry shows a table with the columns SERVER, PORT and ALLOW, with one row for each entry. The packet counters and the drop counters are for the whole bridge. |
 | `mupctl groups` | client | Lists the groups with their mode, healthy paths, and peers. |
-| `mupctl paths` | client | Lists the paths with their server port, return IP, state, the age of the last answer, and round-trip time. With `-o wide`, it also shows the port range, the priority, and the missed ACKs. |
+| `mupctl paths` | client | Lists the paths with their server port, return IP, state, the age of the last answer, and round-trip time. With `-o wide`, it also shows the port range, the source range (SRC), the priority, and the missed ACKs. |
 | `mupctl peers` | both | Lists the WireGuard peers of a client, or the peer routes of a server. |
 | `mupctl clients` | server | Lists the registered clients with their paths, peers, and lease. |
 | `mupctl reflectors` | server | Lists the members of the return pools and their health. |
@@ -613,6 +651,8 @@ MUP has no authentication of its own. A host can spoof the source address of a r
 - A UDP packet with a checksum of zero gets a computed checksum. Some NAT devices write zero where RFC 768 requires 0xffff. If such a packet has a payload longer than 9216 bytes, MUP drops it.
 - The target can be on the server host, on `127.0.0.1` or on another address of the host. On a UDP path, the network device then completes the checksum of each reply. On an ICMP path, MUP computes the checksum itself, because some devices, for example vmxnet3, do not complete it for ICMP. A device that completes it can still change the Echo sequence field, so these replies have no fixed sequence.
 - On an ICMP route with `via`, the server reaches the `via` host only through the interface that faces the client.
+- A path with a source range needs a server of v0.5.1 or later, except a UDP ingress path. A client behind NAT cannot use a source range.
+- An ICMP packet from a local socket with a partial checksum cannot carry the path tag. On a path with a range, it keeps the fixed identifier.
 - A client binds a UDP control socket to its advertised IP and each listen port. If another program holds that port, the client does not start.
 - MUP attaches only to the interfaces that are ingress at start. After you add an interface, restart MUP.
 - MUP supports only interfaces with an Ethernet header, and the loopback interface. A path over a PPP, tun, WireGuard, or raw-IP modem interface fails at start.

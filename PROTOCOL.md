@@ -38,6 +38,8 @@ This document describes version 1 of the MUP protocol as the code implements it.
 | Port | The number in `-u SERVER:PORT` and in server `-p`. For UDP, it is the destination port. For ICMP, it is the Echo identifier. |
 | Listen port | The client `-p` port of a group. The peers send to it, and egress packets arrive on it. |
 | Advertised IP | The client address in client `-s`. The server sends all replies to it. |
+| Source range | The values that the data packets of a path take as UDP source port or ICMP Echo identifier. `src FIRST-LAST` sets it. |
+| Path tag | The 4 bits of the ICMP Echo sequence that name a path with a source range. |
 | Return IP | The optional client `-r` address of a group. For UDP, it is the spoofed source of replies. For ICMP, it is the reflector. |
 | Peer token | A client-local number from 1 to 4095 that names one WireGuard peer. |
 | Instance nonce | A random nonzero 64-bit number that a client picks at each start. |
@@ -106,7 +108,7 @@ A target on the server host, for example `127.0.0.1`, answers from a local socke
   <img alt="UDP and ICMP paths with direct or reflected replies" src=".docs/images/return-modes-light.svg">
 </picture>
 
-Each path uses UDP or ICMP. The return IP of a path sets the return mode of that path. The table shows the outer headers of each packet. In the table, "listen" is the listen port, "port" is the port of the path, and "token" is the peer token.
+Each path uses UDP or ICMP. The return IP of a path sets the return mode of that path. The table shows the outer headers of each packet. In the table, "listen" is the listen port, "port" is the port of the path, and "token" is the peer token. The table shows a path without a source range. See [Source range](#source-range).
 
 | Direction | Mode | Source | Destination | Transport header |
 | --- | --- | --- | --- | --- |
@@ -123,7 +125,7 @@ In the UDP reflected mode, the return IP host never receives the packet. The ser
 
 In the ICMP reflected mode, the server sends an Echo Request from `-s` to the reflector. The reflector answers with an Echo Reply to `-s`, which is the client. Any host that answers ping can be the reflector. The network between the server and the reflector must accept the spoofed source. The server sends the Echo Request out of the interface that received the traffic of the path. So the reflector must be reachable through that interface.
 
-The client accepts an egress packet only from a source that a path of the group of the peer expects. The packet must also have the port and the transport of that path. If the path has a return IP, the source must equal it. If the path has a return pool, the source must be in the pool range. If the path has neither, the source must be the server address of the path. The client drops any other egress packet and counts reason 22.
+The client accepts an egress packet only from a source that a path of the group of the peer expects. The packet must also have the port and the transport of that path. If the path has a source range, the port of a UDP packet must be in the range. If the path has a return IP, the source must equal it. If the path has a return pool, the source must be in the pool range. If the path has neither, the source must be the server address of the path. The client drops any other egress packet and counts reason 22.
 
 ### Return pools
 
@@ -153,6 +155,23 @@ An egress path names the server address and port that send the replies, the tran
 The server address of an egress path must be an address of the server host. The server sends each reply out of the interface that holds that address. If the address is on a loopback interface, the server uses the route to the destination.
 
 An ingress path has no return IP. The client also accepts a reply from the server of an ingress path, so an older server can still answer on the ingress paths.
+
+### Source range
+
+Every data packet of a path has a source value: the UDP source port, or the ICMP Echo identifier. Without a source range, this value is fixed. An ingress UDP packet leaves from the listen port of its group. An egress UDP packet leaves from the server port of the path. An ICMP packet of either direction has the server port of the path as its identifier.
+
+A route with `src FIRST-LAST` has a source range. Each data packet of its path then takes a random value of the range. FIRST and LAST are from 1 to 65535. A network that limits one flow then sees many flows, and the packets can take different roads. The control frames keep the fixed port of the route.
+
+The client keeps the range of each ingress path in `client_path_src`, and the range of each egress path in `client_down_src`. The server learns each range from flag bit 7 of the REGISTER frame or the EGRESS_REGISTER frame. These rules apply:
+
+- UDP ingress: The server does not read the source port of an ingress packet. So a range on the client needs no change on the server.
+- UDP egress: The client accepts a reply of the path when its source port is in the range. The configuration refuses two UDP egress routes of one client from one server address if their ranges overlap. It also refuses a range that holds the fixed port of another such route.
+- ICMP: The peer token needs 12 of the 16 bits of the Echo sequence. Bits 12 to 15 carry the path tag. The tag is the path slot plus 1, from 1 to 8, on a packet of a path with a range. It is 0 on every other packet. Each side finds the path by the tag and makes sure that the identifier is in the range. So the identifier can vary.
+- ICMP on the server: A tagged packet reaches its path also when its identifier is outside the server ports. The server looks up a key with the tag and no port. A tagged WireGuard message without a registered path counts reason 8, so the kernel does not echo it back.
+- Partial checksum: A local socket whose device completes the checksum sends an ICMP packet with a partial checksum. This packet cannot carry the tag. It keeps the fixed identifier and no tag, and both sides accept this form on a path with a range. A device can write 0xffff into the sequence, so a tag above 8 counts as tag 0.
+- Bridges: An ICMP ingress entry of a `bridges` list cannot have a range, because the bridge finds its entry by the identifier. On an egress path through a bridge, the wrapper also takes a source port of the range. Its destination port stays the port of the entry.
+- A client behind NAT cannot use a source range.
+- A server before v0.5.1 refuses a frame with flag bit 7, so the path does not come up there. A UDP ingress range needs no server change.
 
 ### Bridges
 
@@ -195,9 +214,9 @@ One round trip has four legs. The value under each arrow shows WireGuard bytes 1
 A peer sends a UDP packet to the listen port of a group. The client program then does these steps:
 
 1. It makes sure that the packet is a valid WireGuard message with zero reserved bytes.
-2. It looks ingress the token of the peer endpoint. A new peer gets a token from `free_peer_tokens`. If the source IP of the new peer already has 1024 routes, the program drops the packet and counts reason 21.
+2. It looks up the token of the peer endpoint. A new peer gets a token from `free_peer_tokens`. If the source IP of the new peer already has 1024 routes, the program drops the packet and counts reason 21.
 3. It picks one healthy path of the group. In repeater mode, it picks every healthy path of the group.
-4. It writes the token and rewrites the headers for the path.
+4. It writes the token and rewrites the headers for the path. If the path has a source range, the source port or the identifier is a random value of the range. An ICMP packet then also gets the path tag.
 5. It sends the packet out of the path interface with `bpf_redirect_neigh`, which resolves the next hop.
 
 In repeater mode, the program sends a clone on each healthy path of the group except the last one. For each clone, a FIB lookup gives the output interface and the MAC addresses. The original packet goes out on the last healthy path.
@@ -206,12 +225,12 @@ In repeater mode, the program sends a clone on each healthy path of the group ex
 
 A UDP packet arrives at a server port, or an ICMP Echo Request arrives with a server port as identifier. The server ports are one port or a range, for example 5000-6000. The server program then does these steps:
 
-1. It looks ingress the registered path by source IP, local IP, port, and transport. The path gives the client key. If no path matches a UDP packet, the packet is not MUP traffic, and the program returns `TCX_NEXT`.
+1. It looks up the registered path by source IP, local IP, port, and transport. A tagged Echo Request uses the tag in place of the port. The path gives the client key. If no path matches a UDP packet, the packet is not MUP traffic, and the program returns `TCX_NEXT`.
 2. It makes sure that the packet is a valid WireGuard message with a token from 1 to 4095.
-3. It makes sure that the path and the registration of the client exist and did not expire. An Echo Request without a registered path stops here. If the program passed it, the kernel echoes the WireGuard message back to the client, for example before the ACK of a new client.
+3. It makes sure that the path and the registration of the client exist and did not expire. An Echo Request without a registered path stops here, and a tagged one counts reason 8. If the program passed it, the kernel echoes the WireGuard message back to the client, for example before the ACK of a new client.
 4. If the duplicate cache holds the same route and first 24 WireGuard bytes, it drops the packet.
 5. It finds the route of the client key and token. For a new route, it takes a port from `free_target_ports`. For a target on the server host, it never takes the port of the target.
-6. It records the path of this packet as the return path of the route.
+6. It records the path of this packet as the return path of the route. The route also keeps the source range of the path.
 7. It clears the token and rewrites the packet to UDP, from the target port to the WireGuard target.
 8. It sends the packet out of the interface that leads to the target.
 
@@ -226,7 +245,7 @@ A UDP packet from the target address and port arrives at a target port. The serv
 1. It finds the route by the destination port.
 2. It makes sure that the message is valid WireGuard with zero reserved bytes.
 3. It makes sure that the registration of the client is still live.
-4. It writes the token and rewrites the headers for the return path of the route.
+4. It writes the token and rewrites the headers for the return path of the route. If that path has a source range, the source port or the identifier is a random value of the range. An ICMP reply also gets the path tag.
 5. It sends the packet out of the interface where the latest ingress packet of the route arrived.
 
 ### Ingress delivery
@@ -249,7 +268,7 @@ If the target checksum offload is on, the reply has `CHECKSUM_PARTIAL`. The prog
 A packet with a nonzero token arrives at the advertised IP. The client program then does these steps:
 
 1. It makes sure that a UDP packet goes to the listen port of a group.
-2. It makes sure that an ICMP packet is an Echo Reply with the port of an ICMP path.
+2. It makes sure that an ICMP packet is an Echo Reply with the port of an ICMP path. For a tagged packet, it finds the path by the tag and makes sure that the identifier is in the range of the path.
 3. It makes sure that the message is valid WireGuard with a token from 1 to 4095.
 4. It finds the peer endpoint by the token. The listen port of the endpoint gives the group.
 5. It makes sure that the source is an expected source for that group, as the return modes section describes.
@@ -292,7 +311,7 @@ In repeater mode, the client keeps the first copy of each message for 2 seconds 
 
 The client registers each path on its own. It sends a REGISTER frame from `-s` to the server address of the path. A UDP path sends the frame in a UDP datagram to the server port. An ICMP path sends the frame as the payload of an Echo Request, with the port as identifier. The frame holds the listen port of the group and the return IP of the path. The TCX programs pass these frames to the kernel, and the Go control plane answers them.
 
-A UDP path sends its REGISTER frames from the listen port of its group. The frames then have the same addresses and ports as the data of the path. So the control frames and the data share one UDP flow. A filter that blocks the data flow also blocks the REGISTER frames, and the path becomes unhealthy. The UDP paths of one group share one control socket, which the client binds to `-s` and the listen port. If a path names an interface, its frames leave on that interface, and the client accepts an ACK only from that interface. An ICMP path has its own raw socket, and its control frames and data already share the Echo identifier.
+A UDP path sends its REGISTER frames from the listen port of its group. For a path without a source range, the frames then have the same addresses and ports as the data of the path. So the control frames and the data share one UDP flow. A filter that blocks the data flow also blocks the REGISTER frames, and the path becomes unhealthy. A path with a source range sends its data from other ports, so its frames do not share the flow of the data. The UDP paths of one group share one control socket, which the client binds to `-s` and the listen port. If a path names an interface, its frames leave on that interface, and the client accepts an ACK only from that interface. An ICMP path has its own raw socket, and its control frames and data share the Echo identifier unless the path has a source range.
 
 For each REGISTER, the server makes sure that all of these conditions are true:
 
@@ -303,11 +322,15 @@ For each REGISTER, the server makes sure that all of these conditions are true:
 
 The server then writes the registration to `registration_by_key` and the path to `registered_paths`. Both entries get a lease of 30 seconds. The server answers with a REGISTER_ACK frame from the address that received the REGISTER. The ACK repeats the frame with the type REGISTER_ACK, the status 0, and a lease of 30 seconds. If a condition is false, the server sends no reply.
 
-The client waits 900 milliseconds for an ACK with the same nonce, path ID, and sequence. After an ACK, it sends the next REGISTER in 10 seconds. After a missing ACK, it sends the next REGISTER in 1 second. The source port of a UDP path never changes, because it must stay the listen port.
+The client waits 900 milliseconds for an ACK with the same nonce, path ID, and sequence. After an ACK, it sends the next REGISTER in 10 seconds. After a missing ACK, it sends the next REGISTER in 1 second. The source port of the REGISTER frames of a UDP path never changes, because it must stay the listen port.
+
+A REGISTER of a path with a source range has flag bit 7 and the first and last value of the range. The server writes the range to `registered_paths`. For an ICMP path, it also writes an entry with the path tag, which is the path slot plus 1.
 
 ### Egress path registration
 
 An ingress path of a group with egress paths sends one EGRESS_REGISTER frame for each egress path of the group before each REGISTER. The frames travel like the REGISTER, so each server that an ingress path reaches gets all of them. The server applies the REGISTER rules to the source, the port, and the path ID. It keeps only an egress path whose server address is an address of the server host. An egress path has a lease of 30 seconds. A EGRESS_REGISTER with a lease of zero withdraws an egress path that `mupctl` removed.
+
+A EGRESS_REGISTER of an egress path with a source range has flag bit 7 and the first and last value of the range. The server writes the range to `server_down_paths`.
 
 A EGRESS_REGISTER with flag bit 4 declares an egress bridge, and its egress server field holds the bridge address. A client does not know which server a bridge serves. So each server keeps an egress bridge without the address check and without the port check, and it probes the bridge.
 
@@ -340,7 +363,7 @@ The control frame is 48 bytes long, and all integers are big-endian.
 | 4 | 1 | version | 1. |
 | 5 | 1 | type | 1 is REGISTER, 2 is REGISTER_ACK, 3 is PROBE, 4 is PROBE_REPLY, and 7 is EGRESS_REGISTER. Types 5 and 6 are reserved. |
 | 6 | 1 | transport | 0 is UDP and 1 is ICMP. |
-| 7 | 1 | flags | Bit 0 means that the return IP field holds one return IP. Bit 1 means that it holds the base of a return pool. Bit 2 selects the per-packet balance mode of a pool. Bit 3 marks a PROBE or a PROBE_REPLY of an egress path, and its path ID is then an egress path ID. Bit 4 marks a EGRESS_REGISTER of an egress bridge. Bit 6 marks a EGRESS_REGISTER of an egress bridge whose return IP or pool applies to the leg from the server to the bridge. Bit 6 needs bit 4 and bit 0 or bit 1. Bit 5 marks a REGISTER whose return IP is the via of an ingress reflect path. The other bits must be zero. |
+| 7 | 1 | flags | Bit 0 means that the return IP field holds one return IP. Bit 1 means that it holds the base of a return pool. Bit 2 selects the per-packet balance mode of a pool. Bit 3 marks a PROBE or a PROBE_REPLY of an egress path, and its path ID is then an egress path ID. Bit 4 marks a EGRESS_REGISTER of an egress bridge. Bit 6 marks a EGRESS_REGISTER of an egress bridge whose return IP or pool applies to the leg from the server to the bridge. Bit 6 needs bit 4 and bit 0 or bit 1. Bit 5 marks a REGISTER whose return IP is the via of an ingress reflect path. Bit 7 marks a REGISTER or a EGRESS_REGISTER of a path with a source range. The other bits must be zero. |
 | 8 | 2 | length | 48. |
 | 10 | 2 | status | 0 is OK. 7 is NO_REFLECTOR: the return pool of the path has no healthy reflector. Values 1 to 6 name errors, but the server does not send them. |
 | 12 | 2 | path ID | 0 to 7, the slot of the path in the client. |
@@ -351,9 +374,9 @@ The control frame is 48 bytes long, and all integers are big-endian.
 | 20 | 4 | advertised IP | The client `-s` address. |
 | 24 | 4 | return IP | The return IP or the pool base of the path, or zero. In a PROBE_REPLY, the reflector that reached the client. |
 | 28 | 8 | instance nonce | The nonzero random number of the client process. |
-| 36 | 4 | sequence | A counter that goes ingress by one with each REGISTER on the path. |
+| 36 | 4 | sequence | A counter that goes up by one with each REGISTER on the path. A EGRESS_REGISTER does not use it. With flag bit 7, it holds the range: the first value at offsets 36 and 37, and the last value at offsets 38 and 39. |
 | 40 | 4 | lease seconds | 30. |
-| 44 | 4 | egress server | In a EGRESS_REGISTER, the server address of the egress path, or the bridge address with flag bit 4. Zero otherwise. |
+| 44 | 4 | egress server | In a EGRESS_REGISTER, the server address of the egress path, or the bridge address with flag bit 4. A REGISTER does not use it. With flag bit 7, it holds the range: the first value at offsets 44 and 45, and the last value at offsets 46 and 47. Zero otherwise. |
 
 Some payloads are exactly 48 bytes long and start with the magic, version 1, and length 48. The TCX programs pass such a payload to the kernel as a control frame.
 
@@ -393,8 +416,10 @@ Pinned BPF maps hold all dataplane state. Go writes the configuration and the re
 | `path_groups` | hash | 8 | Listen port to mode, path mask, egress path mask, and flags. Flag bit 0 turns on the duplicate filter of the egress repeater mode. The return IP field is not used. | Go |
 | `path_config` | array | 8 | Destination, source, interface, port, transport, and priority of each path. | Go |
 | `path_returns` | array | 8 | Return IP and flags of each path. | Go |
+| `client_path_src` | array | 8 | The first and last value of the source range of each path slot. A first of 0 means none. | Go |
 | `path_state` | array | 1 | Healthy mask and generation. | Go |
 | `client_down_paths` | array | 8 | Server, return IP or pool, port, and transport of each egress path, and the time of its latest reply. | Both |
+| `client_down_src` | array | 8 | The first and last value of the source range of each egress path slot. A first of 0 means none. | Go |
 | `client_duplicate_cache` | LRU hash | 16384 | Token and first 24 WireGuard bytes to the time seen, for the egress repeater mode. | Program |
 | `client_peer_by_endpoint` | hash | 4096 | Peer endpoint to token and last-seen time. | Program |
 | `client_endpoint_by_token` | hash | 4096 | Token to peer endpoint, interface, and last-seen time. | Program |
@@ -403,13 +428,13 @@ Pinned BPF maps hold all dataplane state. Go writes the configuration and the re
 | `server_config` | array | 1 | Target, source IP, interface, and the first server port. | Go |
 | `server_ports` | array | 1 | The first and the last server port. Without this entry, the server accepts only the port in `server_config`. | Go |
 | `registration_by_key` | hash | 4096 | Client key to lease end and listen port, with the return IP and flags of the latest REGISTER. The programs do not read the return IP. | Go |
-| `registered_paths` | hash | 32768 | Source IP, local IP, port, and transport to client key, return IP, and flags. | Go |
-| `server_route_by_key` | hash | 41000 | Client key and token to target port and return path. | Program |
-| `server_route_by_port` | hash | 41000 | Target port to route key and return path. | Program |
+| `registered_paths` | hash | 32768 | Source IP, local IP, port, transport, and path tag to client key, return IP, flags, source range, and server port. | Go |
+| `server_route_by_key` | hash | 41000 | Client key and token to target port, return path, and the source range of the return path. | Program |
+| `server_route_by_port` | hash | 41000 | Target port to route key, return path, and the source range of the return path. | Program |
 | `free_target_ports` | queue | 41000 | Unused target ports. | Both |
 | `duplicate_cache` | LRU hash | 16384 | Route key and first 24 WireGuard bytes to the time seen. | Program |
 | `server_down_groups` | hash | 4096 | Client key to listen port, egress mode, and the masks of its egress paths. | Go |
-| `server_down_paths` | hash | 32768 | Client key and egress path ID to the egress path, its interface, and its healthy pool members. An egress bridge also has flag bit 4 and the source address of its wrapper. | Go |
+| `server_down_paths` | hash | 32768 | Client key and egress path ID to the egress path, its interface, its source range, and its healthy pool members. An egress bridge also has flag bit 4 and the source address of its wrapper. | Go |
 | `bridge_config` | array | 8 | The entries of a bridge: the server, and the first and last port of each. An entry with a zero server is unused. | Go |
 | `bridge_addresses` | hash | 64 | The IPv4 addresses of the bridge host. Go writes them again every 10 seconds. | Go |
 | `bridge_allow` | LPM trie | 512 | The senders of wrapped replies, for each entry. The key starts with the entry index, then the sender address. | Go |
@@ -468,7 +493,7 @@ The programs forward only IPv4 packets with a 20-byte header, no fragments, and 
 | 3 | Cookie reply | 64 |
 | 4 | Transport data | 32 or more. Senders usually pad to a multiple of 16, but some clients, for example Surge, do not. |
 
-A program returns `TCX_NEXT` for traffic that it does not own. This traffic includes non-IPv4 packets, malformed IPv4 packets, other protocols, and packets to other ports. A program drops and counts a packet that is addressed to MUP but breaks a rule. An ICMP packet with an identifier other than the MUP port is not addressed to MUP. An ICMP packet with the MUP port as identifier but without a valid WireGuard message is the ping of another program. The program returns `TCX_NEXT` for it and does not count it.
+A program returns `TCX_NEXT` for traffic that it does not own. This traffic includes non-IPv4 packets, malformed IPv4 packets, other protocols, and packets to other ports. A program drops and counts a packet that is addressed to MUP but breaks a rule. An ICMP packet with an identifier other than the MUP port and without a path tag is not addressed to MUP. An ICMP packet with the MUP port as identifier but without a valid WireGuard message is the ping of another program. The program returns `TCX_NEXT` for it and does not count it.
 
 ## Drop reasons
 
@@ -481,7 +506,7 @@ A program returns `TCX_NEXT` for traffic that it does not own. This traffic incl
 | 5 | `WG_TYPE` | The WireGuard type is not 1 to 4. |
 | 6 | `WG_LENGTH` | The WireGuard length does not match the type. |
 | 7 | `WG_RESERVED` | The reserved bytes are not zero from WireGuard, or not a token from 1 to 4095 between MUP endpoints. |
-| 8 | `NOT_REGISTERED` | The server has no live registration for the path or the client. A UDP packet without a registered path goes on to the kernel and counts no drop. |
+| 8 | `NOT_REGISTERED` | The server has no live registration for the path or the client. A UDP packet without a registered path goes on to the kernel and counts no drop. A tagged ICMP WireGuard message without a registered path counts this reason. |
 | 9 | `PATH_MISMATCH` | Reserved. Version 1 does not count it. |
 | 10 | `TRANSPORT` | A path or a route has an unknown transport. |
 | 11 | `PEER_TOKEN_POOL` | The client has no free token. |
@@ -619,7 +644,9 @@ A bridge keeps the source of each ingress packet, and it sends only MUP packets 
 - A server port range has up to 4096 ports. The server opens one UDP control socket for each port.
 - A client binds one UDP control socket to `-s` and the listen port of each group with a UDP path. If another program holds that port, the client does not start.
 - On an ICMP path with a return IP, the server reaches the reflector only through the interface that faces the client.
-- The control frames travel in the data flow. So a filter that blocks a flow because of its control frames also blocks the data of that path.
+- On a path without a source range, the control frames travel in the data flow. So a filter that blocks a flow because of its control frames also blocks the data of that path.
+- A path with a source range needs a server of v0.5.1 or later, except a UDP ingress path. A client behind NAT cannot use a source range.
+- A client has up to 8 path tags, one for each path slot, and the tag takes 4 bits of the ICMP Echo sequence. The peer token keeps the other 12 bits.
 - MUP attaches only to the interfaces that are ingress at start.
 - MUP supports only interfaces with an Ethernet header, and the loopback interface. Peers that arrive on another interface get no service.
 - The server treats every UDP packet from the target address and port to its source IP as a reply. Do not run other clients of the same target on the server host with that source IP.

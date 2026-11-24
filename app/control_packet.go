@@ -155,11 +155,49 @@ func registrationFrame(registration pathRegistration, sequence uint32) ([]byte, 
 	case registration.returnIP.IsValid():
 		frame.Flags = protocol.ControlFlagReturnIP
 	}
+	setSourceRange(&frame, registration.path)
 	packet := make([]byte, protocol.ControlFrameLength)
 	if err := protocol.EncodeControlFrame(packet, frame); err != nil {
 		return nil, err
 	}
 	return packet, nil
+}
+
+// ingressReflectFrame builds the REGISTER of one member. Each member registers as a
+// single ingress reflect path, so a pool is a set of one-member registrations on the
+// server.
+func ingressReflectFrame(reg pathRegistration, member netip.Addr, sequence uint32) ([]byte, error) {
+	frame := protocol.ControlFrame{
+		Type:          protocol.ControlRegister,
+		Transport:     reg.path.Transport,
+		Flags:         protocol.ControlFlagIngressReflect | protocol.ControlFlagReturnIP,
+		PathID:        reg.pathID,
+		Sequence:      sequence,
+		ListenPort:    reg.listenPort,
+		ServerPort:    reg.path.ServerPort,
+		LeaseSeconds:  registrationLeaseSeconds,
+		InstanceNonce: reg.nonce,
+		AdvertisedIP:  reg.advertisedIP,
+		ReturnIP:      member,
+	}
+	setSourceRange(&frame, reg.path)
+	packet := make([]byte, protocol.ControlFrameLength)
+	if err := protocol.EncodeControlFrame(packet, frame); err != nil {
+		return nil, err
+	}
+	return packet, nil
+}
+
+// setSourceRange puts the source range of a path in a REGISTER or an
+// EGRESS_REGISTER. The frame itself keeps the fixed port of the path, and only
+// the data packets take their source from the range.
+func setSourceRange(frame *protocol.ControlFrame, path config.Path) {
+	if !path.HasSrc() {
+		return
+	}
+	frame.Flags |= protocol.ControlFlagSourceRange
+	frame.SrcFirst = path.SrcFirst
+	frame.SrcLast = path.SrcLast
 }
 
 // buildIPv4Packet builds an IPv4 packet with the given source, so a raw socket

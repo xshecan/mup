@@ -97,6 +97,8 @@ type mupDownPathV1 struct {
 	Count      uint32
 	LocalIp    uint32
 	Members    [16]uint32
+	SrcFirst   uint16
+	SrcLast    uint16
 }
 
 type mupDuplicateKeyV1 struct {
@@ -141,6 +143,12 @@ type mupPathReturnV1 struct {
 	Flags    uint8
 	Prefix   uint8
 	Padding  [2]uint8
+}
+
+type mupPathSrcV1 struct {
+	_     structs.HostLayout
+	First uint16
+	Last  uint16
 }
 
 type mupPathStateV1 struct {
@@ -192,7 +200,7 @@ type mupRegisteredPathKeyV1 struct {
 	LocalIp    uint32
 	ServerPort uint16
 	Transport  uint8
-	Padding    uint8
+	Tag        uint8
 }
 
 type mupRegisteredPathValueV1 struct {
@@ -204,7 +212,9 @@ type mupRegisteredPathValueV1 struct {
 	Prefix      uint8
 	ReturnIp    uint32
 	ListenPort  uint16
-	Padding     [6]uint8
+	SrcFirst    uint16
+	SrcLast     uint16
+	ServerPort  uint16
 }
 
 type mupRegistrationValueV1 struct {
@@ -262,7 +272,9 @@ type mupServerRouteValueV1 struct {
 	Ifindex        uint32
 	LastSeenNs     uint64
 	ListenPort     uint16
-	Padding        [6]uint8
+	SrcFirst       uint16
+	SrcLast        uint16
+	Padding        [2]uint8
 }
 
 type mupTargetIngressV1 struct {
@@ -290,8 +302,10 @@ const (
 	mupMapBridgeCounters           = "bridge_counters"
 	mupMapClientConfig             = "client_config"
 	mupMapClientDownPaths          = "client_down_paths"
+	mupMapClientDownSrc            = "client_down_src"
 	mupMapClientDuplicateCache     = "client_duplicate_cache"
 	mupMapClientEndpointByToken    = "client_endpoint_by_token"
+	mupMapClientPathSrc            = "client_path_src"
 	mupMapClientPeerByEndpoint     = "client_peer_by_endpoint"
 	mupMapClientRoutesBySource     = "client_routes_by_source"
 	mupMapCsumScratch              = "csum_scratch"
@@ -392,8 +406,10 @@ type mupMapSpecs struct {
 	BridgeCounters        *ebpf.MapSpec `ebpf:"bridge_counters"`
 	ClientConfig          *ebpf.MapSpec `ebpf:"client_config"`
 	ClientDownPaths       *ebpf.MapSpec `ebpf:"client_down_paths"`
+	ClientDownSrc         *ebpf.MapSpec `ebpf:"client_down_src"`
 	ClientDuplicateCache  *ebpf.MapSpec `ebpf:"client_duplicate_cache"`
 	ClientEndpointByToken *ebpf.MapSpec `ebpf:"client_endpoint_by_token"`
+	ClientPathSrc         *ebpf.MapSpec `ebpf:"client_path_src"`
 	ClientPeerByEndpoint  *ebpf.MapSpec `ebpf:"client_peer_by_endpoint"`
 	ClientRoutesBySource  *ebpf.MapSpec `ebpf:"client_routes_by_source"`
 	CsumScratch           *ebpf.MapSpec `ebpf:"csum_scratch"`
@@ -456,8 +472,10 @@ type mupMaps struct {
 	BridgeCounters        *ebpf.Map `ebpf:"bridge_counters"`
 	ClientConfig          *ebpf.Map `ebpf:"client_config"`
 	ClientDownPaths       *ebpf.Map `ebpf:"client_down_paths"`
+	ClientDownSrc         *ebpf.Map `ebpf:"client_down_src"`
 	ClientDuplicateCache  *ebpf.Map `ebpf:"client_duplicate_cache"`
 	ClientEndpointByToken *ebpf.Map `ebpf:"client_endpoint_by_token"`
+	ClientPathSrc         *ebpf.Map `ebpf:"client_path_src"`
 	ClientPeerByEndpoint  *ebpf.Map `ebpf:"client_peer_by_endpoint"`
 	ClientRoutesBySource  *ebpf.Map `ebpf:"client_routes_by_source"`
 	CsumScratch           *ebpf.Map `ebpf:"csum_scratch"`
@@ -496,8 +514,10 @@ func (m *mupMaps) Close() error {
 		m.BridgeCounters,
 		m.ClientConfig,
 		m.ClientDownPaths,
+		m.ClientDownSrc,
 		m.ClientDuplicateCache,
 		m.ClientEndpointByToken,
+		m.ClientPathSrc,
 		m.ClientPeerByEndpoint,
 		m.ClientRoutesBySource,
 		m.CsumScratch,

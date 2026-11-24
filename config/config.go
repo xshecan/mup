@@ -325,6 +325,8 @@ func NormalizeEgressPath(path Path, bridgeEntry bool) (Path, error) {
 		Balance:      path.Balance,
 		Bridge:       true,
 		NamedServer:  path.Server,
+		SrcFirst:     path.SrcFirst,
+		SrcLast:      path.SrcLast,
 	}, nil
 }
 
@@ -420,6 +422,9 @@ func (c Client) Validate() error {
 				if earlier.SameEgressPath(egress) {
 					return fmt.Errorf("client has the egress route %s twice", egress)
 				}
+				if err := earlier.checkSourceOverlap(egress); err != nil {
+					return err
+				}
 			}
 			egresses = append(egresses, egress)
 		}
@@ -463,6 +468,9 @@ func (g Group) validate() error {
 			if !path.ReturnIP.IsValid() {
 				return fmt.Errorf("server %d: route %d: a bridge reflect needs a via, because the bridge emits the reflected ingress", g.ListenPort, index)
 			}
+		}
+		if path.Bridge && path.HasSrc() && path.Transport == protocol.TransportICMP {
+			return fmt.Errorf("server %d: ingress route %d: an ICMP ingress bridge has no source range, because the bridge finds its entry by the identifier", g.ListenPort, index)
 		}
 	}
 	if g.EgressMode > ModeRepeater {
@@ -516,6 +524,11 @@ type Path struct {
 	// spoofed packet, so it wraps the packet for the bridge at ProxyBridge, and
 	// the bridge emits the spoofed packet.
 	ProxyBridge netip.Addr
+	// SrcFirst and SrcLast are the source range of the path. Every data packet
+	// of the path takes its UDP source port, or its ICMP identifier, from the
+	// range. Zero means no range, and the path keeps one fixed value.
+	SrcFirst uint16
+	SrcLast  uint16
 }
 
 // Kind names the path type for the status output: "bridge" or "route".
@@ -543,6 +556,16 @@ func (p Path) IngressReflect(split bool) bool {
 // because the client cannot send the spoofed packet itself.
 func (p Path) BridgeReflect() bool {
 	return p.ProxyBridge.IsValid()
+}
+
+// HasSrc reports whether the path has a source range.
+func (p Path) HasSrc() bool {
+	return p.SrcFirst != 0
+}
+
+// srcText formats the source range as FIRST-LAST, or as N for a range of one.
+func (p Path) srcText() string {
+	return PortRange{First: p.SrcFirst, Last: p.SrcLast}.String()
 }
 
 // HasPortRange reports whether the path has more than one server port.
@@ -582,8 +605,9 @@ func (p Path) SharesServerPort(other Path) bool {
 }
 
 // String formats the path as SERVER[%IFACE]:PORT[-LAST]/TRANSPORT
-// [via RETURN_IP], the form that ParsePath accepts. A bridge that spoofs the
-// last leg prints as the egress route that named it, with the bridge suffix.
+// [via RETURN_IP] [src FIRST-LAST], the form that ParsePath accepts. A bridge
+// that spoofs the last leg prints as the egress route that named it, with the
+// bridge suffix.
 func (p Path) String() string {
 	host := p.Server.String()
 	if p.NamedServer.IsValid() {
@@ -597,6 +621,9 @@ func (p Path) String() string {
 		text += fmt.Sprintf(" via %s/%d %s", p.ReturnIP, p.ReturnPrefix, p.Balance)
 	} else if p.ReturnIP.IsValid() {
 		text += " via " + p.ReturnIP.String()
+	}
+	if p.HasSrc() {
+		text += " src " + p.srcText()
 	}
 	if p.ProxyBridge.IsValid() {
 		text += " bridge " + p.ProxyBridge.String()
@@ -647,6 +674,46 @@ func (p Path) SameEgressPath(other Path) bool {
 	return p.Server == other.Server && p.ServerPort == other.ServerPort && p.Transport == other.Transport
 }
 
+// checkSourceOverlap refuses two UDP egress paths from one sender whose source
+// ports can meet, because the client cannot tell their replies apart. A path
+// with a source range sends from every port of the range. Other paths send
+// from their server port. ICMP paths have no such rule, because the path number
+// travels in the packet.
+func (p Path) checkSourceOverlap(other Path) error {
+	if p.Server != other.Server || p.Transport != protocol.TransportUDP || other.Transport != protocol.TransportUDP {
+		return nil
+	}
+	if !p.HasSrc() && !other.HasSrc() {
+		return nil
+	}
+	first, last := p.sourcePorts()
+	otherFirst, otherLast := other.sourcePorts()
+	if first > otherLast || otherFirst > last {
+		return nil
+	}
+	if p.HasSrc() && other.HasSrc() {
+		return fmt.Errorf("the egress routes %s and %s from one source have overlapping source ranges", p, other)
+	}
+	return fmt.Errorf("the egress route %s has a source range that contains the fixed port of the egress route %s from the same source", p.withRangeFirst(other), other.withRangeFirst(p))
+}
+
+// sourcePorts returns the first and the last source port of an egress path.
+func (p Path) sourcePorts() (uint16, uint16) {
+	if p.HasSrc() {
+		return p.SrcFirst, p.SrcLast
+	}
+	return p.ServerPort, p.ServerPort
+}
+
+// withRangeFirst returns the path that has the source range of the two, so that
+// an error message names the ranged route first.
+func (p Path) withRangeFirst(other Path) Path {
+	if p.HasSrc() {
+		return p
+	}
+	return other
+}
+
 func (p Path) validate() error {
 	if !isNonzeroIPv4(p.Server) {
 		return errors.New("server path address must be a nonzero IPv4")
@@ -674,6 +741,11 @@ func (p Path) validate() error {
 	}
 	if p.Balance != BalancePerPeer && !p.IsPool() {
 		return errors.New("per-peer and per-packet apply only to a return pool")
+	}
+	if p.SrcFirst != 0 || p.SrcLast != 0 {
+		if p.SrcFirst == 0 || p.SrcLast < p.SrcFirst {
+			return errors.New("source range must be FIRST-LAST between 1 and 65535, with FIRST not above LAST")
+		}
 	}
 	return nil
 }
@@ -771,7 +843,8 @@ func (b Bridge) Validate() error {
 // ParsePath parses SERVER[%IFACE]:PORT/udp or SERVER[%IFACE]:PORT/icmp, where
 // PORT can be a range FIRST-LAST. It accepts an optional "via RETURN_IP", or
 // "via POOL_CIDR" with an optional "per-peer" or "per-packet" after the pool.
-// A trailing "bridge BRIDGE_IP" needs a via. On an ingress route it makes the
+// An optional "src FIRST-LAST" (or "src N") sets the source range of the path.
+// It comes after the via part. A trailing "bridge BRIDGE_IP" needs a via. On an ingress route it makes the
 // bridge emit the reflected ingress. On an egress route it makes the bridge
 // spoof the reply that the server wraps for it. Other paths refuse the suffix.
 func ParsePath(raw string) (Path, error) {
@@ -779,8 +852,9 @@ func ParsePath(raw string) (Path, error) {
 	var returnIP netip.Addr
 	var returnPrefix uint8
 	var proxyBridge netip.Addr
+	var srcFirst, srcLast uint16
 	balance := BalancePerPeer
-	usage := errors.New("path must use IPv4:PORT/udp or /icmp, with an optional via RETURN_IP, or via POOL_CIDR with an optional per-peer or per-packet")
+	usage := errors.New("path must use IPv4:PORT/udp or /icmp, with an optional via RETURN_IP, or via POOL_CIDR with an optional per-peer or per-packet, then an optional src FIRST-LAST, then an optional bridge BRIDGE_IP")
 	// A trailing "bridge BRIDGE" names a bridge that emits the reflected ingress.
 	if n := len(fields); n >= 2 && fields[n-2] == "bridge" {
 		address, err := netip.ParseAddr(fields[n-1])
@@ -789,6 +863,20 @@ func ParsePath(raw string) (Path, error) {
 		}
 		proxyBridge = address
 		fields = fields[:n-2]
+	}
+	// A trailing "src FIRST-LAST" sets the source range of the data packets.
+	if n := len(fields); n >= 2 && fields[n-1] == "src" {
+		return Path{}, errors.New("src needs a value, FIRST-LAST or one number")
+	} else if n >= 3 && fields[n-2] == "src" {
+		first, last, err := parseSourceRange(fields[n-1])
+		if err != nil {
+			return Path{}, err
+		}
+		srcFirst, srcLast = first, last
+		fields = fields[:n-2]
+		if slices.Contains(fields, "src") {
+			return Path{}, errors.New("a path takes src once")
+		}
 	}
 	switch {
 	case len(fields) == 1:
@@ -854,11 +942,28 @@ func ParsePath(raw string) (Path, error) {
 	if err != nil {
 		return Path{}, errors.New("server path address must be a nonzero IPv4")
 	}
-	path := Path{Server: address, ServerPort: serverPort, LastPort: lastPort, Transport: transportID, Interface: interfaceName, ReturnIP: returnIP, ReturnPrefix: returnPrefix, Balance: balance, ProxyBridge: proxyBridge}
+	path := Path{Server: address, ServerPort: serverPort, LastPort: lastPort, Transport: transportID, Interface: interfaceName, ReturnIP: returnIP, ReturnPrefix: returnPrefix, Balance: balance, ProxyBridge: proxyBridge, SrcFirst: srcFirst, SrcLast: srcLast}
 	if err := path.validate(); err != nil {
 		return Path{}, err
 	}
 	return path, nil
+}
+
+// parseSourceRange parses N or FIRST-LAST, with both values between 1 and 65535.
+func parseSourceRange(raw string) (uint16, uint16, error) {
+	firstText, lastText, isRange := strings.Cut(raw, "-")
+	first, err := strconv.ParseUint(firstText, 10, 16)
+	if err != nil || first == 0 {
+		return 0, 0, fmt.Errorf("invalid source range %q: use FIRST-LAST or one number between 1 and 65535", raw)
+	}
+	last := first
+	if isRange {
+		last, err = strconv.ParseUint(lastText, 10, 16)
+		if err != nil || last < first {
+			return 0, 0, fmt.Errorf("invalid source range %q: LAST must be between FIRST and 65535", raw)
+		}
+	}
+	return uint16(first), uint16(last), nil
 }
 
 func ParseMode(raw string) (Mode, error) {

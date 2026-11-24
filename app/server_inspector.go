@@ -127,6 +127,8 @@ func (s *serverInspector) Clients() ([]api.RegisteredClient, error) {
 			Transport:    path.Transport.String(),
 			ReturnIP:     returnText(path.Client, path.ReturnIP, path.ReturnPrefix != 0, prefixes),
 			LeaseSeconds: path.ExpiresIn.Seconds(),
+			SrcFirst:     path.SrcFirst,
+			SrcLast:      path.SrcLast,
 		})
 	}
 	if s.egresses != nil {

@@ -24,12 +24,31 @@ type configurationMaps struct {
 	ingressReflect configurationMap
 	state          configurationMap
 	downs          configurationMap
+	// pathSrc and downSrc hold the source range of each path slot and each
+	// egress path slot.
+	pathSrc configurationMap
+	downSrc configurationMap
 }
 
 func applyClientSettings(maps configurationMaps, settings ClientSettings) error {
 	client, groups, paths, state, err := encodeClientSettings(settings)
 	if err != nil {
 		return err
+	}
+	var pathSrc [config.MaxPaths]mupPathSrcV1
+	for index, path := range settings.Paths {
+		if pathSrc[index], err = encodePathSrc(fmt.Sprintf("path %d", index), path.SrcFirst, path.SrcLast); err != nil {
+			return err
+		}
+	}
+	var downSrc [MaxEgressPaths]mupPathSrcV1
+	for slot, egress := range settings.EgressPaths {
+		if egress == nil {
+			continue
+		}
+		if downSrc[slot], err = encodePathSrc(fmt.Sprintf("egress path %d", slot), egress.SrcFirst, egress.SrcLast); err != nil {
+			return err
+		}
 	}
 	key := uint32(0)
 	disabled := state
@@ -46,6 +65,13 @@ func applyClientSettings(maps configurationMaps, settings ClientSettings) error 
 		}
 		if err := maps.returns.Update(uint32(index), pathReturn, ebpf.UpdateAny); err != nil {
 			return fmt.Errorf("update return IP of client path %d: %w", index, err)
+		}
+		// Every slot gets its range, so an unused slot drops the range of an
+		// old path.
+		if maps.pathSrc != nil {
+			if err := maps.pathSrc.Update(uint32(index), pathSrc[index], ebpf.UpdateAny); err != nil {
+				return fmt.Errorf("update source range of client path %d: %w", index, err)
+			}
 		}
 		if err := maps.paths.Update(uint32(index), path, ebpf.UpdateAny); err != nil {
 			return fmt.Errorf("update client path %d: %w", index, err)
@@ -65,6 +91,11 @@ func applyClientSettings(maps configurationMaps, settings ClientSettings) error 
 			if slot < len(settings.EgressPaths) && settings.EgressPaths[slot] != nil {
 				if egress, err = encodeClientEgressPath(slot, *settings.EgressPaths[slot]); err != nil {
 					return err
+				}
+			}
+			if maps.downSrc != nil {
+				if err := maps.downSrc.Update(uint32(slot), downSrc[slot], ebpf.UpdateAny); err != nil {
+					return fmt.Errorf("update source range of client egress path %d: %w", slot, err)
 				}
 			}
 			if err := maps.downs.Update(uint32(slot), egress, ebpf.UpdateAny); err != nil {
@@ -131,7 +162,10 @@ func applyGroup(groups configurationMap, group GroupSettings) error {
 	return nil
 }
 
-func applyPath(paths, returns, ingressReflect configurationMap, slot int, path PathSettings) error {
+// applyPath writes one client path slot with its return IP, its source range,
+// and empty reflect members. A path without a source range resets the range of
+// an old path of the slot.
+func applyPath(paths, returns, ingressReflect, pathSrc configurationMap, slot int, path PathSettings) error {
 	encoded, err := encodePathSettings(slot, path)
 	if err != nil {
 		return err
@@ -140,8 +174,17 @@ func applyPath(paths, returns, ingressReflect configurationMap, slot int, path P
 	if err != nil {
 		return err
 	}
+	src, err := encodePathSrc(fmt.Sprintf("path %d", slot), path.SrcFirst, path.SrcLast)
+	if err != nil {
+		return err
+	}
 	if err := returns.Update(uint32(slot), pathReturn, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("update return IP of client path %d: %w", slot, err)
+	}
+	if pathSrc != nil {
+		if err := pathSrc.Update(uint32(slot), src, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("update source range of client path %d: %w", slot, err)
+		}
 	}
 	// A new path has no healthy reflect members yet. The control plane fills
 	// them for an ingress reflect path, so clear any members of an old path.
@@ -172,9 +215,11 @@ func applyIngressReflectMembers(ingressReflect configurationMap, slot int, membe
 	return nil
 }
 
-// applyEgressPath writes one client egress path slot. A nil path clears it.
-func applyEgressPath(downs configurationMap, slot int, path *EgressPathSettings) error {
+// applyEgressPath writes one client egress path slot and its source range. A
+// nil path clears both.
+func applyEgressPath(downs, downSrc configurationMap, slot int, path *EgressPathSettings) error {
 	var encoded mupClientDownPathV1
+	var src mupPathSrcV1
 	if slot < 0 || slot >= MaxEgressPaths {
 		return fmt.Errorf("egress path slot %d is outside 0 to %d", slot, MaxEgressPaths-1)
 	}
@@ -183,21 +228,43 @@ func applyEgressPath(downs configurationMap, slot int, path *EgressPathSettings)
 		if encoded, err = encodeClientEgressPath(slot, *path); err != nil {
 			return err
 		}
+		if src, err = encodePathSrc(fmt.Sprintf("egress path %d", slot), path.SrcFirst, path.SrcLast); err != nil {
+			return err
+		}
 	}
-	if err := downs.Update(uint32(slot), encoded, ebpf.UpdateAny); err != nil {
-		return fmt.Errorf("update client egress path %d: %w", slot, err)
+	// A cleared slot loses its path before its range, and a new path gets its
+	// range first, so the program never checks a path against a stale range.
+	if path == nil {
+		if err := downs.Update(uint32(slot), encoded, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("update client egress path %d: %w", slot, err)
+		}
+	}
+	if downSrc != nil {
+		if err := downSrc.Update(uint32(slot), src, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("update source range of client egress path %d: %w", slot, err)
+		}
+	}
+	if path != nil {
+		if err := downs.Update(uint32(slot), encoded, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("update client egress path %d: %w", slot, err)
+		}
 	}
 	return nil
 }
 
 // clearPath writes an empty entry. The client program skips a slot without a
 // destination address.
-func clearPath(paths, returns, ingressReflect configurationMap, slot int) error {
+func clearPath(paths, returns, ingressReflect, pathSrc configurationMap, slot int) error {
 	if slot < 0 || slot >= config.MaxPaths {
 		return fmt.Errorf("path slot %d is outside 0 to %d", slot, config.MaxPaths-1)
 	}
 	if err := paths.Update(uint32(slot), mupPathConfigV1{}, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("clear client path %d: %w", slot, err)
+	}
+	if pathSrc != nil {
+		if err := pathSrc.Update(uint32(slot), mupPathSrcV1{}, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("clear source range of client path %d: %w", slot, err)
+		}
 	}
 	if err := returns.Update(uint32(slot), mupPathReturnV1{}, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("clear return IP of client path %d: %w", slot, err)

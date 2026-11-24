@@ -612,6 +612,9 @@ func (c *clientController) addPath(raw string, listenPort uint16, bridge bool) (
 	if bridge && group.egresses == nil {
 		return api.Path{}, conflict("the group of listen port %d has no egress paths, and a bridge needs a group with ingress and egress", group.settings.ListenPort)
 	}
+	if bridge && path.HasSrc() && path.Transport == protocol.TransportICMP {
+		return api.Path{}, badRequest(errors.New("an ICMP ingress bridge has no source range, because the bridge finds its entry by the identifier"))
+	}
 	slot := -1
 	for index, current := range c.slots {
 		if current == nil {
@@ -1153,6 +1156,8 @@ func (c *clientController) egressPathLocked(slot int, seen [dataplane.MaxEgressP
 		InUse:      seen[slot] >= 0 && seen[slot] < egressInUse,
 		LastProbe:  egress.lastProbe,
 		RTTSeconds: c.egressRTTLocked(slot, now).Seconds(),
+		SrcFirst:   egress.path.SrcFirst,
+		SrcLast:    egress.path.SrcLast,
 	}
 }
 
@@ -1201,6 +1206,8 @@ func (c *clientController) pathLocked(slot int, inUse [config.MaxPaths]bool) api
 		Misses:     health.Misses,
 		LastACK:    health.LastReply,
 		RTTSeconds: health.RTT.Seconds(),
+		SrcFirst:   current.path.SrcFirst,
+		SrcLast:    current.path.SrcLast,
 	}
 }
 

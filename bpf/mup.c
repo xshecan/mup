@@ -189,6 +189,27 @@ struct {
 	__type(value, struct client_down_path_v1);
 } client_down_paths SEC(".maps");
 
+/* client_path_src holds the source range of each client path, by path slot. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 8);
+	MUP_PINNED;
+	__type(key, __u32);
+	__type(value, struct path_src_v1);
+} client_path_src SEC(".maps");
+
+/*
+ * client_down_src holds the source range of each down path of the client, by
+ * down path slot.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 8);
+	MUP_PINNED;
+	__type(key, __u32);
+	__type(value, struct path_src_v1);
+} client_down_src SEC(".maps");
+
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 16384);
@@ -479,6 +500,77 @@ static __always_inline __u32 mup_mask64_has(__u64 mask, __u32 index)
 	return bit;
 }
 
+/* A source range is set when first is not 0 and last is not below first. */
+static __always_inline int mup_src_has(__u16 first, __u16 last)
+{
+	return first && last >= first;
+}
+
+static __always_inline int mup_src_contains(__u16 first, __u16 last,
+					    __u16 value)
+{
+	return mup_src_has(first, last) && value >= first && value <= last;
+}
+
+/*
+ * mup_src_random returns a random value from first to last of a set range.
+ * mup_src_pick does the same, or returns fallback when the range is not set.
+ * A caller picks once for each copy that it sends and gives the value to the
+ * rewrite, so the checksum math of that copy sees one value.
+ */
+static __always_inline __u16 mup_src_random(__u16 first, __u16 last)
+{
+	return first + bpf_get_prandom_u32() % ((__u32)last - first + 1);
+}
+
+static __always_inline __u16 mup_src_pick(__u16 first, __u16 last,
+					  __u16 fallback)
+{
+	if (!mup_src_has(first, last))
+		return fallback;
+	return mup_src_random(first, last);
+}
+
+/*
+ * mup_icmp_tag returns the path tag in the Echo sequence of an ICMP packet,
+ * or 0 for a UDP packet. A tag above MUP_MAX_PATH_TAG is not a path tag, for
+ * example the 0xffff that a device writes when it completes a partial
+ * checksum, so it counts as 0.
+ */
+static __always_inline __u32 mup_icmp_tag(const struct mup_packet *packet)
+{
+	const struct mup_icmphdr *icmp = packet->l4;
+	__u32 tag;
+
+	if (packet->transport != MUP_TRANSPORT_ICMP)
+		return 0;
+	tag = MUP_ICMP_SEQUENCE_TAG(mup_read_be16((const __u8 *)&icmp->sequence));
+	return tag > MUP_MAX_PATH_TAG ? 0 : tag;
+}
+
+/*
+ * mup_src_match checks the source port of a reply, or its ICMP identifier,
+ * against one path of the client. src is the source range of the path, and
+ * slot is its slot. A UDP reply of a path with a range comes from a port of
+ * the range. A tagged ICMP reply has the tag of the slot and an identifier of
+ * the range of the path. An untagged reply has the server port of the path.
+ * A path with a range takes an untagged ICMP reply too, because a partial
+ * reply of the server cannot carry the tag.
+ */
+static __always_inline int mup_src_match(const struct path_src_v1 *src,
+					 __u16 server_port, __u16 observed,
+					 __u8 transport, __u32 tag, __u32 slot)
+{
+	__u16 first = src ? src->first : 0;
+	__u16 last = src ? src->last : 0;
+
+	if (transport == MUP_TRANSPORT_ICMP && tag)
+		return tag == slot + 1 && mup_src_contains(first, last, observed);
+	if (transport == MUP_TRANSPORT_UDP && mup_src_has(first, last))
+		return observed >= first && observed <= last;
+	return observed == server_port;
+}
+
 /*
  * apply_up_reflect reflects the upstream of an up path through a member of its
  * pool, when the slot has an up_reflect_members entry. It picks a member by the
@@ -624,13 +716,15 @@ static __always_inline __be32 mup_prefix_netmask(__u8 prefix)
 /*
  * A downstream packet must come from a path of the group of its peer: from
  * the server of the path, from the return IP of the path if it has one, or
- * from any address in the return pool of the path if it has a pool.
+ * from any address in the return pool of the path if it has a pool. Its port
+ * must match the path as mup_src_match says, and tag is its path tag.
  */
 static __always_inline int is_client_downstream_source(
-	const struct mup_packet *packet, __u32 path_mask)
+	const struct mup_packet *packet, __u32 path_mask, __u32 tag)
 {
 	struct path_config_v1 *path;
 	struct path_return_v1 *path_return;
+	struct path_src_v1 *src;
 	__be32 source = packet->ipv4->source;
 	__be32 expected_ip;
 	int matched;
@@ -656,8 +750,11 @@ static __always_inline int is_client_downstream_source(
 					      path->destination_ip;
 			matched = expected_ip == source;
 		}
-		if (matched && path->server_port == observed_port &&
-		    path->transport == packet->transport)
+		if (!matched || path->transport != packet->transport)
+			continue;
+		src = bpf_map_lookup_elem(&client_path_src, &key);
+		if (mup_src_match(src, path->server_port, observed_port,
+				  packet->transport, tag, index))
 			return 1;
 	}
 	return 0;
@@ -666,13 +763,15 @@ static __always_inline int is_client_downstream_source(
 /*
  * A group with separate down paths also accepts a reply from one of its down
  * paths: from the server address of a direct path, from the return IP of the
- * path, or from any address in its return pool. The match records the time,
- * at most once a second, so mupctl can show which down paths carry data.
+ * path, or from any address in its return pool. Its port must match the down
+ * path as mup_src_match says, and tag is its path tag. The match records the
+ * time, at most once a second, so mupctl can show which down paths carry data.
  */
 static __always_inline int is_client_down_source(
-	const struct mup_packet *packet, __u32 down_mask)
+	const struct mup_packet *packet, __u32 down_mask, __u32 tag)
 {
 	struct client_down_path_v1 *down;
+	struct path_src_v1 *src;
 	__be32 source = packet->ipv4->source;
 	int matched;
 	__u16 observed_port = packet->transport == MUP_TRANSPORT_UDP ?
@@ -694,8 +793,11 @@ static __always_inline int is_client_down_source(
 		} else {
 			matched = down->server_ip == source;
 		}
-		if (matched && down->server_port == observed_port &&
-		    down->transport == packet->transport) {
+		if (!matched || down->transport != packet->transport)
+			continue;
+		src = bpf_map_lookup_elem(&client_down_src, &key);
+		if (mup_src_match(src, down->server_port, observed_port,
+				  packet->transport, tag, index)) {
 			__u64 now = bpf_ktime_get_ns();
 
 			if (now - down->last_seen_ns > MUP_DOWN_SEEN_STEP_NS)
@@ -706,12 +808,36 @@ static __always_inline int is_client_down_source(
 	return 0;
 }
 
+/*
+ * is_client_icmp_port reports an Echo Reply of a client path. An untagged
+ * reply has the server port of an ICMP path or down path as its identifier.
+ * A reply with tag T belongs to slot T - 1 only, so its check needs no loop:
+ * the path or the down path of the slot must use ICMP and have a source range
+ * that holds the identifier.
+ */
 static __always_inline int is_client_icmp_port(
-	const struct mup_packet *packet)
+	const struct mup_packet *packet, __u32 tag)
 {
 	struct path_config_v1 *path;
 	struct client_down_path_v1 *down;
+	struct path_src_v1 *src;
 
+	if (tag) {
+		__u32 key = (tag - 1) & 7;
+
+		path = bpf_map_lookup_elem(&path_config, &key);
+		src = bpf_map_lookup_elem(&client_path_src, &key);
+		if (path && src && path->destination_ip &&
+		    path->transport == MUP_TRANSPORT_ICMP &&
+		    mup_src_contains(src->first, src->last, packet->server_port))
+			return 1;
+		down = bpf_map_lookup_elem(&client_down_paths, &key);
+		src = bpf_map_lookup_elem(&client_down_src, &key);
+		return down && src && down->server_ip &&
+		       down->transport == MUP_TRANSPORT_ICMP &&
+		       mup_src_contains(src->first, src->last,
+					packet->server_port);
+	}
 #pragma clang loop unroll(full)
 	for (int index = 0; index < 8; index++) {
 		__u32 key = index;
@@ -766,8 +892,11 @@ static __always_inline int redirect_packet(__u32 ifindex)
 /*
  * mup_bridge_wrap puts a packet in the wrapper of a MUP bridge. It inserts 20
  * bytes after the IPv4 header for a UDP header and a bridge header, and turns
- * the IPv4 header into a UDP packet from local_ip to bridge_ip, on port at
- * both ends. The bridge header keeps the protocol and the addresses of the
+ * the IPv4 header into a UDP packet from local_ip to bridge_ip. Bits 0 to 15
+ * of ports are the destination port, which picks the entry of the bridge.
+ * Bits 16 to 31 are the source port, and 0 there means the destination port
+ * at both ends. A BPF function has at most five arguments, so both ports
+ * share one. The bridge header keeps the protocol and the addresses of the
  * packet. The transport header and the payload do not move, so the inner
  * checksum stays valid, and a partial checksum stays partial. Not every
  * device completes a partial checksum behind the wrapper, so the bridge
@@ -779,7 +908,7 @@ static __always_inline int redirect_packet(__u32 ifindex)
  */
 __attribute__((noinline)) int mup_bridge_wrap(struct __sk_buff *skb,
 					      __u32 local_ip, __u32 bridge_ip,
-					      __u32 port, __u32 ifindex)
+					      __u32 ports, __u32 ifindex)
 {
 	void *data = (void *)(long)skb->data;
 	void *data_end = (void *)(long)skb->data_end;
@@ -815,8 +944,8 @@ __attribute__((noinline)) int mup_bridge_wrap(struct __sk_buff *skb,
 	mup_write_be16(&ipv4->total_length, total_length + MUP_BRIDGE_OVERHEAD);
 	mup_refresh_ipv4_checksum(ipv4);
 	/* The outer UDP length is the old IPv4 total length. */
-	mup_write_be16((__be16 *)wrapper, port);
-	mup_write_be16((__be16 *)(wrapper + 2), port);
+	mup_write_be16((__be16 *)wrapper, (ports >> 16) ? ports >> 16 : ports);
+	mup_write_be16((__be16 *)(wrapper + 2), ports);
 	mup_write_be16((__be16 *)(wrapper + 4), total_length);
 	wrapper[6] = 0;
 	wrapper[7] = 0;
@@ -1001,37 +1130,65 @@ static __always_inline int complete_udp_checksum(struct __sk_buff *skb,
  * A partial packet came from a local socket and still has CHECKSUM_PARTIAL.
  * A UDP rewrite leaves the checksum to the device, and an ICMP rewrite
  * computes it.
+ *
+ * A path slot with a source range sends each packet from a random value of
+ * the range: the UDP source port instead of the listen port, or the ICMP
+ * identifier instead of the server port. An ICMP packet then has the tag of
+ * the slot in its sequence. A partial ICMP packet keeps the server port and
+ * no tag, because a device that completes its checksum overwrites the
+ * sequence, and the server finds such a packet by its exact key.
  */
 static __always_inline int rewrite_for_path(
 	struct __sk_buff *skb,
 	struct mup_packet *packet,
 	__u16 listen_port,
 	const struct path_config_v1 *path,
+	__u32 index,
 	__u32 peer_token,
 	int partial)
 {
-	if (path->transport == MUP_TRANSPORT_UDP && partial)
-		return mup_rewrite_udp_partial(packet, path->source_ip,
-					       path->destination_ip,
-					       listen_port,
-					       path->server_port,
-					       peer_token);
-	if (path->transport == MUP_TRANSPORT_UDP)
+	struct path_src_v1 *src;
+	__u32 key = index & 7;
+	__u16 first = 0;
+	__u16 last = 0;
+	__u16 source_port;
+
+	src = bpf_map_lookup_elem(&client_path_src, &key);
+	if (src) {
+		first = src->first;
+		last = src->last;
+	}
+	if (path->transport == MUP_TRANSPORT_UDP) {
+		source_port = mup_src_pick(first, last, listen_port);
+		if (partial)
+			return mup_rewrite_udp_partial(packet, path->source_ip,
+						       path->destination_ip,
+						       source_port,
+						       path->server_port,
+						       peer_token);
 		return mup_rewrite_udp(packet, path->source_ip,
 				       path->destination_ip,
-				       listen_port,
+				       source_port,
 				       path->server_port);
+	}
 	if (path->transport == MUP_TRANSPORT_ICMP && partial)
 		return rewrite_icmp_partial(skb, packet, path->source_ip,
 					    path->destination_ip,
 					    MUP_ICMP_ECHO_REQUEST,
 					    path->server_port, peer_token);
-	if (path->transport == MUP_TRANSPORT_ICMP)
+	if (path->transport == MUP_TRANSPORT_ICMP) {
+		__u16 identifier = path->server_port;
+		__u32 sequence = peer_token;
+
+		if (mup_src_has(first, last)) {
+			identifier = mup_src_random(first, last);
+			sequence = MUP_ICMP_SEQUENCE(key + 1, peer_token);
+		}
 		return mup_rewrite_icmp(packet, path->source_ip,
 					path->destination_ip,
-					MUP_ICMP_ECHO_REQUEST,
-					path->server_port,
-					(__u16)peer_token);
+					MUP_ICMP_ECHO_REQUEST, identifier,
+					(__u16)sequence);
+	}
 	return -2;
 }
 
@@ -1100,7 +1257,7 @@ __attribute__((noinline)) int mup_burst_clone(struct __sk_buff *skb, __u32 index
 	path = *mapped_path;
 	apply_up_reflect(index, &path, peer_token);
 	result = rewrite_for_path(skb, &packet, (__u16)listen_port, &path,
-				  peer_token, partial);
+				  index, peer_token, partial);
 	if (result) {
 		count_reason(result == -2 ? MUP_DROP_TRANSPORT : MUP_DROP_CHECKSUM);
 		return MUP_BURST_FAILED;
@@ -1180,8 +1337,8 @@ static __always_inline int burst_client_packet(
 		return cloned ? TC_ACT_SHOT : count_and_drop(skb, MUP_DROP_NO_PATH);
 	path = *mapped_path;
 	apply_up_reflect(final_key, &path, peer_token);
-	result = rewrite_for_path(skb, packet, listen_port, &path, peer_token,
-				  partial);
+	result = rewrite_for_path(skb, packet, listen_port, &path, final_key,
+				  peer_token, partial);
 	if (result == -2)
 		return count_and_drop(skb, MUP_DROP_TRANSPORT);
 	if (result)
@@ -1210,7 +1367,9 @@ static __always_inline int same_return_path(
 	       left->server_local_ip == right->server_local_ip &&
 	       left->return_ip == right->return_ip &&
 	       left->ifindex == right->ifindex &&
-	       left->listen_port == right->listen_port;
+	       left->listen_port == right->listen_port &&
+	       left->src_first == right->src_first &&
+	       left->src_last == right->src_last;
 }
 
 /*
@@ -1343,6 +1502,7 @@ int mup_client_ingress(struct __sk_buff *skb)
 	struct peer_token_value_v1 *forward;
 	__u32 configuration_key = 0;
 	__u32 peer_token = 0;
+	__u32 tag = 0;
 	int partial;
 	int result;
 
@@ -1365,8 +1525,14 @@ int mup_client_ingress(struct __sk_buff *skb)
 				return MUP_TCX_NEXT;
 		} else {
 			struct mup_icmphdr *icmp = packet.l4;
-			if (icmp->type != MUP_ICMP_ECHO_REPLY || icmp->code != 0 ||
-			    !is_client_icmp_port(&packet))
+			if (icmp->type != MUP_ICMP_ECHO_REPLY || icmp->code != 0)
+				return MUP_TCX_NEXT;
+			/*
+			 * The token is in the WireGuard bytes, so the client
+			 * reads only the tag of the sequence.
+			 */
+			tag = mup_icmp_tag(&packet);
+			if (!is_client_icmp_port(&packet, tag))
 				return MUP_TCX_NEXT;
 		}
 		result = validate_wg(&packet, 1, &peer_token);
@@ -1383,8 +1549,8 @@ int mup_client_ingress(struct __sk_buff *skb)
 					    &reverse->endpoint.listen_port);
 		if (!group)
 			return count_and_drop(skb, MUP_DROP_DOWNSTREAM_SOURCE);
-		if (!is_client_downstream_source(&packet, group->path_mask) &&
-		    !is_client_down_source(&packet, group->down_mask))
+		if (!is_client_downstream_source(&packet, group->path_mask, tag) &&
+		    !is_client_down_source(&packet, group->down_mask, tag))
 			return count_and_drop(skb, MUP_DROP_DOWNSTREAM_SOURCE);
 		if (group->flags & MUP_GROUP_FLAG_DEDUP) {
 			result = check_client_duplicate(&packet, peer_token);
@@ -1459,7 +1625,8 @@ int mup_client_ingress(struct __sk_buff *skb)
 	if (mup_set_peer_token(&packet, peer_token))
 		return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
 	result = rewrite_for_path(skb, &packet, endpoint.listen_port,
-				  &selected_path, peer_token, partial);
+				  &selected_path, selected_index, peer_token,
+				  partial);
 	if (result == -2)
 		return count_and_drop(skb, MUP_DROP_TRANSPORT);
 	if (result)
@@ -1580,6 +1747,7 @@ static __always_inline int down_send_core(struct __sk_buff *skb,
 	__u32 count;
 	__u32 slot;
 	__u16 server_port;
+	__u16 source_port;
 	__u8 transport;
 	__u8 flags;
 	__u8 type;
@@ -1606,6 +1774,16 @@ static __always_inline int down_send_core(struct __sk_buff *skb,
 	transport = mapped->transport;
 	server_port = mapped->server_port;
 	ifindex = mapped->ifindex;
+	/*
+	 * A path with a source range sends each reply from a random value of
+	 * the range, and an ICMP reply has the tag of the down path. The wrapper
+	 * of a bridge path takes the same value as its source port. A partial
+	 * ICMP reply keeps the server port and no tag, because a device that
+	 * completes its checksum overwrites the sequence.
+	 */
+	source_port = server_port;
+	if (mup_src_has(mapped->src_first, mapped->src_last))
+		source_port = mup_src_random(mapped->src_first, mapped->src_last);
 	if (flags & MUP_FLAG_RETURN_POOL) {
 		count = mapped->count;
 		if (count == 0 || count > MUP_MAX_POOL) {
@@ -1654,12 +1832,12 @@ static __always_inline int down_send_core(struct __sk_buff *skb,
 		if (partial)
 			result = mup_rewrite_udp_partial(packet, source_ip,
 							 advertised_ip,
-							 server_port,
+							 source_port,
 							 listen_port,
 							 peer_token);
 		else
 			result = mup_rewrite_udp(packet, source_ip,
-						 advertised_ip, server_port,
+						 advertised_ip, source_port,
 						 listen_port);
 	} else if (transport == MUP_TRANSPORT_ICMP) {
 		if (member) {
@@ -1679,10 +1857,15 @@ static __always_inline int down_send_core(struct __sk_buff *skb,
 			if (!result)
 				mup_finish_rewrite(packet, payload_sum);
 		} else {
+			__u32 sequence = peer_token;
+
+			if (mup_src_has(mapped->src_first, mapped->src_last))
+				sequence = MUP_ICMP_SEQUENCE(
+					((meta >> 16) & 7) + 1, peer_token);
 			result = mup_rewrite_icmp(packet, source_ip,
 						  destination_ip, type,
-						  server_port,
-						  (__u16)peer_token);
+						  source_port,
+						  (__u16)sequence);
 		}
 	} else {
 		reason = MUP_DROP_TRANSPORT;
@@ -1703,7 +1886,8 @@ static __always_inline int down_send_core(struct __sk_buff *skb,
 	 */
 	if (flags & MUP_FLAG_BRIDGE) {
 		reason = mup_bridge_wrap(skb, wrap_source, mapped->server_ip,
-					 server_port, ifindex);
+					 ((__u32)source_port << 16) | server_port,
+					 ifindex);
 		if (reason == MUP_DROP_BRIDGE_SIZE)
 			goto fail;
 		*packet = (struct mup_packet){};
@@ -1886,6 +2070,7 @@ static __always_inline int server_target_reply(
 	__u16 listen_port = reverse->route_value.listen_port;
 	__u32 peer_token = 0;
 	__be32 pool_addr = 0;
+	__u16 source_port;
 	__u64 now;
 	int result;
 
@@ -1935,6 +2120,17 @@ static __always_inline int server_target_reply(
 		if (!pool_addr)
 			return count_and_drop(skb, MUP_DROP_NO_PATH);
 	}
+	/*
+	 * A route of a path with a source range sends each reply from a random
+	 * value of the range, and an ICMP reply has the tag of the path of the
+	 * route. A partial ICMP reply keeps the server port and no tag, because
+	 * a device that completes its checksum overwrites the sequence.
+	 */
+	source_port = reverse->route_value.server_port;
+	if (mup_src_has(reverse->route_value.src_first,
+			reverse->route_value.src_last))
+		source_port = mup_src_random(reverse->route_value.src_first,
+					     reverse->route_value.src_last);
 	if (reverse->route_value.transport == MUP_TRANSPORT_UDP) {
 		__be32 source_ip =
 			(reverse->route_value.flags & MUP_FLAG_RETURN_POOL) ?
@@ -1946,15 +2142,13 @@ static __always_inline int server_target_reply(
 			result = mup_rewrite_udp_partial(
 				packet, source_ip,
 				reverse->route_key.client.advertised_ip,
-				reverse->route_value.server_port,
-				listen_port,
+				source_port, listen_port,
 				reverse->route_key.peer_token);
 		else
 			result = mup_rewrite_udp(
 				packet, source_ip,
 				reverse->route_key.client.advertised_ip,
-				reverse->route_value.server_port,
-				listen_port);
+				source_port, listen_port);
 		if (result)
 			return count_and_drop(skb, MUP_DROP_CHECKSUM);
 	} else if (reverse->route_value.transport == MUP_TRANSPORT_ICMP) {
@@ -1982,7 +2176,12 @@ static __always_inline int server_target_reply(
 		else
 			result = mup_rewrite_icmp(
 				packet, source_ip, destination_ip, type,
-				reverse->route_value.server_port,
+				source_port,
+				mup_src_has(reverse->route_value.src_first,
+					    reverse->route_value.src_last) ?
+				MUP_ICMP_SEQUENCE(
+					(reverse->route_value.path_id & 7) + 1,
+					reverse->route_key.peer_token) :
 				(__u16)reverse->route_key.peer_token);
 		if (result)
 			return count_and_drop(skb, MUP_DROP_CHECKSUM);
@@ -2012,6 +2211,8 @@ int mup_server_ingress(struct __sk_buff *skb)
 	__u32 peer_token = 0;
 	__u16 target_port = 0;
 	__u16 reserved_port = 0;
+	__u32 in_ports;
+	__u32 tag;
 	__u64 now;
 	int result;
 
@@ -2053,13 +2254,19 @@ int mup_server_ingress(struct __sk_buff *skb)
 	}
 
 	ports = bpf_map_lookup_elem(&server_ports, &configuration_key);
-	if (ports && ports->last >= ports->first) {
-		if (packet.server_port < ports->first ||
-		    packet.server_port > ports->last)
-			return MUP_TCX_NEXT;
-	} else if (packet.server_port != configuration->server_port) {
+	if (ports && ports->last >= ports->first)
+		in_ports = packet.server_port >= ports->first &&
+			   packet.server_port <= ports->last;
+	else
+		in_ports = packet.server_port == configuration->server_port;
+	/*
+	 * An Echo packet of a path with a source range has a path tag, and its
+	 * identifier is a random value of the range, which need not lie in the
+	 * server ports. Only an untagged packet needs a server port here.
+	 */
+	tag = mup_icmp_tag(&packet);
+	if (!in_ports && !tag)
 		return MUP_TCX_NEXT;
-	}
 	if (is_mup_control(&packet))
 		return MUP_TCX_NEXT;
 	if (packet.transport == MUP_TRANSPORT_ICMP) {
@@ -2070,9 +2277,34 @@ int mup_server_ingress(struct __sk_buff *skb)
 	}
 	path_key.source_ip = packet.ipv4->source;
 	path_key.local_ip = packet.ipv4->destination;
-	path_key.server_port = packet.server_port;
 	path_key.transport = packet.transport;
-	path = bpf_map_lookup_elem(&registered_paths, &path_key);
+	path = 0;
+	/*
+	 * A tagged packet looks up the tagged key of its path, and it is data
+	 * of that path only when the range of the path holds its identifier.
+	 * Otherwise, and for an untagged packet, the exact key of a packet on a
+	 * server port decides, as for a path without a range.
+	 */
+	if (tag) {
+		path_key.tag = tag;
+		path = bpf_map_lookup_elem(&registered_paths, &path_key);
+		if (path && !mup_src_contains(path->src_first, path->src_last,
+					      packet.server_port))
+			path = 0;
+		/*
+		 * The identifier of a tagged packet is random, so the route
+		 * keeps the server port of the path. Each packet would move
+		 * the route otherwise.
+		 */
+		if (path)
+			observed.server_port = path->server_port;
+	}
+	if (!path && in_ports) {
+		path_key.server_port = packet.server_port;
+		path_key.tag = 0;
+		observed.server_port = packet.server_port;
+		path = bpf_map_lookup_elem(&registered_paths, &path_key);
+	}
 	/*
 	 * A UDP server port is only a port number, so other traffic of the host
 	 * can use it too. For example, a NAT that masquerades a flow to a pod
@@ -2092,7 +2324,8 @@ int mup_server_ingress(struct __sk_buff *skb)
 	 * An Echo Request with a WireGuard message is not a normal ping. Without
 	 * a registered path, for example before the ACK of a new client, the
 	 * kernel would echo the message back, and the client would take the
-	 * reply as a downstream packet.
+	 * reply as a downstream packet. This holds for a tagged packet outside
+	 * the server ports too.
 	 */
 	if (!path)
 		return count_and_drop(skb, MUP_DROP_NOT_REGISTERED);
@@ -2122,7 +2355,6 @@ int mup_server_ingress(struct __sk_buff *skb)
 	result = check_and_record_duplicate(&route_key, &packet, now);
 	if (result != MUP_DROP_NONE)
 		return count_and_drop(skb, result);
-	observed.server_port = packet.server_port;
 	observed.transport = packet.transport;
 	observed.flags = path->flags;
 	observed.path_id = path->path_id;
@@ -2131,6 +2363,8 @@ int mup_server_ingress(struct __sk_buff *skb)
 	observed.return_ip = path->return_ip;
 	observed.ifindex = skb->ifindex;
 	observed.listen_port = path->listen_port;
+	observed.src_first = path->src_first;
+	observed.src_last = path->src_last;
 	if (configuration->target_ip == configuration->source_ip)
 		reserved_port = configuration->target_port;
 	result = get_or_create_server_route(&route_key, &observed, reserved_port,

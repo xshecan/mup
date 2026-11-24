@@ -15,13 +15,17 @@ const MaxEgressPaths = 8
 
 // EgressPathSettings is one egress path of a client group: the server address and
 // port that send the replies, the transport, and an optional return IP or
-// return pool. The client accepts replies only from these sources.
+// return pool. The client accepts replies only from these sources. A path with
+// a source range takes replies from any UDP source port of SrcFirst to SrcLast,
+// or ICMP replies with the tag of its slot and an identifier of the range.
 type EgressPathSettings struct {
 	Server       netip.Addr
 	ServerPort   uint16
 	Transport    protocol.TransportID
 	ReturnIP     netip.Addr
 	ReturnPrefix uint8
+	SrcFirst     uint16
+	SrcLast      uint16
 }
 
 // EgressPathFromConfig converts a configured egress path. The via of a path
@@ -34,6 +38,8 @@ func EgressPathFromConfig(path config.Path) EgressPathSettings {
 		Transport:    path.Transport,
 		ReturnIP:     path.ReturnIP,
 		ReturnPrefix: path.ReturnPrefix,
+		SrcFirst:     path.SrcFirst,
+		SrcLast:      path.SrcLast,
 	}
 	if path.BridgeVia {
 		settings.ReturnIP = netip.Addr{}
@@ -83,6 +89,10 @@ func encodeClientEgressPath(slot int, path EgressPathSettings) (mupClientDownPat
 // bridge, out of Ifindex. With BridgeVia as well, the return IP or a pool
 // member is the source of the wrapper in place of LocalIP, and the reply in it
 // is the direct reply from the bridge address.
+//
+// A path with a source range sends each reply from a random UDP source port or
+// ICMP identifier of SrcFirst to SrcLast, and the wrapper of a bridge path takes
+// the same value as its source port. Zero means no range.
 type EgressPathEntry struct {
 	Client     ClientKey
 	PathID     uint16
@@ -97,6 +107,8 @@ type EgressPathEntry struct {
 	Bridge     bool
 	BridgeVia  bool
 	LocalIP    netip.Addr
+	SrcFirst   uint16
+	SrcLast    uint16
 }
 
 // EgressGroupEntry is the egress group of one listen port of a client on a
@@ -147,11 +159,17 @@ func encodeEgressPathEntry(entry EgressPathEntry) (mupDownPathKeyV1, mupDownPath
 	if len(entry.Members) > MaxPool {
 		return key, mupDownPathV1{}, fmt.Errorf("egress path has %d members, more than %d", len(entry.Members), MaxPool)
 	}
+	src, err := encodePathSrc("egress path", entry.SrcFirst, entry.SrcLast)
+	if err != nil {
+		return key, mupDownPathV1{}, err
+	}
 	value := mupDownPathV1{
 		ServerIp:   server,
 		Ifindex:    uint32(entry.Ifindex),
 		ServerPort: entry.ServerPort,
 		Transport:  uint8(entry.Transport),
+		SrcFirst:   src.First,
+		SrcLast:    src.Last,
 	}
 	switch {
 	case entry.Pool:

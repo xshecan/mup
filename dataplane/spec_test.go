@@ -49,6 +49,8 @@ func TestMupCollectionSpec(t *testing.T) {
 		"events":                   {ebpf.RingBuf, 256 * 1024},
 		"event_limits":             {ebpf.Array, 26},
 		"client_down_paths":        {ebpf.Array, 8},
+		"client_path_src":          {ebpf.Array, 8},
+		"client_down_src":          {ebpf.Array, 8},
 		"client_duplicate_cache":   {ebpf.LRUHash, 16384},
 		"server_down_groups":       {ebpf.Hash, 4096},
 		"server_down_paths":        {ebpf.Hash, 32768},

@@ -209,7 +209,8 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 		header = slices.Insert(header, 2, "KIND")
 	}
 	if wide {
-		header = append(header, "PORTS", "PRIORITY", "MISSES")
+		// SRC is the source range of the data packets of a path.
+		header = append(header, "SRC", "PORTS", "PRIORITY", "MISSES")
 	}
 	row(table, header...)
 	for _, path := range paths {
@@ -250,7 +251,7 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 			if path.LastPort > path.FirstPort {
 				ports = fmt.Sprintf("%d-%d", path.FirstPort, path.LastPort)
 			}
-			cells = append(cells, ports, strconv.Itoa(int(path.Priority)), strconv.Itoa(path.Misses))
+			cells = append(cells, srcText(path.SrcFirst, path.SrcLast), ports, strconv.Itoa(int(path.Priority)), strconv.Itoa(path.Misses))
 		}
 		row(table, cells...)
 	}
@@ -361,7 +362,7 @@ func printClients(w io.Writer, clients []api.RegisteredClient, wide bool) {
 		if wide {
 			list := make([]string, 0, len(client.Paths))
 			for _, path := range client.Paths {
-				list = append(list, fmt.Sprintf("%d:%s:%s", path.ID, path.Transport, path.Local))
+				list = append(list, fmt.Sprintf("%d:%s:%s", path.ID, path.Transport, path.Local)+srcSuffix(path.SrcFirst, path.SrcLast))
 			}
 			cells = append(cells, listenPorts(client), orDash(strings.Join(list, ",")))
 			if split {
@@ -440,7 +441,8 @@ func egressSummary(groups []api.EgressGroup) string {
 // egressList shows each egress path as ID:TRANSPORT:SERVER:PORT, with the
 // healthy members of a path that reflects. A bridge that sends the replies from
 // the via shows "reflects via". A bridge via path shows "via" alone, because
-// the server sends to the bridge from the via.
+// the server sends to the bridge from the via. A path with a source range ends
+// with "src A-B".
 func egressList(groups []api.EgressGroup) string {
 	return joinGroups(groups, func(group api.EgressGroup) string {
 		list := make([]string, 0, len(group.Paths))
@@ -456,10 +458,32 @@ func egressList(groups []api.EgressGroup) string {
 				}
 				text += fmt.Sprintf(" %s %s (%d/%d)", via, path.ReturnIP, path.HealthyMembers, path.Members)
 			}
-			list = append(list, text)
+			list = append(list, text+srcSuffix(path.SrcFirst, path.SrcLast))
 		}
 		return orDash(strings.Join(list, ","))
 	})
+}
+
+// srcText shows a source range as FIRST-LAST, as N for a range of one, or as
+// "-" for none.
+func srcText(first, last uint16) string {
+	switch {
+	case first == 0:
+		return "-"
+	case last <= first:
+		return strconv.Itoa(int(first))
+	default:
+		return fmt.Sprintf("%d-%d", first, last)
+	}
+}
+
+// srcSuffix shows the source range of a path in a list as " src A-B", or
+// nothing for a path without one.
+func srcSuffix(first, last uint16) string {
+	if first == 0 {
+		return ""
+	}
+	return " src " + srcText(first, last)
 }
 
 // printDrops lists the nonzero counters, or every counter in wide output.
