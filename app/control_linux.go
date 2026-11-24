@@ -116,7 +116,8 @@ func (c *linuxClientControls) listenEgress(listen egressListen, handle func(egre
 }
 
 // readEgressICMP reads the Echo Replies to the client. A REGISTER_ACK goes to
-// the ingress path that waits for it, and an egress path probe goes to handle.
+// the ingress path that waits for it and to handle, which measures the egress
+// path. An egress path probe goes to handle.
 func readEgressICMP(connection *net.IPConn, nonce uint64, router *ackRouter, handle func(egressProbe)) {
 	buffer := make([]byte, icmpControlBufferLength)
 	for {
@@ -136,16 +137,24 @@ func readEgressICMP(connection *net.IPConn, nonce uint64, router *ackRouter, han
 		if err != nil || frame.InstanceNonce != nonce {
 			continue
 		}
+		received := time.Now()
 		switch {
 		case frame.Type == protocol.ControlRegisterACK:
 			router.post(frame.PathID, echo.payload)
+			handle(egressProbe{
+				frame:     frame,
+				source:    ipAddress(source.IP),
+				transport: protocol.TransportICMP,
+				port:      echo.identifier,
+				received:  received,
+			})
 		case frame.Type == protocol.ControlProbe && frame.Flags&protocol.ControlFlagEgressPath != 0:
 			handle(egressProbe{
 				frame:     frame,
 				source:    ipAddress(source.IP),
 				transport: protocol.TransportICMP,
 				port:      echo.identifier,
-				received:  time.Now(),
+				received:  received,
 			})
 		}
 	}

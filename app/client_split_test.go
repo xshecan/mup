@@ -328,3 +328,209 @@ func TestTheProbeReplyOfAReflectPathKnowsTheMembersThatAnswered(t *testing.T) {
 		t.Fatalf("probe replies = %#v, want one that knows the member %s", sent, answered)
 	}
 }
+
+func egressAck(slot uint16, sequence uint32, source netip.Addr, transport protocol.TransportID, port uint16, received time.Time) egressProbe {
+	return egressProbe{
+		frame: protocol.ControlFrame{
+			Type: protocol.ControlRegisterACK, Transport: transport, Status: protocol.ControlStatusOK,
+			PathID: slot, Sequence: sequence, ListenPort: 51820, ServerPort: 9000,
+			InstanceNonce: 42, AdvertisedIP: netip.MustParseAddr("192.0.2.10"),
+		},
+		source:    source,
+		transport: transport,
+		port:      port,
+		received:  received,
+	}
+}
+
+// The ACK of the first egress path comes from its pool, and the ACK of the
+// second one comes from its server.
+func firstEgressAck(slot uint16, sequence uint32, received time.Time) egressProbe {
+	return egressAck(slot, sequence, netip.MustParseAddr("203.0.113.4"), protocol.TransportICMP, 9200, received)
+}
+
+func secondEgressAck(slot uint16, sequence uint32, received time.Time) egressProbe {
+	return egressAck(slot, sequence, netip.MustParseAddr("198.51.100.1"), protocol.TransportUDP, 9300, received)
+}
+
+func (f splitFixture) report(t *testing.T, slot int, sequence uint32, sentAt time.Time) {
+	t.Helper()
+	f.controller.mu.Lock()
+	epoch := f.controller.slots[slot].epoch
+	f.controller.mu.Unlock()
+	probe := pathProbeResult{slot: slot, epoch: epoch, sequence: sequence, sentAt: sentAt, result: registerAcked}
+	if err := f.controller.handleProbe(probe); err != nil {
+		t.Fatalf("handleProbe: %v", err)
+	}
+}
+
+func (f splitFixture) egressRTT(t *testing.T, slot int) time.Duration {
+	t.Helper()
+	paths, err := f.controller.Paths()
+	if err != nil {
+		t.Fatalf("Paths: %v", err)
+	}
+	for _, path := range paths {
+		if path.Direction == directionEgress && path.ID == slot {
+			return time.Duration(path.RTTSeconds * float64(time.Second))
+		}
+	}
+	t.Fatalf("egress path %d is missing", slot)
+	return 0
+}
+
+func TestAnEgressAckBeforeTheRoundReportGivesTheRTTAfterIt(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSplitFixture(t)
+	sentAt := time.Now().Add(-time.Second)
+	fixture.controls.handle(firstEgressAck(0, 5, sentAt.Add(30*time.Millisecond)))
+	if rtt := fixture.egressRTT(t, 0); rtt != 0 {
+		t.Fatalf("RTT before the report = %v, want none", rtt)
+	}
+	fixture.report(t, 0, 5, sentAt)
+	if rtt := fixture.egressRTT(t, 0); rtt != 30*time.Millisecond {
+		t.Fatalf("RTT after the report = %v, want 30ms", rtt)
+	}
+	if rtt := fixture.egressRTT(t, 1); rtt != 0 {
+		t.Fatalf("RTT of the other egress path = %v, want none", rtt)
+	}
+}
+
+func TestAnEgressAckAfterTheRoundReportGivesTheRTTAtOnce(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSplitFixture(t)
+	sentAt := time.Now().Add(-time.Second)
+	fixture.report(t, 0, 5, sentAt)
+	fixture.controls.handle(secondEgressAck(0, 5, sentAt.Add(45*time.Millisecond)))
+	if rtt := fixture.egressRTT(t, 1); rtt != 45*time.Millisecond {
+		t.Fatalf("RTT = %v, want 45ms", rtt)
+	}
+	// An ACK of an older round does not change it.
+	fixture.controls.handle(secondEgressAck(0, 4, sentAt.Add(10*time.Millisecond)))
+	if rtt := fixture.egressRTT(t, 1); rtt != 45*time.Millisecond {
+		t.Fatalf("RTT after an older ACK = %v, want 45ms", rtt)
+	}
+}
+
+func TestTheEarlierEgressAckOfARoundCounts(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSplitFixture(t)
+	sentAt := time.Now().Add(-time.Second)
+	fixture.controls.handle(firstEgressAck(0, 5, sentAt.Add(20*time.Millisecond)))
+	fixture.controls.handle(firstEgressAck(0, 5, sentAt.Add(50*time.Millisecond)))
+	fixture.report(t, 0, 5, sentAt)
+	if rtt := fixture.egressRTT(t, 0); rtt != 20*time.Millisecond {
+		t.Fatalf("RTT with two ACKs before the report = %v, want 20ms", rtt)
+	}
+	fixture.controls.handle(firstEgressAck(0, 5, sentAt.Add(25*time.Millisecond)))
+	if rtt := fixture.egressRTT(t, 0); rtt != 20*time.Millisecond {
+		t.Fatalf("RTT with a later copy after the report = %v, want 20ms", rtt)
+	}
+}
+
+func TestAnEgressAckThatDoesNotQualifyGivesNoRTT(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSplitFixture(t)
+	sentAt := time.Now().Add(-time.Second)
+	arrival := sentAt.Add(30 * time.Millisecond)
+	notOK := firstEgressAck(0, 5, arrival)
+	notOK.frame.Status = protocol.ControlStatusNoReflector
+	otherGroup := firstEgressAck(2, 5, arrival)
+	otherGroup.frame.ListenPort = 51821
+	otherNonce := firstEgressAck(0, 5, arrival)
+	otherNonce.frame.InstanceNonce = 43
+	for name, ack := range map[string]egressProbe{
+		"source outside the egress paths": egressAck(0, 5, netip.MustParseAddr("203.0.114.4"), protocol.TransportICMP, 9200, arrival),
+		"other port":                      egressAck(0, 5, netip.MustParseAddr("203.0.113.4"), protocol.TransportICMP, 9201, arrival),
+		"ingress path of another group":   otherGroup,
+		"status that is not OK":           notOK,
+		"other nonce":                     otherNonce,
+		"unknown ingress path":            firstEgressAck(7, 5, arrival),
+		"arrival before the send":         firstEgressAck(0, 5, sentAt.Add(-time.Millisecond)),
+	} {
+		fixture.controls.handle(ack)
+		fixture.report(t, 0, 5, sentAt)
+		fixture.report(t, 2, 5, sentAt)
+		for slot := range 2 {
+			if rtt := fixture.egressRTT(t, slot); rtt != 0 {
+				t.Fatalf("%s: RTT of egress path %d = %v, want none", name, slot, rtt)
+			}
+		}
+	}
+}
+
+func TestTheEgressRTTPairsWithTheBestHealthyIngressPath(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSplitFixture(t)
+	now := time.Now()
+	sentAt := now.Add(-time.Second)
+	fixture.report(t, 0, 5, sentAt)
+	fixture.report(t, 1, 8, sentAt)
+	fixture.controls.handle(firstEgressAck(0, 5, sentAt.Add(20*time.Millisecond)))
+	fixture.controls.handle(firstEgressAck(1, 8, sentAt.Add(40*time.Millisecond)))
+	fixture.controls.handle(secondEgressAck(0, 5, sentAt.Add(30*time.Millisecond)))
+	if rtt := fixture.egressRTT(t, 0); rtt != 20*time.Millisecond {
+		t.Fatalf("RTT with the best ingress path 0 = %v, want 20ms", rtt)
+	}
+	// Without a healthy ingress path 0, ingress path 1 is the best one. The
+	// second egress path has no sample for it, so its latest sample shows.
+	fixture.miss(t, 0, missLimit)
+	if rtt := fixture.egressRTT(t, 0); rtt != 40*time.Millisecond {
+		t.Fatalf("RTT with the best ingress path 1 = %v, want 40ms", rtt)
+	}
+	if rtt := fixture.egressRTT(t, 1); rtt != 30*time.Millisecond {
+		t.Fatalf("RTT without a sample for the best ingress path = %v, want the latest sample 30ms", rtt)
+	}
+}
+
+func TestAStaleEgressRTTDoesNotShow(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSplitFixture(t)
+	sentAt := time.Now().Add(-egressRTTMaxAge - time.Minute)
+	fixture.report(t, 0, 5, sentAt)
+	fixture.controls.handle(firstEgressAck(0, 5, sentAt.Add(20*time.Millisecond)))
+	if rtt := fixture.egressRTT(t, 0); rtt != 0 {
+		t.Fatalf("RTT of a stale sample = %v, want none", rtt)
+	}
+	fresh := time.Now().Add(-time.Second)
+	fixture.report(t, 0, 6, fresh)
+	fixture.controls.handle(firstEgressAck(0, 6, fresh.Add(25*time.Millisecond)))
+	if rtt := fixture.egressRTT(t, 0); rtt != 25*time.Millisecond {
+		t.Fatalf("RTT of a fresh sample = %v, want 25ms", rtt)
+	}
+}
+
+func TestRemovingAPathClearsItsEgressRTT(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSplitFixture(t)
+	sentAt := time.Now().Add(-time.Second)
+	fixture.report(t, 0, 5, sentAt)
+	fixture.report(t, 1, 5, sentAt)
+	fixture.controls.handle(firstEgressAck(0, 5, sentAt.Add(20*time.Millisecond)))
+	fixture.controls.handle(secondEgressAck(1, 5, sentAt.Add(40*time.Millisecond)))
+	if err := fixture.controller.RemoveEgressPath(0); err != nil {
+		t.Fatalf("RemoveEgressPath: %v", err)
+	}
+	added, err := fixture.controller.AddEgressPath("198.51.100.1:9200/icmp via 203.0.113.0/28", 51820)
+	if err != nil || added.ID != 0 {
+		t.Fatalf("AddEgressPath = %#v, %v, want egress path 0", added, err)
+	}
+	if rtt := fixture.egressRTT(t, 0); rtt != 0 {
+		t.Fatalf("RTT of a replaced egress path = %v, want none", rtt)
+	}
+	// The ingress path 1 leaves, and the sample of the second egress path goes
+	// with it.
+	if err := fixture.controller.RemovePath(1); err != nil {
+		t.Fatalf("RemovePath: %v", err)
+	}
+	if rtt := fixture.egressRTT(t, 1); rtt != 0 {
+		t.Fatalf("RTT after the ingress path left = %v, want none", rtt)
+	}
+}

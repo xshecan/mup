@@ -23,7 +23,7 @@ func splitClientStatus() api.Status {
 			Paths: []api.Path{
 				{ID: 0, Direction: "ingress", ListenPort: 51820, Server: "203.0.113.5", Port: 9000, Transport: "udp", Interface: "eth0", Healthy: true, InUse: true, LastACK: testNow.Add(-4 * time.Second), RTTSeconds: 0.07},
 				{ID: 1, ListenPort: 51821, Server: "203.0.113.6", Port: 5000, Transport: "icmp", Interface: "eth0", Healthy: true, InUse: true, LastACK: testNow.Add(-2 * time.Second)},
-				{ID: 0, Direction: "egress", ListenPort: 51820, Server: "203.0.113.5", Port: 9200, Transport: "icmp", ReturnIP: "198.51.100.0/28", Healthy: true, InUse: true, LastProbe: testNow.Add(-time.Second)},
+				{ID: 0, Direction: "egress", ListenPort: 51820, Server: "203.0.113.5", Port: 9200, Transport: "icmp", ReturnIP: "198.51.100.0/28", Healthy: true, InUse: true, LastProbe: testNow.Add(-time.Second), RTTSeconds: 0.0345},
 				{ID: 1, Direction: "egress", ListenPort: 51820, Server: "203.0.113.5", Port: 9300, Transport: "udp"},
 			},
 		},
@@ -45,7 +45,7 @@ func TestStatusShowsSeparateDirections(t *testing.T) {
 		"51821   balancer   1/1 healthy   -             -              0",
 		"ID   PATH      GROUP   SERVER",
 		"0    ingress   51820   203.0.113.5:9000   udp         -                 eth0        active      4s ago",
-		"0    egress    51820   203.0.113.5:9200   icmp        198.51.100.0/28   -           active      1s ago",
+		"0    egress    51820   203.0.113.5:9200   icmp        198.51.100.0/28   -           active      1s ago   34.5ms",
 		"1    egress    51820   203.0.113.5:9300   udp         -                 -           unhealthy   never",
 		"1    -         51821   203.0.113.6:5000   icmp",
 	} {

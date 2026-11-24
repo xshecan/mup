@@ -17,8 +17,8 @@ type clientControls interface {
 	open(pathRegistration) (pathConn, error)
 	// listenEgress starts to receive the frames on the egress paths of the
 	// groups with these listen ports. It passes each egress path probe to
-	// handle, and each REGISTER_ACK to the ingress path that waits for it. The
-	// returned function stops it.
+	// handle, and each REGISTER_ACK to the ingress path that waits for it and
+	// to handle. The returned function stops it.
 	listenEgress(listen egressListen, handle func(egressProbe)) (func(), error)
 	// sendIngress sends one control frame on an ingress path.
 	sendIngress(registration pathRegistration, frame []byte) error
@@ -31,8 +31,8 @@ type egressListen struct {
 	listenPorts  []uint16
 }
 
-// egressProbe is a PROBE that arrived on an egress path. Source is the packet
-// source, and Port is the UDP source port or the ICMP identifier.
+// egressProbe is a PROBE or a REGISTER_ACK that arrived on an egress socket. Source
+// is the packet source, and Port is the UDP source port or the ICMP identifier.
 type egressProbe struct {
 	frame     protocol.ControlFrame
 	source    netip.Addr

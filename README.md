@@ -423,7 +423,7 @@ ID   GROUP   SERVER               TRANSPORT   VIA       INTERFACE   STATE       
 2    51821   198.51.100.20:6000   udp         1.1.1.1   eth2        unhealthy   2m10s ago   64.1ms
 ```
 
-The STATE column joins the health of a path and its use. A healthy path is `active` while its group sends traffic on it, and `standby` while it waits. In failover mode, only the first healthy path of the group is active. The SEEN column shows the age of the last answer of the server.
+The STATE column joins the health of a path and its use. A healthy path is `active` while its group sends traffic on it, and `standby` while it waits. In failover mode, only the first healthy path of the group is active. The SEEN column shows the age of the last answer of the server. The RTT column shows the time from a REGISTER to its ACK. For an egress path, the time starts with a REGISTER on the active ingress path of the group. It ends when the ACK arrives on that egress path.
 
 ```text
 $ sudo mupctl peers

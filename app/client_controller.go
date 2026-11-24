@@ -149,6 +149,42 @@ type clientEgressPath struct {
 // egressInUse is how long an egress path counts as in use after its latest reply.
 const egressInUse = 10 * time.Second
 
+const (
+	// egressRTTMaxAge is how long a sample of an egress path RTT shows. A path
+	// that stops to return ACKs shows no RTT after that.
+	egressRTTMaxAge = 3 * registrationRefresh
+	// egressRTTLimit is the largest sample that counts. A longer time does not
+	// belong to the REGISTER of the round.
+	egressRTTLimit = controlReplyTimeout + time.Second
+)
+
+// ingressRound is the latest round that an ingress path reported.
+type ingressRound struct {
+	known    bool
+	sequence uint32
+	sentAt   time.Time
+}
+
+// egressArrival is the earliest arrival of the newest ACK sequence on an egress
+// path for an ingress path.
+type egressArrival struct {
+	known    bool
+	sequence uint32
+	at       time.Time
+}
+
+// egressSample is the latest RTT of an egress path for an ingress path.
+type egressSample struct {
+	known bool
+	rtt   time.Duration
+	at    time.Time
+}
+
+// newerSequence reports whether sequence a is after b, also across a wrap.
+func newerSequence(a, b uint32) bool {
+	return int32(a-b) > 0
+}
+
 // clientController runs the paths of a client. A slot is a path ID, a bit in
 // the healthy mask, and an entry in the BPF path_config map. Paths can join
 // and leave while the client runs, but the groups stay fixed.
@@ -180,6 +216,11 @@ type clientController struct {
 	// the other way.
 	reflectMu      sync.Mutex
 	reflectHealthy [config.MaxPaths][]netip.Addr
+	// rounds, arrivals and samples measure the RTT of the egress paths. They
+	// hold one entry per slot, so they never grow.
+	rounds   [config.MaxPaths]ingressRound
+	arrivals [dataplane.MaxEgressPaths][config.MaxPaths]egressArrival
+	samples  [dataplane.MaxEgressPaths][config.MaxPaths]egressSample
 }
 
 func newClientController(
@@ -268,7 +309,7 @@ func (c *clientController) start(ctx context.Context) error {
 			advertisedIP: c.client.AdvertisedIP,
 			nonce:        c.nonce,
 			listenPorts:  splitPorts,
-		}, c.handleEgressProbe)
+		}, c.handleEgressFrame)
 		if err != nil {
 			return err
 		}
@@ -389,6 +430,7 @@ func (c *clientController) launchLocked(slot int, current *clientPath, conn path
 	current.epoch = epoch
 	current.cancel = cancel
 	c.slots[slot] = current
+	c.clearIngressRTTLocked(slot)
 	report := func(ctx context.Context, sequence uint32, sentAt, repliedAt time.Time, result registerResult) error {
 		select {
 		case <-ctx.Done():
@@ -424,6 +466,7 @@ func (c *clientController) handleProbe(probe pathProbeResult) error {
 	if err := c.health.Sent(probe.slot, probe.sequence, probe.sentAt); err != nil {
 		return err
 	}
+	c.recordRoundLocked(probe.slot, probe.sequence, probe.sentAt)
 	current.last = probe.result
 	if probe.result == registerMissed {
 		current.missed++
@@ -684,6 +727,7 @@ func (c *clientController) addEgressPath(raw string, listenPort uint16, bridge b
 		return api.Path{}, err
 	}
 	c.egressSlots[slot] = &clientEgressPath{path: path, group: group}
+	c.clearEgressRTTLocked(slot)
 	group.egresses.set(uint16(slot), path)
 	seen, _ := c.dataplane.EgressPathsSeen()
 	return c.egressPathLocked(slot, seen, time.Now()), nil
@@ -709,6 +753,7 @@ func (c *clientController) RemoveEgressPath(id int) error {
 	}
 	group.egresses.remove(uint16(id), time.Now())
 	c.egressSlots[id] = nil
+	c.clearEgressRTTLocked(id)
 	return nil
 }
 
@@ -746,6 +791,120 @@ func (c *clientController) setEgressMaskLocked(group *pathGroup, mask uint8) err
 	}
 	group.settings = updated
 	return nil
+}
+
+// handleEgressFrame takes a frame that arrived on an egress socket. A PROBE
+// gets an answer, and a REGISTER_ACK gives an RTT sample.
+func (c *clientController) handleEgressFrame(probe egressProbe) {
+	if probe.frame.Type == protocol.ControlRegisterACK {
+		c.handleEgressACK(probe)
+		return
+	}
+	c.handleEgressProbe(probe)
+}
+
+// handleEgressACK measures the RTT of an egress path from the arrival of the
+// REGISTER_ACK of an ingress path of its group. It ignores an ACK that matches
+// no egress path, so an ACK on the ingress flow of a plain path is harmless.
+func (c *clientController) handleEgressACK(ack egressProbe) {
+	frame := ack.frame
+	if frame.Status != protocol.ControlStatusOK || int(frame.PathID) >= config.MaxPaths {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if frame.AdvertisedIP != c.client.AdvertisedIP || frame.InstanceNonce != c.nonce {
+		return
+	}
+	ingress := c.slots[frame.PathID]
+	if ingress == nil || ingress.group.egresses == nil || frame.ListenPort != ingress.group.settings.ListenPort {
+		return
+	}
+	slot := int(frame.PathID)
+	for index, egress := range c.egressSlots {
+		if egress == nil || egress.group != ingress.group ||
+			!egressSourceMatches(egress.path, ack.source, ack.transport, ack.port) {
+			continue
+		}
+		// An older ACK or a later copy of the same round does not count,
+		// because the earliest arrival of the newest sequence is kept.
+		arrival := &c.arrivals[index][slot]
+		if arrival.known && !newerSequence(frame.Sequence, arrival.sequence) {
+			return
+		}
+		*arrival = egressArrival{known: true, sequence: frame.Sequence, at: ack.received}
+		c.measureEgressLocked(index, slot)
+		return
+	}
+}
+
+// recordRoundLocked keeps the latest round of an ingress path and measures the
+// egress paths whose ACK of that round arrived before the report.
+func (c *clientController) recordRoundLocked(slot int, sequence uint32, sentAt time.Time) {
+	round := &c.rounds[slot]
+	if round.known && newerSequence(round.sequence, sequence) {
+		return
+	}
+	*round = ingressRound{known: true, sequence: sequence, sentAt: sentAt}
+	for index := range c.arrivals {
+		c.measureEgressLocked(index, slot)
+	}
+}
+
+// measureEgressLocked stores the RTT of an egress path when the send time and
+// the arrival of the same round are both known.
+func (c *clientController) measureEgressLocked(egress, ingress int) {
+	round, arrival := c.rounds[ingress], c.arrivals[egress][ingress]
+	if !round.known || !arrival.known || round.sequence != arrival.sequence {
+		return
+	}
+	rtt := arrival.at.Sub(round.sentAt)
+	if rtt < 0 || rtt > egressRTTLimit {
+		return
+	}
+	c.samples[egress][ingress] = egressSample{known: true, rtt: rtt, at: arrival.at}
+}
+
+func (c *clientController) clearIngressRTTLocked(slot int) {
+	c.rounds[slot] = ingressRound{}
+	for index := range c.arrivals {
+		c.arrivals[index][slot] = egressArrival{}
+		c.samples[index][slot] = egressSample{}
+	}
+}
+
+func (c *clientController) clearEgressRTTLocked(slot int) {
+	c.arrivals[slot] = [config.MaxPaths]egressArrival{}
+	c.samples[slot] = [config.MaxPaths]egressSample{}
+}
+
+// egressRTTLocked is the RTT that an egress path shows: the sample for the best
+// ingress path of its group, or else the latest sample. It is zero when no
+// sample is fresh.
+func (c *clientController) egressRTTLocked(slot int, now time.Time) time.Duration {
+	group := c.egressSlots[slot].group
+	best := -1
+	for index, current := range c.slots {
+		if current == nil || current.group != group {
+			continue
+		}
+		if health, _ := c.health.Path(index); health.Healthy && (best < 0 || current.priority < c.slots[best].priority) {
+			best = index
+		}
+	}
+	fresh := func(sample egressSample) bool {
+		return sample.known && now.Sub(sample.at) < egressRTTMaxAge
+	}
+	if best >= 0 && fresh(c.samples[slot][best]) {
+		return c.samples[slot][best].rtt
+	}
+	var latest egressSample
+	for _, sample := range c.samples[slot] {
+		if fresh(sample) && (!latest.known || sample.at.After(latest.at)) {
+			latest = sample
+		}
+	}
+	return latest.rtt
 }
 
 // handleEgressProbe answers the probe of an egress path on an ingress path of its
@@ -823,6 +982,7 @@ func (c *clientController) RemovePath(id int) error {
 	}
 	c.slots[id].cancel()
 	c.slots[id] = nil
+	c.clearIngressRTTLocked(id)
 	if _, err := c.health.Forget(id); err != nil {
 		return err
 	}
@@ -988,6 +1148,7 @@ func (c *clientController) egressPathLocked(slot int, seen [dataplane.MaxEgressP
 		Healthy:    !egress.lastProbe.IsZero() && now.Sub(egress.lastProbe) < egressHealthWindow,
 		InUse:      seen[slot] >= 0 && seen[slot] < egressInUse,
 		LastProbe:  egress.lastProbe,
+		RTTSeconds: c.egressRTTLocked(slot, now).Seconds(),
 	}
 }
 

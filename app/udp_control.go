@@ -50,7 +50,8 @@ func (r udpControlReply) answer(registration pathRegistration, ifindex int, sequ
 type udpControlSockets struct {
 	listen udpControlListener
 	// router passes the REGISTER_ACK frames of the ingress paths of groups with
-	// separate egress paths, and onProbe takes the probes of egress paths.
+	// separate egress paths, and onProbe takes the probes and the REGISTER_ACK
+	// frames that arrive for egress paths.
 	router  *ackRouter
 	onProbe atomic.Pointer[func(egressProbe)]
 
@@ -149,6 +150,15 @@ func (s *udpControlSocket) read() {
 		}
 		if frame.Type == protocol.ControlRegisterACK {
 			s.owner.router.post(frame.PathID, buffer[:count])
+			if handle := s.owner.onProbe.Load(); handle != nil {
+				(*handle)(egressProbe{
+					frame:     frame,
+					source:    source.Addr().Unmap(),
+					transport: protocol.TransportUDP,
+					port:      source.Port(),
+					received:  time.Now(),
+				})
+			}
 		}
 		reply := udpControlReply{
 			source:  netip.AddrPortFrom(source.Addr().Unmap(), source.Port()),
