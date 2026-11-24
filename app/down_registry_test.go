@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/xshecan/mup/config"
+	"github.com/xshecan/mup/control"
 	"github.com/xshecan/mup/dataplane"
 	"github.com/xshecan/mup/protocol"
 )
@@ -117,10 +118,10 @@ func TestEgressRegistryKeepsAEgressPathAndItsGroup(t *testing.T) {
 	plane.members[dataplane.PoolKey{Base: egressPool, Transport: protocol.TransportICMP}] = egressMembers
 	registry := newTestEgressRegistry(plane)
 	now := time.Unix(1000, 0)
-	if err := registry.register(poolFrame(0, 9200), egressClient, now); err != nil {
+	if err := registry.register(poolFrame(0, 9200), now); err != nil {
 		t.Fatalf("register pool path: %v", err)
 	}
-	if err := registry.register(egressFrame(2, 9300, protocol.TransportUDP, config.ModeRepeater), egressClient, now); err != nil {
+	if err := registry.register(egressFrame(2, 9300, protocol.TransportUDP, config.ModeRepeater), now); err != nil {
 		t.Fatalf("register direct path: %v", err)
 	}
 	pool := plane.paths[egressKey{client: egressKeyOf, id: 0}]
@@ -146,19 +147,15 @@ func TestEgressRegistryRejectsBadFrames(t *testing.T) {
 	now := time.Unix(1000, 0)
 	notLocal := egressFrame(0, 9200, protocol.TransportUDP, config.ModeFailover)
 	notLocal.EgressServer = netip.MustParseAddr("203.0.113.99")
-	for name, test := range map[string]struct {
-		frame  protocol.ControlFrame
-		source netip.Addr
-	}{
-		"other source":    {frame: egressFrame(0, 9200, protocol.TransportUDP, config.ModeFailover), source: netip.MustParseAddr("192.0.2.11")},
-		"port outside":    {frame: egressFrame(0, 8000, protocol.TransportUDP, config.ModeFailover), source: egressClient},
-		"server not here": {frame: notLocal, source: egressClient},
+	for name, frame := range map[string]protocol.ControlFrame{
+		"port outside":    egressFrame(0, 8000, protocol.TransportUDP, config.ModeFailover),
+		"server not here": notLocal,
 	} {
-		if err := registry.register(test.frame, test.source, now); err == nil {
+		if err := registry.register(frame, now); err == nil {
 			t.Fatalf("%s: register succeeded", name)
 		}
 	}
-	if err := registry.register(notLocal, egressClient, now); !errors.Is(err, errEgressNotLocal) {
+	if err := registry.register(notLocal, now); !errors.Is(err, errEgressNotLocal) {
 		t.Fatalf("register error = %v, want %v", err, errEgressNotLocal)
 	}
 	if len(registry.paths) != 0 {
@@ -173,10 +170,10 @@ func TestEgressRegistryHealthFollowsTheProbeReplies(t *testing.T) {
 	plane.members[dataplane.PoolKey{Base: egressPool, Transport: protocol.TransportICMP}] = egressMembers
 	registry := newTestEgressRegistry(plane)
 	start := time.Unix(1000, 0)
-	if err := registry.register(poolFrame(0, 9200), egressClient, start); err != nil {
+	if err := registry.register(poolFrame(0, 9200), start); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := registry.register(egressFrame(1, 9300, protocol.TransportUDP, config.ModeRepeater), egressClient, start); err != nil {
+	if err := registry.register(egressFrame(1, 9300, protocol.TransportUDP, config.ModeRepeater), start); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	// After the first window, only the members whose probes came back stay.
@@ -215,13 +212,13 @@ func TestEgressRegistryWithdrawsAndExpiresPaths(t *testing.T) {
 	registry := newTestEgressRegistry(plane)
 	now := time.Unix(1000, 0)
 	for id := range uint16(2) {
-		if err := registry.register(egressFrame(id, 9200+id, protocol.TransportUDP, config.ModeFailover), egressClient, now); err != nil {
+		if err := registry.register(egressFrame(id, 9200+id, protocol.TransportUDP, config.ModeFailover), now); err != nil {
 			t.Fatalf("register: %v", err)
 		}
 	}
 	withdraw := egressFrame(1, 9201, protocol.TransportUDP, config.ModeFailover)
 	withdraw.LeaseSeconds = 0
-	if err := registry.register(withdraw, egressClient, now); err != nil {
+	if err := registry.register(withdraw, now); err != nil {
 		t.Fatalf("withdraw: %v", err)
 	}
 	if _, ok := plane.paths[egressKey{client: egressKeyOf, id: 1}]; ok {
@@ -244,10 +241,10 @@ func TestEgressRegistryTargets(t *testing.T) {
 	plane.members[dataplane.PoolKey{Base: egressPool, Transport: protocol.TransportICMP}] = egressMembers
 	registry := newTestEgressRegistry(plane)
 	now := time.Unix(1000, 0)
-	if err := registry.register(poolFrame(0, 9200), egressClient, now); err != nil {
+	if err := registry.register(poolFrame(0, 9200), now); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := registry.register(egressFrame(1, 9300, protocol.TransportUDP, config.ModeRepeater), egressClient, now); err != nil {
+	if err := registry.register(egressFrame(1, 9300, protocol.TransportUDP, config.ModeRepeater), now); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	probes := registry.probeTargets(now)
@@ -289,10 +286,10 @@ func TestEgressRegistryKeepsOneGroupForEachListenPort(t *testing.T) {
 	registry := newTestEgressRegistry(plane)
 	now := time.Unix(1000, 0)
 	second := egressGroupKey{client: egressKeyOf, listenPort: 51825}
-	if err := registry.register(egressFrameOf(51820, 0, config.ModeFailover), egressClient, now); err != nil {
+	if err := registry.register(egressFrameOf(51820, 0, config.ModeFailover), now); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := registry.register(egressFrameOf(51825, 3, config.ModeRepeater), egressClient, now); err != nil {
+	if err := registry.register(egressFrameOf(51825, 3, config.ModeRepeater), now); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	if len(plane.groups) != 2 {
@@ -305,7 +302,7 @@ func TestEgressRegistryKeepsOneGroupForEachListenPort(t *testing.T) {
 		t.Fatalf("second group = %#v", g)
 	}
 	// A frame of one group leaves the other group as it is.
-	if err := registry.register(egressFrameOf(51825, 4, config.ModeBalancer), egressClient, now); err != nil {
+	if err := registry.register(egressFrameOf(51825, 4, config.ModeBalancer), now); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	if g := plane.groups[egressGroupOf]; g.PathMask != 0b1 || g.Mode != config.ModeFailover {
@@ -324,13 +321,13 @@ func TestEgressRegistryDeletesOnlyTheGroupThatLosesItsLastPath(t *testing.T) {
 	now := time.Unix(1000, 0)
 	other := egressGroupKey{client: egressKeyOf, listenPort: 51825}
 	for _, frame := range []protocol.ControlFrame{egressFrameOf(51820, 0, config.ModeFailover), egressFrameOf(51825, 1, config.ModeFailover)} {
-		if err := registry.register(frame, egressClient, now); err != nil {
+		if err := registry.register(frame, now); err != nil {
 			t.Fatalf("register: %v", err)
 		}
 	}
 	withdraw := egressFrameOf(51825, 1, config.ModeFailover)
 	withdraw.LeaseSeconds = 0
-	if err := registry.register(withdraw, egressClient, now); err != nil {
+	if err := registry.register(withdraw, now); err != nil {
 		t.Fatalf("withdraw: %v", err)
 	}
 	if _, ok := plane.groups[other]; ok {
@@ -341,7 +338,7 @@ func TestEgressRegistryDeletesOnlyTheGroupThatLosesItsLastPath(t *testing.T) {
 	}
 	// The path of the other group renews, so only the first group expires.
 	later := now.Add(registrationLeaseSeconds*time.Second - time.Second)
-	if err := registry.register(egressFrameOf(51825, 2, config.ModeFailover), egressClient, later); err != nil {
+	if err := registry.register(egressFrameOf(51825, 2, config.ModeFailover), later); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	registry.sync(now.Add(registrationLeaseSeconds*time.Second + time.Second))
@@ -361,11 +358,11 @@ func TestEgressRegistryMovesAPathToAnotherListenPort(t *testing.T) {
 	now := time.Unix(1000, 0)
 	moved := egressGroupKey{client: egressKeyOf, listenPort: 51825}
 	for _, id := range []uint16{0, 1} {
-		if err := registry.register(egressFrameOf(51820, id, config.ModeFailover), egressClient, now); err != nil {
+		if err := registry.register(egressFrameOf(51820, id, config.ModeFailover), now); err != nil {
 			t.Fatalf("register: %v", err)
 		}
 	}
-	if err := registry.register(egressFrameOf(51825, 1, config.ModeRepeater), egressClient, now); err != nil {
+	if err := registry.register(egressFrameOf(51825, 1, config.ModeRepeater), now); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	if group := plane.groups[egressGroupOf]; group.PathMask != 0b01 {
@@ -375,7 +372,7 @@ func TestEgressRegistryMovesAPathToAnotherListenPort(t *testing.T) {
 		t.Fatalf("new group = %#v, want the moved path", group)
 	}
 	// The old group is deleted when the last path leaves it.
-	if err := registry.register(egressFrameOf(51825, 0, config.ModeRepeater), egressClient, now); err != nil {
+	if err := registry.register(egressFrameOf(51825, 0, config.ModeRepeater), now); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	if _, ok := plane.groups[egressGroupOf]; ok {
@@ -392,7 +389,7 @@ func TestEgressRegistryShowsEveryGroupOfAClientSortedByListenPort(t *testing.T) 
 	registry := newTestEgressRegistry(newFakeEgressPlane())
 	now := time.Unix(1000, 0)
 	for _, frame := range []protocol.ControlFrame{egressFrameOf(51825, 2, config.ModeRepeater), egressFrameOf(51820, 0, config.ModeFailover)} {
-		if err := registry.register(frame, egressClient, now); err != nil {
+		if err := registry.register(frame, now); err != nil {
 			t.Fatalf("register: %v", err)
 		}
 	}
@@ -401,5 +398,119 @@ func TestEgressRegistryShowsEveryGroupOfAClientSortedByListenPort(t *testing.T) 
 		groups[0].Mode != "failover" || len(groups[0].Paths) != 1 || groups[0].Paths[0].ID != 0 ||
 		groups[1].Mode != "repeater" || len(groups[1].Paths) != 1 || groups[1].Paths[0].ID != 2 {
 		t.Fatalf("groups = %#v", groups)
+	}
+}
+
+// reflectArrival registers an ingress reflect path of the egress client through
+// a via host in a control registry, and returns the registry and the path.
+func reflectArrival(t *testing.T, via netip.Addr) (*control.Registry, control.PathKey) {
+	t.Helper()
+	registry := control.NewRegistry(9000, 9999, registrationLeaseSeconds*time.Second)
+	path := control.PathKey{Local: egressServer, Source: via, Transport: protocol.TransportUDP, ServerPort: 9000}
+	_, err := registry.Register(time.Now(), control.RegistrationRequest{
+		Frame: protocol.ControlFrame{
+			Type:          protocol.ControlRegister,
+			Transport:     protocol.TransportUDP,
+			Flags:         protocol.ControlFlagIngressReflect | protocol.ControlFlagReturnIP,
+			ListenPort:    51820,
+			ServerPort:    9000,
+			InstanceNonce: 7,
+			AdvertisedIP:  egressClient,
+			ReturnIP:      via,
+		},
+		Path: path,
+	})
+	if err != nil {
+		t.Fatalf("register the reflect path: %v", err)
+	}
+	return registry, path
+}
+
+func TestEgressServiceTakesTheFramesOfAReflectPathFromItsViaHost(t *testing.T) {
+	t.Parallel()
+
+	via := netip.MustParseAddr("203.0.113.40")
+	plane := newFakeEgressPlane()
+	plane.members[dataplane.PoolKey{Base: egressPool, Transport: protocol.TransportICMP}] = egressMembers
+	service := &egressService{registry: newTestEgressRegistry(plane), logger: discardLogger}
+	registry, path := reflectArrival(t, via)
+
+	register := poolFrame(0, 9200)
+	if !arrivedOnReflectPath(registry, register, path, time.Now()) {
+		t.Fatal("the EGRESS_REGISTER did not arrive on the reflect path")
+	}
+	if !service.handle(register, via, true) {
+		t.Fatal("handle did not take the EGRESS_REGISTER")
+	}
+	egress := service.registry.paths[egressKey{client: egressKeyOf, id: 0}]
+	if egress == nil {
+		t.Fatal("the reflected EGRESS_REGISTER was refused")
+	}
+	reply := probeReply(0, protocol.TransportICMP, egressMembers[1])
+	if !service.handle(reply, via, arrivedOnReflectPath(registry, reply, path, time.Now())) {
+		t.Fatal("handle did not take the PROBE_REPLY")
+	}
+	if _, ok := egress.replies[egressMembers[1]]; !ok {
+		t.Fatal("the reflected PROBE_REPLY was not confirmed")
+	}
+}
+
+func TestEgressServiceRefusesTheFramesOfAnUnknownSource(t *testing.T) {
+	t.Parallel()
+
+	stranger := netip.MustParseAddr("203.0.113.41")
+	plane := newFakeEgressPlane()
+	plane.members[dataplane.PoolKey{Base: egressPool, Transport: protocol.TransportICMP}] = egressMembers
+	service := &egressService{registry: newTestEgressRegistry(plane), logger: discardLogger}
+	registry, path := reflectArrival(t, netip.MustParseAddr("203.0.113.40"))
+	path.Source = stranger
+
+	register := poolFrame(0, 9200)
+	if arrivedOnReflectPath(registry, register, path, time.Now()) {
+		t.Fatal("a frame from an unknown source arrived on the reflect path")
+	}
+	other := register
+	other.InstanceNonce = 8
+	if arrivedOnReflectPath(registry, other, control.PathKey{Local: egressServer, Source: netip.MustParseAddr("203.0.113.40"), Transport: protocol.TransportUDP, ServerPort: 9000}, time.Now()) {
+		t.Fatal("a frame of another instance arrived on the reflect path")
+	}
+	if !service.handle(register, stranger, false) {
+		t.Fatal("handle did not take the EGRESS_REGISTER")
+	}
+	if len(service.registry.paths) != 0 {
+		t.Fatal("the EGRESS_REGISTER from an unknown source was kept")
+	}
+	// A path that the advertised IP registers ignores a reply from a stranger.
+	if !service.handle(register, egressClient, false) {
+		t.Fatal("handle did not take the EGRESS_REGISTER")
+	}
+	egress := service.registry.paths[egressKey{client: egressKeyOf, id: 0}]
+	if !service.handle(probeReply(0, protocol.TransportICMP, egressMembers[1]), stranger, false) {
+		t.Fatal("handle did not take the PROBE_REPLY")
+	}
+	if len(egress.replies) != 0 {
+		t.Fatal("the PROBE_REPLY from an unknown source was confirmed")
+	}
+}
+
+func TestEgressServiceStillTakesTheFramesFromTheAdvertisedIP(t *testing.T) {
+	t.Parallel()
+
+	plane := newFakeEgressPlane()
+	plane.members[dataplane.PoolKey{Base: egressPool, Transport: protocol.TransportICMP}] = egressMembers
+	service := &egressService{registry: newTestEgressRegistry(plane), logger: discardLogger}
+
+	if !service.handle(poolFrame(0, 9200), egressClient, false) {
+		t.Fatal("handle did not take the EGRESS_REGISTER")
+	}
+	egress := service.registry.paths[egressKey{client: egressKeyOf, id: 0}]
+	if egress == nil {
+		t.Fatal("the EGRESS_REGISTER from the advertised IP was refused")
+	}
+	if !service.handle(probeReply(0, protocol.TransportICMP, egressMembers[2]), egressClient, false) {
+		t.Fatal("handle did not take the PROBE_REPLY")
+	}
+	if _, ok := egress.replies[egressMembers[2]]; !ok {
+		t.Fatal("the PROBE_REPLY from the advertised IP was not confirmed")
 	}
 }

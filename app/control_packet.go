@@ -14,6 +14,12 @@ const (
 	icmpEchoRequest uint8 = 8
 )
 
+// The IPv4 protocol numbers of the packets that the client builds itself.
+const (
+	ipProtocolICMP byte = 1
+	ipProtocolUDP  byte = 17
+)
+
 type icmpEcho struct {
 	echoType   uint8
 	identifier uint16
@@ -154,4 +160,72 @@ func registrationFrame(registration pathRegistration, sequence uint32) ([]byte, 
 		return nil, err
 	}
 	return packet, nil
+}
+
+// buildIPv4Packet builds an IPv4 packet with the given source, so a raw socket
+// with the header included sends it with a spoofed source.
+func buildIPv4Packet(source, destination netip.Addr, protocolNumber byte, payload []byte, id uint16) []byte {
+	total := 20 + len(payload)
+	packet := make([]byte, total)
+	packet[0] = 0x45
+	binary.BigEndian.PutUint16(packet[2:4], uint16(total))
+	binary.BigEndian.PutUint16(packet[4:6], id)
+	packet[8] = 64
+	packet[9] = protocolNumber
+	source4 := source.As4()
+	destination4 := destination.As4()
+	copy(packet[12:16], source4[:])
+	copy(packet[16:20], destination4[:])
+	binary.BigEndian.PutUint16(packet[10:12], internetChecksum(packet[:20]))
+	copy(packet[20:], payload)
+	return packet
+}
+
+func buildUDPSegment(source, destination netip.Addr, sourcePort, destinationPort uint16, payload []byte) []byte {
+	segment := make([]byte, 8+len(payload))
+	binary.BigEndian.PutUint16(segment[0:2], sourcePort)
+	binary.BigEndian.PutUint16(segment[2:4], destinationPort)
+	binary.BigEndian.PutUint16(segment[4:6], uint16(len(segment)))
+	copy(segment[8:], payload)
+	binary.BigEndian.PutUint16(segment[6:8], udpChecksum(source, destination, segment))
+	return segment
+}
+
+// udpChecksum computes the UDP checksum over the IPv4 pseudo header and the
+// segment. A computed checksum of zero becomes 0xffff, as RFC 768 requires.
+func udpChecksum(source, destination netip.Addr, segment []byte) uint16 {
+	source4 := source.As4()
+	destination4 := destination.As4()
+	var sum uint32
+	sum += uint32(binary.BigEndian.Uint16(source4[0:2])) + uint32(binary.BigEndian.Uint16(source4[2:4]))
+	sum += uint32(binary.BigEndian.Uint16(destination4[0:2])) + uint32(binary.BigEndian.Uint16(destination4[2:4]))
+	sum += uint32(ipProtocolUDP) + uint32(len(segment))
+	for index := 0; index+1 < len(segment); index += 2 {
+		sum += uint32(binary.BigEndian.Uint16(segment[index:]))
+	}
+	if len(segment)%2 == 1 {
+		sum += uint32(segment[len(segment)-1]) << 8
+	}
+	for sum>>16 != 0 {
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+	folded := ^uint16(sum)
+	if folded == 0 {
+		return 0xffff
+	}
+	return folded
+}
+
+// reflectedControlPacket builds a control frame of an ingress reflect path as
+// the IPv4 packet that goes through member, and returns the address to send it
+// to. A UDP frame carries the member as its source, so the server sees it from
+// the member. An ICMP frame is an Echo Request to the member with the server as
+// its source, so the member answers the server with an Echo Reply.
+func reflectedControlPacket(reg pathRegistration, member netip.Addr, frame []byte, id uint32) ([]byte, netip.Addr) {
+	if reg.path.Transport == protocol.TransportICMP {
+		echo := marshalICMPEcho(icmpEchoRequest, reg.path.ServerPort, uint16(id), frame)
+		return buildIPv4Packet(reg.path.Server, member, ipProtocolICMP, echo, uint16(id)), member
+	}
+	segment := buildUDPSegment(member, reg.path.Server, reg.listenPort, reg.path.ServerPort, frame)
+	return buildIPv4Packet(member, reg.path.Server, ipProtocolUDP, segment, uint16(id)), reg.path.Server
 }

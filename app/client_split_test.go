@@ -278,3 +278,53 @@ func TestEgressPathRuntimeChanges(t *testing.T) {
 		t.Fatalf("RemoveEgressPath of the last egress path error = %v", err)
 	}
 }
+
+func TestTheProbeReplyOfAReflectPathKnowsTheMembersThatAnswered(t *testing.T) {
+	t.Parallel()
+
+	group := testGroup(t, 51820, config.ModeFailover, "198.51.100.1:9000/udp via 203.0.113.0/30")
+	group.EgressPaths = append(group.EgressPaths, mustParsePath(t, "198.51.100.1:9300/udp"))
+	client := config.Client{AdvertisedIP: netip.MustParseAddr("192.0.2.10"), Groups: []config.Group{group}}
+	if err := client.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	plan, err := buildPlan(config.App{Client: &client}, 42, fakeResolver{catchAll: 2})
+	if err != nil {
+		t.Fatalf("buildPlan: %v", err)
+	}
+	fake := &fakeClientDataplane{paths: map[int]dataplane.PathSettings{}, groups: map[uint16]dataplane.GroupSettings{}}
+	controls := &fakeControls{registrations: map[int]pathRegistration{}}
+	controller := newClientController(client, *plan.client, fake, fakeResolver{catchAll: 2}, controls, time.Unix(100, 0), discardLogger)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := controller.start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	registration := controls.registrations[0]
+	if !registration.ingressReflect || len(registration.members) != 4 || registration.healthyMembers != nil {
+		t.Fatalf("registration = %#v, want a reflect path with 4 candidates and no healthy member yet", registration)
+	}
+
+	// The control loop publishes the members that answered. A member outside
+	// the candidates, from an older path in the slot, does not count.
+	answered := netip.MustParseAddr("203.0.113.2")
+	if err := registration.writeMembers([]netip.Addr{answered, netip.MustParseAddr("203.0.114.9")}); err != nil {
+		t.Fatalf("writeMembers: %v", err)
+	}
+	probe := egressProbe{
+		frame: protocol.ControlFrame{
+			Type: protocol.ControlProbe, Transport: protocol.TransportUDP, Flags: protocol.ControlFlagEgressPath,
+			PathID: 0, Sequence: 5, ListenPort: 51820, ServerPort: 9300,
+			InstanceNonce: 42, AdvertisedIP: client.AdvertisedIP,
+		},
+		source:    netip.MustParseAddr("198.51.100.1"),
+		transport: protocol.TransportUDP,
+		port:      9300,
+		received:  time.Now(),
+	}
+	controls.handle(probe)
+	sent := controls.takeSent()
+	if len(sent) != 1 || !slices.Equal(sent[0].registration.healthyMembers, []netip.Addr{answered}) {
+		t.Fatalf("probe replies = %#v, want one that knows the member %s", sent, answered)
+	}
+}

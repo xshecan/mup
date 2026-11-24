@@ -158,17 +158,14 @@ func newEgressRegistry(ports config.PortRange, plane egressPlane, locate egressL
 
 var errEgressNotLocal = errors.New("the egress path server address is not an address of this host")
 
-// register keeps the egress path of a EGRESS_REGISTER that arrived from source.
-// A server keeps only the egress paths that send from one of its addresses. It
+// register keeps the egress path of a EGRESS_REGISTER. The service checks the
+// source of the frame before. A server keeps only the egress paths that send from one of its addresses. It
 // keeps every egress path through a bridge, because the client does not know
 // which server the bridge serves. The probes find that out: the bridge drops
 // the wrapped probes of the other servers.
-func (r *egressRegistry) register(frame protocol.ControlFrame, source netip.Addr, now time.Time) error {
+func (r *egressRegistry) register(frame protocol.ControlFrame, now time.Time) error {
 	if frame.Type != protocol.ControlEgressRegister {
 		return errors.New("not a EGRESS_REGISTER frame")
-	}
-	if source != frame.AdvertisedIP {
-		return fmt.Errorf("EGRESS_REGISTER from %s names advertised IP %s", source, frame.AdvertisedIP)
 	}
 	bridge := frame.Flags&protocol.ControlFlagBridge != 0
 	if !bridge && !r.ports.Contains(frame.ServerPort) {

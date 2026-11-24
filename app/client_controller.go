@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -67,6 +68,9 @@ type pathRegistration struct {
 	members        []netip.Addr
 	perPacket      bool
 	writeMembers   func(members []netip.Addr) error
+	// healthyMembers holds the members that answered in the latest cycle of
+	// the path, so a control frame of the client can go through them.
+	healthyMembers []netip.Addr
 }
 
 // egressFrames returns the EGRESS_REGISTER frames to send before the REGISTER
@@ -171,6 +175,11 @@ type clientController struct {
 	failures     chan error
 	ctx          context.Context
 	startedAt    time.Time
+	// reflectMu guards reflectHealthy. The control loop of a path writes it
+	// without c.mu, so the controller takes reflectMu after c.mu and never
+	// the other way.
+	reflectMu      sync.Mutex
+	reflectHealthy [config.MaxPaths][]netip.Addr
 }
 
 func newClientController(
@@ -302,10 +311,36 @@ func (c *clientController) registrationLocked(group *pathGroup, path config.Path
 		registration.members = candidateMembers(path)
 		registration.perPacket = path.Balance == config.BalancePerPacket
 		registration.writeMembers = func(members []netip.Addr) error {
+			c.reflectMu.Lock()
+			c.reflectHealthy[slot] = slices.Clone(members)
+			c.reflectMu.Unlock()
 			return c.dataplane.SetIngressReflect(slot, members, registration.perPacket)
 		}
+		// An older path in the slot can leave members of another pool, so
+		// the registration keeps only its own candidates.
+		c.reflectMu.Lock()
+		for _, member := range c.reflectHealthy[slot] {
+			if slices.Contains(registration.members, member) {
+				registration.healthyMembers = append(registration.healthyMembers, member)
+			}
+		}
+		c.reflectMu.Unlock()
 	}
 	return registration
+}
+
+// pickReflectMember returns the member that a control frame of an ingress
+// reflect path goes through on this turn: the healthy members in turn, or the
+// candidates in turn while no member is healthy.
+func pickReflectMember(healthy, candidates []netip.Addr, turn uint) (netip.Addr, bool) {
+	members := healthy
+	if len(members) == 0 {
+		members = candidates
+	}
+	if len(members) == 0 {
+		return netip.Addr{}, false
+	}
+	return members[turn%uint(len(members))], true
 }
 
 // candidateMembers returns the via hosts of an ingress reflect path: the single

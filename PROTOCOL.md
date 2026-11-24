@@ -316,6 +316,8 @@ The server sends each REGISTER_ACK directly, and also on every egress path of th
 
 An ingress reflect path sends its REGISTER reflected through each member. The frame has flag bit 5 and the member as the return IP. On an ICMP path, the client sends an Echo Request to the member, with the server as the source. The member then answers the server with an Echo Reply. On a UDP path, the client sends to the server with the member as the source. The server reads the reflected source as the path source, not the advertised IP. It registers one path for each member, and skips the reflector setup of a reply pool. The ACK of each member names the member in its return IP. So the client keeps the members that answer, and drops the rest. The members that answer carry the ingress, as `up_reflect_members` on the client and one registered path for each member on the server.
 
+An ingress reflect path without a bridge also reflects the other control frames of its group. These frames are each EGRESS_REGISTER and each PROBE_REPLY of an egress path. The client sends a EGRESS_REGISTER through every member that answered the latest REGISTER. While no member answered, it sends the frame through every member. It sends a PROBE_REPLY through one of these members in turn. The server accepts such a frame from the advertised IP. It also accepts the frame on a registered ingress reflect path of the same client key. On the first cycle of a new client, the EGRESS_REGISTER arrives before the path exists. The server refuses it, and the retry after 1 second passes. This needs a server of v0.4.7 or later.
+
 ### Client restarts
 
 A client picks a new instance nonce at each start. The server keeps one registration for each advertised IP. A REGISTER with a new nonce replaces the registration of the old nonce. The next sweep then deletes the paths and routes of the old nonce.
@@ -360,7 +362,7 @@ A dead path becomes unhealthy about 5 to 15 seconds after it fails. The delay de
 
 ### Egress path health
 
-Every 2 seconds, the server sends a PROBE on each egress path of each client, in the same way as a reply. A path with a pool gets one probe through each member. The client answers each probe with a PROBE_REPLY on its healthy ingress path with the lowest priority. If no ingress path is healthy, it answers on every ingress path. The reply names the source of the probe, which is the member of a pool.
+Every 2 seconds, the server sends a PROBE on each egress path of each client, in the same way as a reply. A path with a pool gets one probe through each member. The client answers each probe with a PROBE_REPLY on its healthy ingress path with the lowest priority. The reply travels like the REGISTER of that path. If no ingress path is healthy, it answers on every ingress path. The reply names the source of the probe, which is the member of a pool.
 
 An egress path, or a member of its pool, is healthy for 6 seconds after its latest reply. A new egress path is healthy for its first 6 seconds. A new egress bridge is unhealthy until its first reply, because the bridge drops the wrapped probes of the other servers. The members of a pool come from the sweeps of the pool, but each egress path keeps its own member health. So a member that answers the ping of the server but does not reach the client carries no replies of that client.
 

@@ -24,6 +24,8 @@ type ingressReflectPathConn struct {
 	registration pathRegistration
 	router       *ackRouter
 	routed       *ackWaiter
+	// healthy holds the members that answered in the latest cycle.
+	healthy []netip.Addr
 }
 
 func openIngressReflectPathConn(registration pathRegistration, router *ackRouter) (*ingressReflectPathConn, error) {
@@ -88,16 +90,12 @@ func (s *ingressReflectPathConn) registerMembers(sequence uint32, sentAt time.Ti
 			// The client cannot send the spoofed packet, so it wraps the
 			// reflected REGISTER for the bridge, and the bridge emits it.
 			_ = s.sendViaBridge(reg, member, frame, sequence)
-		} else if reg.path.Transport == protocol.TransportICMP {
-			// The member answers the server with an Echo Reply, so the request
-			// carries the server as its source.
-			_ = s.sendICMP(reg.path.Server, member, reg.path.ServerPort, uint16(sequence), frame, sequence)
 		} else {
-			// The server sees the forged member source.
-			_ = s.sendUDP(member, reg.path.Server, reg.listenPort, reg.path.ServerPort, frame, sequence)
+			_ = s.sendReflected(reg, member, frame, sequence)
 		}
 	}
 	healthy, repliedAt := s.collectHealthy(sequence, sentAt)
+	s.healthy = healthy
 	if reg.writeMembers != nil {
 		_ = reg.writeMembers(healthy)
 	}
@@ -143,15 +141,11 @@ func (s *ingressReflectPathConn) collectHealthy(sequence uint32, sentAt time.Tim
 	}
 }
 
-func (s *ingressReflectPathConn) sendICMP(source, destination netip.Addr, identifier, echoSequence uint16, payload []byte, id uint32) error {
-	echo := marshalICMPEcho(icmpEchoRequest, identifier, echoSequence, payload)
-	packet := buildIPv4Packet(source, destination, unix.IPPROTO_ICMP, echo, uint16(id))
-	return unix.Sendto(s.fd, packet, 0, &unix.SockaddrInet4{Addr: destination.As4()})
-}
-
-func (s *ingressReflectPathConn) sendUDP(source, destination netip.Addr, sourcePort, destinationPort uint16, payload []byte, id uint32) error {
-	segment := buildUDPSegment(source, destination, sourcePort, destinationPort, payload)
-	packet := buildIPv4Packet(source, destination, unix.IPPROTO_UDP, segment, uint16(id))
+// sendReflected sends a control frame of the path through member. The UDP
+// frame carries the forged member source. The ICMP frame is an Echo Request to
+// the member with the server as its source, so the member answers the server.
+func (s *ingressReflectPathConn) sendReflected(reg pathRegistration, member netip.Addr, frame []byte, id uint32) error {
+	packet, destination := reflectedControlPacket(reg, member, frame, id)
 	return unix.Sendto(s.fd, packet, 0, &unix.SockaddrInet4{Addr: destination.As4()})
 }
 
@@ -186,17 +180,25 @@ func (s *ingressReflectPathConn) sendViaBridge(reg pathRegistration, member neti
 	return unix.Sendto(s.fd, packet, 0, &unix.SockaddrInet4{Addr: reg.path.ProxyBridge.As4()})
 }
 
-// sendEgressRegister sends one EGRESS_REGISTER to the server. The server keeps a
-// egress path only when the frame reaches it from the advertised IP, so a direct
-// reflect path sends it from that address itself. A bridge path cannot reach
-// the server directly, which is the reason it reflects at all, so it routes the
-// frame through the bridge, and the bridge emits it with the advertised source.
+// sendEgressRegister sends one EGRESS_REGISTER to the server. The client of a
+// reflect path does not reach the server directly, which is the reason it
+// reflects at all. So a bridge path routes the frame through the bridge, and
+// the bridge emits it with the advertised source. A path without a bridge
+// reflects the frame like its REGISTER, through every member that answered in
+// the latest cycle, or through every candidate while none answered. The server
+// takes it because it arrives on a reflect path of the client.
 func (s *ingressReflectPathConn) sendEgressRegister(reg pathRegistration, frame []byte, id uint32) {
 	if reg.path.BridgeReflect() {
 		_ = s.sendEgressViaBridge(reg, frame, id)
 		return
 	}
-	_ = s.sendICMP(reg.advertisedIP, reg.path.Server, reg.path.ServerPort, uint16(id), frame, id)
+	members := s.healthy
+	if len(members) == 0 {
+		members = reg.members
+	}
+	for _, member := range members {
+		_ = s.sendReflected(reg, member, frame, id)
+	}
 }
 
 // sendEgressViaBridge wraps a EGRESS_REGISTER for the bridge with the advertised IP
@@ -284,58 +286,4 @@ func ingressReflectFrame(reg pathRegistration, member netip.Addr, sequence uint3
 		return nil, err
 	}
 	return packet, nil
-}
-
-// buildIPv4Packet builds an IPv4 packet with the given source, so a raw socket
-// with the header included sends it with a spoofed source.
-func buildIPv4Packet(source, destination netip.Addr, protocolNumber byte, payload []byte, id uint16) []byte {
-	total := 20 + len(payload)
-	packet := make([]byte, total)
-	packet[0] = 0x45
-	binary.BigEndian.PutUint16(packet[2:4], uint16(total))
-	binary.BigEndian.PutUint16(packet[4:6], id)
-	packet[8] = 64
-	packet[9] = protocolNumber
-	source4 := source.As4()
-	destination4 := destination.As4()
-	copy(packet[12:16], source4[:])
-	copy(packet[16:20], destination4[:])
-	binary.BigEndian.PutUint16(packet[10:12], internetChecksum(packet[:20]))
-	copy(packet[20:], payload)
-	return packet
-}
-
-func buildUDPSegment(source, destination netip.Addr, sourcePort, destinationPort uint16, payload []byte) []byte {
-	segment := make([]byte, 8+len(payload))
-	binary.BigEndian.PutUint16(segment[0:2], sourcePort)
-	binary.BigEndian.PutUint16(segment[2:4], destinationPort)
-	binary.BigEndian.PutUint16(segment[4:6], uint16(len(segment)))
-	copy(segment[8:], payload)
-	binary.BigEndian.PutUint16(segment[6:8], udpChecksum(source, destination, segment))
-	return segment
-}
-
-// udpChecksum computes the UDP checksum over the IPv4 pseudo header and the
-// segment. A computed checksum of zero becomes 0xffff, as RFC 768 requires.
-func udpChecksum(source, destination netip.Addr, segment []byte) uint16 {
-	source4 := source.As4()
-	destination4 := destination.As4()
-	var sum uint32
-	sum += uint32(binary.BigEndian.Uint16(source4[0:2])) + uint32(binary.BigEndian.Uint16(source4[2:4]))
-	sum += uint32(binary.BigEndian.Uint16(destination4[0:2])) + uint32(binary.BigEndian.Uint16(destination4[2:4]))
-	sum += uint32(unix.IPPROTO_UDP) + uint32(len(segment))
-	for index := 0; index+1 < len(segment); index += 2 {
-		sum += uint32(binary.BigEndian.Uint16(segment[index:]))
-	}
-	if len(segment)%2 == 1 {
-		sum += uint32(segment[len(segment)-1]) << 8
-	}
-	for sum>>16 != 0 {
-		sum = (sum & 0xffff) + (sum >> 16)
-	}
-	folded := ^uint16(sum)
-	if folded == 0 {
-		return 0xffff
-	}
-	return folded
 }

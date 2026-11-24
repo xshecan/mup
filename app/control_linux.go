@@ -39,9 +39,12 @@ type linuxClientControls struct {
 
 	mu   sync.Mutex
 	icmp *net.IPConn
-	// raw sends the frames that go through a bridge. It opens on first use.
+	// raw sends the frames that go through a bridge or a via host. It opens
+	// on first use.
 	raw     int
 	rawOpen bool
+	// turns holds the next member turn of each ingress reflect path.
+	turns map[uint16]uint
 }
 
 func newClientPathOpener() clientControls {
@@ -152,6 +155,9 @@ func (c *linuxClientControls) sendIngress(registration pathRegistration, frame [
 	if registration.path.BridgeReflect() {
 		return c.sendIngressViaBridge(registration, frame)
 	}
+	if registration.ingressReflect {
+		return c.sendIngressReflected(registration, frame)
+	}
 	ifindex := 0
 	if name := registration.path.Interface; name != "" {
 		networkInterface, err := net.InterfaceByName(name)
@@ -190,19 +196,51 @@ func (c *linuxClientControls) sendIngress(registration pathRegistration, frame [
 func (c *linuxClientControls) sendIngressViaBridge(registration pathRegistration, frame []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.rawOpen {
-		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_RAW)
-		if err != nil {
-			return fmt.Errorf("open raw socket for the bridge: %w", err)
-		}
-		c.raw, c.rawOpen = fd, true
-	}
-	// The socket serves every bridge path, so each send sets its interface.
-	if err := unix.BindToDevice(c.raw, registration.path.Interface); err != nil {
-		return fmt.Errorf("bind the bridge socket to %q: %w", registration.path.Interface, err)
+	if err := c.bindRawLocked(registration); err != nil {
+		return err
 	}
 	packet := bridgeControlPacket(registration, frame, 0)
 	return unix.Sendto(c.raw, packet, 0, &unix.SockaddrInet4{Addr: registration.path.ProxyBridge.As4()})
+}
+
+// sendIngressReflected sends a control frame on an ingress reflect path without
+// a bridge. Such a client does not reach the server directly, so it reflects
+// the frame like the REGISTER of the path, through one member. It takes the
+// healthy members in turn, or the candidates in turn while none is healthy.
+func (c *linuxClientControls) sendIngressReflected(registration pathRegistration, frame []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.turns == nil {
+		c.turns = make(map[uint16]uint)
+	}
+	turn := c.turns[registration.pathID]
+	c.turns[registration.pathID] = turn + 1
+	member, ok := pickReflectMember(registration.healthyMembers, registration.members, turn)
+	if !ok {
+		return fmt.Errorf("ingress reflect path %d has no member", registration.pathID)
+	}
+	if err := c.bindRawLocked(registration); err != nil {
+		return err
+	}
+	packet, destination := reflectedControlPacket(registration, member, frame, 0)
+	return unix.Sendto(c.raw, packet, 0, &unix.SockaddrInet4{Addr: destination.As4()})
+}
+
+// bindRawLocked opens the raw socket on first use and binds it to the
+// interface of the path. The socket serves every path, so each send sets its
+// interface. An empty name removes the binding.
+func (c *linuxClientControls) bindRawLocked(registration pathRegistration) error {
+	if !c.rawOpen {
+		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_RAW)
+		if err != nil {
+			return fmt.Errorf("open the raw control socket: %w", err)
+		}
+		c.raw, c.rawOpen = fd, true
+	}
+	if err := unix.BindToDevice(c.raw, registration.path.Interface); err != nil {
+		return fmt.Errorf("bind the raw control socket to %q: %w", registration.path.Interface, err)
+	}
+	return nil
 }
 
 // dropAllInput attaches a socket filter that drops every packet, for a raw
@@ -489,7 +527,11 @@ func serveServerUDPConnection(
 		if err != nil {
 			continue
 		}
-		if egresses.handle(frame, ipAddress(source.IP)) {
+		// The egress frames of a reflect path arrive from a via host, so the
+		// server finds the path of the packet before it handles them.
+		local, localErr := packetInfoDestination(oob[:oobCount])
+		arrival := control.PathKey{Local: local, Source: ipAddress(source.IP), Transport: protocol.TransportUDP, ServerPort: serverPort}
+		if egresses.handle(frame, arrival.Source, arrivedOnReflectPath(registry, frame, arrival, time.Now())) {
 			continue
 		}
 		// A probe reply confirms a UDP reflector reached the client. It carries
@@ -501,8 +543,7 @@ func serveServerUDPConnection(
 			}
 			continue
 		}
-		local, err := packetInfoDestination(oob[:oobCount])
-		if err != nil {
+		if localErr != nil {
 			continue
 		}
 		ack, err := acceptRegistration(
@@ -561,11 +602,17 @@ func serveServerICMPControl(
 			continue
 		}
 		frame, err := protocol.DecodeControlFrame(echo.payload)
-		if err != nil || egresses.handle(frame, ipAddress(source.IP)) {
+		if err != nil {
 			continue
 		}
-		local, err := packetInfoDestination(oob[:oobCount])
-		if err != nil {
+		// A reflected egress frame arrives as an Echo Reply from the via host,
+		// so the server finds the path of the packet before it handles it.
+		local, localErr := packetInfoDestination(oob[:oobCount])
+		arrival := control.PathKey{Local: local, Source: ipAddress(source.IP), Transport: protocol.TransportICMP, ServerPort: echo.identifier}
+		if egresses.handle(frame, arrival.Source, arrivedOnReflectPath(registry, frame, arrival, time.Now())) {
+			continue
+		}
+		if localErr != nil {
 			continue
 		}
 		ack, err := acceptRegistration(

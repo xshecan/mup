@@ -51,6 +51,9 @@ type pathRegistration struct {
 	pathID    uint16
 	client    ClientKey
 	expiresAt time.Time
+	// ingressReflect marks a path that a reflected REGISTER made, so its
+	// source is a via host of the client.
+	ingressReflect bool
 }
 
 type Registry struct {
@@ -103,9 +106,10 @@ func (r *Registry) Register(now time.Time, request RegistrationRequest) (Registr
 		ExpiresAt:  expiresAt,
 	}
 	r.paths[request.Path] = pathRegistration{
-		client:    key,
-		pathID:    request.Frame.PathID,
-		expiresAt: expiresAt,
+		client:         key,
+		pathID:         request.Frame.PathID,
+		expiresAt:      expiresAt,
+		ingressReflect: request.Frame.Flags&protocol.ControlFlagIngressReflect != 0,
 	}
 	return RegistrationResult{Key: key, Replaced: replaced, ExpiresAt: expiresAt}, nil
 }
@@ -118,6 +122,16 @@ func (r *Registry) ResolvePath(now time.Time, path PathKey) (ClientKey, bool) {
 		return ClientKey{}, false
 	}
 	return entry.client, true
+}
+
+// IsReflectPathOf reports whether path is a live ingress reflect path of
+// client. A control frame that arrives on such a path comes from a via host
+// of the client, not from its advertised IP.
+func (r *Registry) IsReflectPathOf(now time.Time, path PathKey, client ClientKey) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	entry, exists := r.paths[path]
+	return exists && entry.ingressReflect && entry.client == client && now.Before(entry.expiresAt)
 }
 
 // Expire forgets expired paths and every client without a live path. It

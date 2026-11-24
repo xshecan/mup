@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/xshecan/mup/control"
 	"github.com/xshecan/mup/dataplane"
 	"github.com/xshecan/mup/protocol"
 )
@@ -28,25 +29,43 @@ type egressService struct {
 	sequence atomic.Uint32
 }
 
-// handle answers a EGRESS_REGISTER or a PROBE_REPLY of an egress path. It reports
-// false for any other frame.
-func (d *egressService) handle(frame protocol.ControlFrame, source netip.Addr) bool {
+// handle answers a EGRESS_REGISTER or a PROBE_REPLY of an egress path. The
+// server takes such a frame from the advertised IP, or from a via host when
+// reflected reports that the frame arrived on an ingress reflect path of its
+// client. It reports false for any other frame.
+func (d *egressService) handle(frame protocol.ControlFrame, source netip.Addr, reflected bool) bool {
 	if d == nil {
 		return false
 	}
+	trusted := source == frame.AdvertisedIP || reflected
 	switch {
 	case frame.Type == protocol.ControlEgressRegister:
-		if err := d.registry.register(frame, source, time.Now()); err != nil {
+		if !trusted {
+			d.logger.Printf("mup egress path %d of %s: EGRESS_REGISTER from %s is not from the client", frame.PathID, frame.AdvertisedIP, source)
+			return true
+		}
+		if err := d.registry.register(frame, time.Now()); err != nil {
 			d.logger.Printf("mup egress path %d of %s: %v", frame.PathID, frame.AdvertisedIP, err)
 		}
 		return true
 	case frame.Type == protocol.ControlProbeReply && frame.Flags&protocol.ControlFlagEgressPath != 0:
-		if source == frame.AdvertisedIP {
+		if trusted {
 			d.registry.confirm(frame, time.Now())
 		}
 		return true
 	}
 	return false
+}
+
+// arrivedOnReflectPath reports whether a frame arrived on a live ingress reflect
+// path of its client. Such a frame comes from a via host of the client, because
+// the client reflects it like the REGISTER of the path.
+func arrivedOnReflectPath(registry *control.Registry, frame protocol.ControlFrame, path control.PathKey, now time.Time) bool {
+	if registry == nil {
+		return false
+	}
+	client := control.ClientKey{AdvertisedIP: frame.AdvertisedIP, InstanceNonce: frame.InstanceNonce}
+	return registry.IsReflectPathOf(now, path, client)
 }
 
 // ack sends a REGISTER_ACK on each egress path of its client, so an ingress path is

@@ -132,7 +132,7 @@ func TestServerInspectorShowsEveryEgressGroupOfAClient(t *testing.T) {
 	registry := newTestEgressRegistry(newFakeEgressPlane())
 	now := time.Now()
 	for _, frame := range []protocol.ControlFrame{egressFrameOf(51825, 3, config.ModeRepeater), egressFrameOf(51820, 0, config.ModeFailover)} {
-		if err := registry.register(frame, egressClient, now); err != nil {
+		if err := registry.register(frame, now); err != nil {
 			t.Fatalf("register: %v", err)
 		}
 	}

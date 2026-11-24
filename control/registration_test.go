@@ -187,3 +187,42 @@ func TestRegistrationRejectsAFrameForAnotherPortOfTheRange(t *testing.T) {
 		t.Fatal("rejected path was published")
 	}
 }
+
+func TestIsReflectPathOfFindsOnlyALiveReflectPathOfTheSameClient(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(600, 0)
+	registry := NewRegistry(5000, 5000, 30*time.Second)
+	clientIP := netip.MustParseAddr("192.0.2.10")
+	client := ClientKey{AdvertisedIP: clientIP, InstanceNonce: 9}
+	reflect := registrationRequest(clientIP, netip.MustParseAddr("198.51.100.1"), protocol.TransportUDP, 9, 0)
+	reflect.Frame.Flags = protocol.ControlFlagIngressReflect
+	reflect.Path.Source = netip.MustParseAddr("203.0.113.7")
+	plain := registrationRequest(clientIP, netip.MustParseAddr("198.51.100.1"), protocol.TransportUDP, 9, 1)
+	for _, request := range []RegistrationRequest{reflect, plain} {
+		if _, err := registry.Register(now, request); err != nil {
+			t.Fatalf("register path %d: %v", request.Frame.PathID, err)
+		}
+	}
+
+	if !registry.IsReflectPathOf(now, reflect.Path, client) {
+		t.Fatal("the reflect path of the client was not found")
+	}
+	if registry.IsReflectPathOf(now, plain.Path, client) {
+		t.Fatal("a plain path counted as a reflect path")
+	}
+	if registry.IsReflectPathOf(now, reflect.Path, ClientKey{AdvertisedIP: netip.MustParseAddr("192.0.2.11"), InstanceNonce: 9}) {
+		t.Fatal("the reflect path counted for another client")
+	}
+	if registry.IsReflectPathOf(now, reflect.Path, ClientKey{AdvertisedIP: clientIP, InstanceNonce: 10}) {
+		t.Fatal("the reflect path counted for another nonce")
+	}
+	other := reflect.Path
+	other.Source = netip.MustParseAddr("203.0.113.8")
+	if registry.IsReflectPathOf(now, other, client) {
+		t.Fatal("an unknown source counted as a reflect path")
+	}
+	if registry.IsReflectPathOf(now.Add(30*time.Second), reflect.Path, client) {
+		t.Fatal("an expired reflect path was found")
+	}
+}

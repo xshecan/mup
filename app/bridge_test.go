@@ -70,7 +70,7 @@ func TestEgressRegistryKeepsAEgressBridge(t *testing.T) {
 	frame.EgressServer = bridge
 	start := time.Unix(1000, 0)
 	// A bridge is not an address of this host, and its port is a bridge port.
-	if err := registry.register(frame, egressClient, start); err != nil {
+	if err := registry.register(frame, start); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	entry := plane.paths[egressKey{client: egressKeyOf, id: 0}]
@@ -100,7 +100,7 @@ func TestEgressRegistryKeepsAEgressBridge(t *testing.T) {
 	// A route to the bridge that fails rejects the frame.
 	registry.route = func(netip.Addr) (netip.Addr, int, error) { return netip.Addr{}, 0, errors.New("no route") }
 	frame.PathID = 1
-	if err := registry.register(frame, egressClient, start); err == nil {
+	if err := registry.register(frame, start); err == nil {
 		t.Fatal("register without a route to the bridge succeeded")
 	}
 }
