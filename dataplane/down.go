@@ -24,15 +24,22 @@ type EgressPathSettings struct {
 	ReturnPrefix uint8
 }
 
-// EgressPathFromConfig converts a configured egress path.
+// EgressPathFromConfig converts a configured egress path. The via of a path
+// with BridgeVia applies to the leg from the server to the bridge, so the
+// client expects the replies from the bridge address and gets no return IP.
 func EgressPathFromConfig(path config.Path) EgressPathSettings {
-	return EgressPathSettings{
+	settings := EgressPathSettings{
 		Server:       path.Server,
 		ServerPort:   path.ServerPort,
 		Transport:    path.Transport,
 		ReturnIP:     path.ReturnIP,
 		ReturnPrefix: path.ReturnPrefix,
 	}
+	if path.BridgeVia {
+		settings.ReturnIP = netip.Addr{}
+		settings.ReturnPrefix = 0
+	}
+	return settings
 }
 
 func encodeClientEgressPath(slot int, path EgressPathSettings) (mupClientDownPathV1, error) {
@@ -73,7 +80,9 @@ func encodeClientEgressPath(slot int, path EgressPathSettings) (mupClientDownPat
 //
 // A path with Bridge goes through a MUP bridge. Server is then the bridge
 // address, and the server wraps each reply in a UDP packet from LocalIP to the
-// bridge, out of Ifindex.
+// bridge, out of Ifindex. With BridgeVia as well, the return IP or a pool
+// member is the source of the wrapper in place of LocalIP, and the reply in it
+// is the direct reply from the bridge address.
 type EgressPathEntry struct {
 	Client     ClientKey
 	PathID     uint16
@@ -86,6 +95,7 @@ type EgressPathEntry struct {
 	PerPacket  bool
 	Members    []netip.Addr
 	Bridge     bool
+	BridgeVia  bool
 	LocalIP    netip.Addr
 }
 
@@ -166,6 +176,12 @@ func encodeEgressPathEntry(entry EgressPathEntry) (mupDownPathKeyV1, mupDownPath
 			return key, mupDownPathV1{}, err
 		}
 		value.Flags |= protocol.ControlFlagBridge
+	}
+	if entry.BridgeVia {
+		if !entry.Bridge || value.Flags&(protocol.ControlFlagReturnIP|protocol.ControlFlagReturnPool) == 0 {
+			return key, mupDownPathV1{}, errors.New("egress path bridge via needs a bridge and a return IP or pool")
+		}
+		value.Flags |= protocol.ControlFlagBridgeVia
 	}
 	return key, value, nil
 }

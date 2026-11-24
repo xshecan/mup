@@ -86,11 +86,15 @@ type ServerStatus struct {
 // path and "egress" for an egress path of a group with separate egress paths, and
 // empty for a path that carries both directions. An egress path is healthy while
 // its probes arrive, and LastProbe is the time of the latest one. A path with
-// Bridge goes through a MUP bridge, and Server is the bridge address.
+// Bridge goes through a MUP bridge, and Server is the bridge address. An egress
+// bridge path with BridgeVia has its via on the leg from the server to the
+// bridge, and the bridge sends from its own address. Without BridgeVia, the
+// bridge sends the replies from the via.
 type Path struct {
 	ID         int    `json:"id"`
 	Direction  string `json:"direction,omitempty"`
 	Bridge     bool   `json:"bridge,omitempty"`
+	BridgeVia  bool   `json:"bridge_via,omitempty"`
 	ListenPort uint16 `json:"listen_port"`
 	Server     string `json:"server"`
 	Port       uint16 `json:"port"`
@@ -182,10 +186,13 @@ type EgressGroup struct {
 
 // EgressPath is one egress path of a client on a server. Members counts the
 // reflectors that the path can use, and HealthyMembers the ones whose probes
-// reach the client.
+// reach the client. A bridge path with BridgeVia sends its replies to the
+// bridge from the via, and a bridge path without it lets the bridge send them
+// from the via.
 type EgressPath struct {
 	ID             uint16  `json:"id"`
 	Bridge         bool    `json:"bridge,omitempty"`
+	BridgeVia      bool    `json:"bridge_via,omitempty"`
 	Server         string  `json:"server"`
 	Port           uint16  `json:"port"`
 	Transport      string  `json:"transport"`

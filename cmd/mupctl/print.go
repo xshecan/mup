@@ -177,7 +177,10 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 		header = []string{"ID", "PATH", "GROUP", "SERVER", "TRANSPORT", "VIA", "INTERFACE", "STATE", "SEEN", "RTT"}
 	}
 	if bridged {
-		// A bridge path shows the bridge address in the SERVER column.
+		// A bridge path shows the bridge address in the SERVER column. KIND
+		// bridge-via marks an egress bridge whose via is on the leg from the
+		// server to the bridge. On a bridge, the via is the source that the
+		// bridge sends from.
 		header = slices.Insert(header, 2, "KIND")
 	}
 	if wide {
@@ -199,7 +202,10 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 		}
 		if bridged {
 			kind := "route"
-			if path.Bridge {
+			switch {
+			case path.BridgeVia:
+				kind = "bridge-via"
+			case path.Bridge:
 				kind = "bridge"
 			}
 			cells = append(cells, kind)
@@ -407,7 +413,9 @@ func egressSummary(groups []api.EgressGroup) string {
 }
 
 // egressList shows each egress path as ID:TRANSPORT:SERVER:PORT, with the
-// healthy members of a path that reflects.
+// healthy members of a path that reflects. A bridge that sends the replies from
+// the via shows "reflects via". A bridge via path shows "via" alone, because
+// the server sends to the bridge from the via.
 func egressList(groups []api.EgressGroup) string {
 	return joinGroups(groups, func(group api.EgressGroup) string {
 		list := make([]string, 0, len(group.Paths))
@@ -417,7 +425,11 @@ func egressList(groups []api.EgressGroup) string {
 				text = fmt.Sprintf("%d:%s:bridge %s:%d", path.ID, path.Transport, path.Server, path.Port)
 			}
 			if path.ReturnIP != "" {
-				text += fmt.Sprintf(" via %s (%d/%d)", path.ReturnIP, path.HealthyMembers, path.Members)
+				via := "via"
+				if path.Bridge && !path.BridgeVia {
+					via = "reflects via"
+				}
+				text += fmt.Sprintf(" %s %s (%d/%d)", via, path.ReturnIP, path.HealthyMembers, path.Members)
 			}
 			list = append(list, text)
 		}

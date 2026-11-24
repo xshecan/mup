@@ -48,6 +48,50 @@ func TestPathsShowTheBridges(t *testing.T) {
 	}
 }
 
+func TestPathsTellTheTwoKindsOfEgressBridgeWithAVia(t *testing.T) {
+	t.Parallel()
+
+	status := splitClientStatus()
+	status.Client.Paths = append(status.Client.Paths,
+		api.Path{ID: 2, Direction: "egress", Bridge: true, ListenPort: 51820, Server: "5.6.7.8", Port: 9700, Transport: "icmp", ReturnIP: "87.107.117.192/28"},
+		api.Path{ID: 3, Direction: "egress", Bridge: true, BridgeVia: true, ListenPort: 51820, Server: "5.6.7.9", Port: 9701, Transport: "udp", ReturnIP: "87.107.117.200"},
+	)
+	code, stdout, stderr := runCommand(t, fakeDaemon(t, status), "get", "paths")
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr)
+	}
+	for _, want := range []string{
+		"2    egress    bridge       51820   5.6.7.8:9700       icmp        87.107.117.192/28",
+		"3    egress    bridge-via   51820   5.6.7.9:9701       udp         87.107.117.200",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("paths output misses %q:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestClientsTellTheTwoKindsOfEgressBridgeWithAVia(t *testing.T) {
+	t.Parallel()
+
+	var out strings.Builder
+	printClients(&out, []api.RegisteredClient{{
+		AdvertisedIP: "192.0.2.10",
+		Nonce:        "8f3a0000000000aa",
+		LeaseSeconds: 24,
+		Egress: &api.EgressGroup{Mode: "failover", Paths: []api.EgressPath{
+			{ID: 0, Bridge: true, Server: "5.6.7.8", Port: 9700, Transport: "icmp", ReturnIP: "87.107.117.192/28", Healthy: true, Members: 9, HealthyMembers: 7},
+			{ID: 1, Bridge: true, BridgeVia: true, Server: "5.6.7.9", Port: 9701, Transport: "udp", ReturnIP: "87.107.117.200", Members: 1},
+			{ID: 2, Bridge: true, Server: "5.6.7.9", Port: 9702, Transport: "udp"},
+		}},
+	}}, true)
+	want := "0:icmp:bridge 5.6.7.8:9700 reflects via 87.107.117.192/28 (7/9)," +
+		"1:udp:bridge 5.6.7.9:9701 via 87.107.117.200 (0/1)," +
+		"2:udp:bridge 5.6.7.9:9702"
+	if !strings.Contains(out.String(), want) {
+		t.Fatalf("clients output misses %q:\n%s", want, out.String())
+	}
+}
+
 func TestStatusShowsABridge(t *testing.T) {
 	t.Parallel()
 

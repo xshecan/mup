@@ -45,7 +45,7 @@ Each path has its own return mode. The optional `via RETURN_IP` after a path set
 
 A group can also have separate ingress paths and egress paths, each with its own mode and health. The client picks the ingress path of each packet, and the server picks the egress path of each reply. See [Separate ingress and egress paths](#separate-ingress-and-egress-paths).
 
-A bridge is a second host between a client and a server. It passes the ingress on to the server, and it sends the replies of a server whose network drops spoofed packets. See [Bridges](#bridges).
+A bridge is a second host between a client and a server. It passes the ingress on to the server, and it sends the replies of the server to the client. See [Bridges](#bridges).
 
 [PROTOCOL.md](PROTOCOL.md) describes every packet, map, timer, and drop reason.
 
@@ -145,7 +145,7 @@ server:
 | `client.servers[].port` | `-p` | The port where the group receives packets from its peers. |
 | `client.servers[].mode` | `--mode` | Optional. The path mode of the group. The default is `failover`. |
 | `client.servers[].ingress`, `client.servers[].egress` | `--ingress`, `--egress` | Optional. A `mode` and `routes` for each direction, in place of `mode` and `routes`. See [Separate ingress and egress paths](#separate-ingress-and-egress-paths). |
-| `client.servers[].ingress.bridges`, `client.servers[].egress.bridges` | `--ingress-bridge`, `--egress-bridge` | Optional. The paths through a bridge in each direction. See [Bridges](#bridges). |
+| `client.servers[].ingress.bridges`, `client.servers[].egress.bridges` | `--ingress-bridge`, `--egress-bridge` | Optional. The paths through a bridge in each direction. An egress bridge can have `via`. See [Bridges](#bridges). |
 | `client.servers[].routes` | `-u` | The paths of the group, in the form of the `-u` flag. A path can end with `via RETURN_IP`. The server port of a path can be a range, `FIRST-LAST`. See [Server port ranges](#server-port-ranges). |
 | `server.port` | `-p` | The UDP ports and the ICMP Echo identifiers that the server accepts, as `PORT` or `FIRST-LAST`, for example `5000-6000`. |
 | `server.target` | `-r` | The WireGuard target that receives all traffic. |
@@ -153,7 +153,7 @@ server:
 | `server.target_ingress` | `--target-ingress` | Optional. Delivers each packet into the ingress hook of the interface that holds the target address, from the advertised IP of the client. Use it for a target on the server host with its own TC program on that interface. An example is a WireGuard router with an eBPF fast path. |
 | `bridge.server` | `-s` | The MUP server of a bridge. |
 | `bridge.port` | `-p` | The UDP ports and the ICMP Echo identifiers that the bridge takes, as `PORT` or `FIRST-LAST`. |
-| `bridge.allow` | `-a` | Optional. More source ranges of the server, as IPv4 CIDRs, for a server behind NAT. |
+| `bridge.allow` | `-a` | Optional. More senders of wrapped replies, as IPv4 CIDRs. Use it for a server behind NAT, for more servers, and for the return IPs of an egress bridge with `via`. |
 | `bridge.control_socket` | `--control-socket` | Optional. The socket for `mupctl`. The default is `/run/mup/bridge.sock`. An empty value turns the socket off. |
 
 The daemon does not start with an unknown key in the file. A value can use `${VARIABLE}`, or `${VARIABLE:default}` with a default value.
@@ -239,12 +239,51 @@ The client must send a packet whose source is not the client address, which is t
 
 ## Bridges
 
-A bridge is a second host between a client and a server. It runs `mup bridge`, and it serves one MUP server. The network of the bridge must accept packets with a source address that is not its own.
+A bridge is a second host between a client and a server. It runs `mup bridge`. It passes the ingress on to one MUP server, its `server`. It unwraps the replies of that server and of the senders in `bridge.allow`.
 
 - An ingress bridge takes the packets of the client, in the same way as a server. It changes only the destination to its server, and it keeps the client address as the source. So the server gets the same packets as from the client, and it needs no change.
-- An egress bridge sends the replies of the server. The server builds each reply as for an egress route, wraps it in a UDP packet, and sends it to the bridge. The bridge removes the wrapper and sends the reply with the source that the egress path needs. So a server whose network drops spoofed packets can use reflected egress paths.
+- An egress bridge sends the replies of the server. The server builds each reply as for an egress route, wraps it in a UDP packet, and sends it to the bridge. The bridge removes the wrapper and sends the reply on to the client.
 
-Only the client configuration names a bridge, in a `bridges` list next to `routes` in `ingress` or `egress`. In this example, the server cannot spoof, so the bridge 5.6.7.8 reflects its replies through the pool:
+An egress bridge has three forms:
+
+| Form | Where | What the bridge sends |
+| --- | --- | --- |
+| `SERVER:PORT/t via X bridge B` | `egress.routes` | The reply with the source that `via X` needs. The bridge spoofs. |
+| `B:PORT/t via X` | `egress.bridges` | The reply from the bridge address. The server spoofs the wrapper. |
+| `B:PORT/t` | `egress.bridges` | The reply from the bridge address. Nothing is spoofed. |
+
+An ingress bridge is a `bridges` entry in `ingress`. The client configuration names each bridge, next to `routes`.
+
+### The bridge spoofs
+
+A route with a bridge suffix lets the bridge send the last leg with a spoofed source. Use it for a server whose network drops spoofed packets. The server wraps each reply as for an egress route with that `via`. It sends the wrapper from its own address to the bridge B. The bridge removes the wrapper and sends the reply with the source that the via needs. For UDP, it sends a packet with X as the source. For ICMP, it sends an Echo Request to X with the client as the source.
+
+X is a return IP, or a return pool with an optional `per-peer` or `per-packet`. The suffix needs a `via`. The network of the bridge must let spoofed packets out. The route names the server for the reader. The client does not send that address to the server. Each server that gets the entry probes the bridge. In this example, the server cannot spoof, so the bridge 5.6.7.8 reflects its replies through the pool:
+
+```yaml
+client:
+  advertise: 160.119.74.74
+  servers:
+    - port: 51820
+      ingress:
+        routes:
+          - 46.102.130.95:9000/icmp
+      egress:
+        routes:
+          - 46.102.130.95:9200/icmp via 87.107.117.192/28 bridge 5.6.7.8
+```
+
+```yaml
+bridge:
+  server: 46.102.130.95
+  port: 9000-9399
+```
+
+### The bridge via
+
+A `bridges` entry with a `via` lets the server spoof the wrapper. Use it when the network of the client treats packets from the server address badly, for example with a bandwidth limit on foreign sources. A host near the client then passes the replies on. The server sends the wrapped reply to the bridge B. It uses X, or a member of the pool, as the source address of the wrapper. The bridge removes the wrapper and sends the reply to the client from its own address. For UDP, this is a packet from the bridge address and the port. For ICMP, it is an Echo Reply from the bridge address.
+
+The bridge spoofs nothing, so its network needs no special rule. The network of the server must let the spoofed wrapper out. The bridge takes wrapped replies only from allowed sources, so it must list X, or the pool, in `bridge.allow`. The host X never gets a packet. The entry transport sets only the form of the last leg. The wrapper to the bridge is always UDP. In this example, the bridge 5.6.7.8 sends the replies, and the server wraps them from the pool:
 
 ```yaml
 client:
@@ -256,25 +295,33 @@ client:
           - 46.102.130.95:9000/icmp
       egress:
         bridges:
-          - 5.6.7.8:9200/icmp via 87.107.117.192/28
+          - 5.6.7.8:9200/udp via 87.107.117.192/28
 ```
 
 ```yaml
 bridge:
   server: 46.102.130.95
   port: 9000-9399
+  allow:
+    - 87.107.117.192/28
 ```
+
+This form needs a server and a client of v0.5.0 or later. The bridge needs no update. A server before v0.5.0 refuses the EGRESS_REGISTER of this form.
+
+An older configuration can have an egress `bridges` entry with a `via` that means the first form. Move such an entry to `routes` with the server address and `bridge B`, or it gets the meaning of the second form. There is no alias.
+
+### Rules
 
 A bridge entry has the form of a route, with the bridge address in place of the server address. These rules apply:
 
 - An ingress bridge has no `via`. It can have a port range and `%IFACE`.
-- An egress bridge can have `via`. It has one port and no `%IFACE`. Without `via`, it sends the replies from the bridge address.
+- An egress bridge has one port and no `%IFACE`. In `bridges`, it can have `via`. Without `via`, the bridge sends the replies from the bridge address and the server wraps them from its own address.
 - The routes and the bridges of a direction share its 8 path slots, and the routes come first. So in the failover mode, a healthy route carries the traffic before a bridge.
 - The `port` range of the bridge must include the ports of all bridge entries. The bridge sends the ingress to its server on the same port.
 
-The bridge takes wrapped replies only from its server. A server behind NAT reaches the bridge from its NAT address, so put that address in `bridge.allow`. The bridge passes every other packet to the kernel, so a normal ping to the bridge still gets its reply.
+The bridge takes wrapped replies from its server and from the ranges in `bridge.allow`. So one bridge can pass the replies of more than one server, when each server address is in `bridge.allow`. A server behind NAT reaches the bridge from its NAT address, so put that address in `bridge.allow`. The bridge passes every other packet to the kernel, so a normal ping to the bridge still gets its reply.
 
-An egress bridge starts unhealthy, because a client does not know which server a bridge serves. Each server that gets the egress bridge probes it, and only the probes of the server of the bridge come back. A dead bridge makes its ingress paths and its egress paths unhealthy.
+An egress bridge starts unhealthy, because a client does not know which server a bridge serves. Each server that gets the egress bridge probes it, and only the probes of an allowed server come back. For the bridge via, the server probes the path through each member. Each PROBE names its member in the return IP field. The client copies that member into the PROBE_REPLY. For the other forms, the reply names the packet source. A dead bridge makes its ingress paths and its egress paths unhealthy.
 
 The wrapper adds 20 bytes to each reply between the server and the bridge. The largest WireGuard message on an egress bridge is thus the path MTU minus 48 bytes. At a path MTU of 1500, this is a WireGuard MTU of 1420, the WireGuard default. The server drops a larger reply and counts reason 25 (`BRIDGE_SIZE`). The ingress through a bridge has no wrapper.
 
@@ -334,7 +381,7 @@ The command `mup --config FILE` reads a [configuration file](#configuration-file
 mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP]" [-u ...] -s CLIENT_IP
            [-r RETURN_IP] [--mode failover|balancer|repeater] [--control-socket PATH]
 mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp" [--ingress ...]
-           --egress "SERVER_IP:PORT/udp|icmp [via RETURN_IP]" [--egress ...] -s CLIENT_IP
+           --egress "SERVER_IP:PORT/udp|icmp [via RETURN_IP [bridge BRIDGE_IP]]" [--egress ...] -s CLIENT_IP
            [--ingress-bridge "BRIDGE_IP[%IFACE]:PORT[-LAST]/udp|icmp"] [--ingress-bridge ...]
            [--egress-bridge "BRIDGE_IP:PORT/udp|icmp [via RETURN_IP]"] [--egress-bridge ...]
            [--ingress-mode MODE] [--egress-mode MODE] [--control-socket PATH]
@@ -348,8 +395,8 @@ mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp" [--
 | `-r` | IPv4 | Optional. The return IP of each `-u` path without its own `via`. On UDP paths, it is the spoofed source of replies. On ICMP paths, it is the reflector host. |
 | `--mode` | `failover`, `balancer`, `repeater` | The path mode. The default is `failover`. |
 | `--ingress` | `SERVER_IP[%IFACE]:PORT/udp` or `/icmp` | One ingress path of a group with separate egress paths. Use it with `--egress`, and not with `-u`. |
-| `--egress` | `SERVER_IP:PORT/udp` or `/icmp`, then optionally `via RETURN_IP` | One egress path. See [Separate ingress and egress paths](#separate-ingress-and-egress-paths). |
-| `--ingress-bridge`, `--egress-bridge` | `BRIDGE_IP:PORT/udp` or `/icmp` | One ingress path or egress path through a bridge. An egress bridge can end with `via RETURN_IP`. See [Bridges](#bridges). |
+| `--egress` | `SERVER_IP:PORT/udp` or `/icmp`, then optionally `via RETURN_IP` and `bridge BRIDGE_IP` | One egress path. With `bridge BRIDGE_IP`, the bridge spoofs the reply, and `via` is required. See [Separate ingress and egress paths](#separate-ingress-and-egress-paths) and [Bridges](#bridges). |
+| `--ingress-bridge`, `--egress-bridge` | `BRIDGE_IP:PORT/udp` or `/icmp` | One ingress path or egress path through a bridge. An egress bridge can end with `via RETURN_IP`, and then the server spoofs the wrapper. See [Bridges](#bridges). |
 | `--ingress-mode`, `--egress-mode` | `failover`, `balancer`, `repeater` | The ingress mode and the egress mode. The default is `failover`. |
 | `--control-socket` | path | The socket for `mupctl`. The default is `/run/mup/client.sock`. An empty value turns the socket off. |
 
@@ -399,7 +446,8 @@ mup bridge -s SERVER_IP -p PORT[-LAST] [-a CIDR] [-a ...] [--control-socket PATH
 | `mupctl delete path ID` | client | Removes a path. |
 | `mupctl set mode repeater` | client | Changes the path mode of a group to `failover`, `balancer`, or `repeater`. |
 | `mupctl add path --egress SERVER:PORT/udp [via RETURN_IP]` | client | Adds an egress path to a group with separate egress paths. `delete path --egress ID` removes one, and `set mode --egress MODE` changes the egress mode. |
-| `mupctl add path --bridge BRIDGE:PORT/udp` | client | Adds an ingress path through a bridge. With `--egress`, it adds an egress path through a bridge. `delete path` removes either one. |
+| `mupctl add path --bridge BRIDGE:PORT/udp` | client | Adds an ingress path through a bridge. With `--egress`, it adds an egress path through a bridge, and `via RETURN_IP` makes the server spoof the wrapper. `delete path` removes either one. |
+| `mupctl add path --egress "SERVER:PORT/udp via RETURN_IP bridge BRIDGE"` | client | Adds an egress path where the bridge spoofs the reply. |
 
 On a client, `mupctl status` prints this overview:
 

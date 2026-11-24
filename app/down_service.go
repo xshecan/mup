@@ -119,6 +119,13 @@ func (d *egressService) probe(now time.Time) {
 			InstanceNonce: target.client.InstanceNonce,
 			AdvertisedIP:  target.client.AdvertisedIP,
 		}
+		// The client sees a bridge via path from the bridge address, so the
+		// probe names its member. The client names it again in the reply, and
+		// confirm marks that member.
+		if target.bridgeVia && target.member.IsValid() {
+			frame.Flags |= protocol.ControlFlagReturnIP
+			frame.ReturnIP = target.member
+		}
 		packet := make([]byte, protocol.ControlFrameLength)
 		if err := protocol.EncodeControlFrame(packet, frame); err != nil {
 			continue

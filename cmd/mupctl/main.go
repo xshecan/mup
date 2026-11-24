@@ -45,6 +45,9 @@ Commands:
   With --egress, add, delete, and set work on the egress paths and the
   egress mode of a group with separate egress paths. With --bridge, add
   adds a path through a MUP bridge, and the address is the bridge address.
+  An egress bridge with a via gets the replies from the server through the
+  via, and sends them from its own address. An egress route with
+  "via X bridge B" makes bridge B send the replies from X.
 
 Flags:
   --socket PATH       Control socket of the daemon. The default is $MUP_SOCKET,

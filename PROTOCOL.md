@@ -32,7 +32,7 @@ This document describes version 1 of the MUP protocol as the code implements it.
 | Path | One way from the client to a server. One client `-u` flag sets one path. |
 | Ingress path | A path of a group with separate egress paths. It carries only the packets from the client to the server. |
 | Egress path | A way that the server sends the replies of a group to the client. One `egress` route sets one egress path. |
-| Bridge | A host that runs `mup bridge` between the clients and one server. One `bridges` entry sets one ingress path or egress path through it. |
+| Bridge | A host that runs `mup bridge` between the clients and one server. One `bridges` entry sets one ingress path or egress path through it. An egress route with a `bridge` suffix also sets one egress path through it. |
 | Bridge wrapper | The 20 bytes that a server puts after the IPv4 header of a reply for a bridge: a UDP header and the bridge header. |
 | Group | One listen port with its mode and its paths. Each path has an optional return IP. |
 | Port | The number in `-u SERVER:PORT` and in server `-p`. For UDP, it is the destination port. For ICMP, it is the Echo identifier. |
@@ -156,11 +156,12 @@ An ingress path has no return IP. The client also accepts a reply from the serve
 
 ### Bridges
 
-A bridge serves one server. A path through a bridge names the bridge address in place of the server address. Only a group with separate egress paths has bridges.
+A bridge passes the ingress on to one server. A path through a bridge names the bridge address in place of the server address. Only a group with separate egress paths has bridges.
 
 An ingress bridge carries the ingress of a path. The client sends to the bridge in the same way as to a server. The bridge changes the destination to its server, and it keeps the source, the port, and the ICMP identifier. It updates the IPv4 checksum and the UDP checksum. So the server gets the same packet as from the client.
 
-An egress bridge carries the replies of an egress path. The server rewrites each reply as for an egress route, with the bridge address as the server address of the path. A direct reply thus comes from the bridge address. Then the server puts the reply in the bridge wrapper:
+An egress bridge carries the replies of an egress path. The server rewrites each reply as for an egress route, with the bridge address as the server address of the path. A direct reply thus comes from the bridge address. Then the server puts the reply in the bridge wrapper. An egress bridge has three forms, and they differ in the return IP of the path and in the source of the wrapper. An egress route with a bridge suffix, `SERVER:PORT/t via X bridge B`, builds the reply as for an egress route with that via. The bridge then sends the reply with the source that the via needs. An egress bridge with a via, `B:PORT/t via X`, builds the direct reply from the bridge address. The server sends the wrapper from X or from a member of the pool. An egress bridge without a via sends the wrapper from the server address, and the bridge sends the reply from its own address.
+
 
 | Part | Size | Content |
 | --- | ---: | --- |
@@ -170,11 +171,11 @@ An egress bridge carries the replies of an egress path. The server rewrites each
 | Inner header | 8 | The UDP or ICMP header of the reply, with no change. |
 | Payload | n | The WireGuard message or the control frame, with no change. |
 
-The transport header and the payload do not move. So the inner checksum stays valid, and a partial checksum stays partial. The server sends the wrapped reply from the source address of its route to the bridge, through the interface of that route. If the wrapped reply does not fit the MTU of that interface, the server drops it and counts reason 25. In the egress repeater mode, the server removes the wrapper again after the copy of an egress bridge. So the next egress path gets the reply as it was.
+The transport header and the payload do not move. So the inner checksum stays valid, and a partial checksum stays partial. The server sends the wrapped reply to the bridge through the interface of its route. The source of the wrapper is the source address of the route. With a bridge via, it is the member. If the wrapped reply does not fit the MTU of that interface, the server drops it and counts reason 25. In the egress repeater mode, the server removes the wrapper again after the copy of an egress bridge. So the next egress path gets the reply as it was.
 
 The bridge program handles each packet to an address of the bridge host and a port of the bridge:
 
-1. A UDP payload that starts with the bridge magic is a wrapped reply. It must come from the server or from an `allow` range, or the program counts reason 23. It must have version 1, UDP or ICMP inside, and a MUP packet inside, or the program counts reason 24. The program removes the wrapper and writes the inner protocol and addresses into the IPv4 header.
+1. A UDP payload that starts with the bridge magic is a wrapped reply. It must come from the server, from an `allow` range, or from a member that an `allow` range holds, or the program counts reason 23. It must have version 1, UDP or ICMP inside, and a MUP packet inside, or the program counts reason 24. The program removes the wrapper and writes the inner protocol and addresses into the IPv4 header.
 2. Any other MUP packet goes to the server, except a packet from the server itself. A MUP packet is a control frame, or a WireGuard message with a token, in UDP or in an ICMP Echo Request.
 3. Every other packet goes on to the kernel. So a normal ping to the bridge still gets its reply.
 
@@ -310,6 +311,8 @@ An ingress path of a group with egress paths sends one EGRESS_REGISTER frame for
 
 A EGRESS_REGISTER with flag bit 4 declares an egress bridge, and its egress server field holds the bridge address. A client does not know which server a bridge serves. So each server keeps an egress bridge without the address check and without the port check, and it probes the bridge.
 
+A EGRESS_REGISTER with flag bits 4 and 6 declares an egress bridge with a via. The return IP field holds the via, or the base of the return pool, and it applies to the leg from the server to the bridge. A server before v0.5.0 refuses the frame.
+
 The server sends each REGISTER_ACK directly, and also on every egress path of the client, with the next member of a pool each time. One ACK makes the ingress path healthy, on any of these ways. So an ingress path stays healthy, even with no packet back on its own flow.
 
 ### Ingress reflect registration
@@ -337,7 +340,7 @@ The control frame is 48 bytes long, and all integers are big-endian.
 | 4 | 1 | version | 1. |
 | 5 | 1 | type | 1 is REGISTER, 2 is REGISTER_ACK, 3 is PROBE, 4 is PROBE_REPLY, and 7 is EGRESS_REGISTER. Types 5 and 6 are reserved. |
 | 6 | 1 | transport | 0 is UDP and 1 is ICMP. |
-| 7 | 1 | flags | Bit 0 means that the return IP field holds one return IP. Bit 1 means that it holds the base of a return pool. Bit 2 selects the per-packet balance mode of a pool. Bit 3 marks a PROBE or a PROBE_REPLY of an egress path, and its path ID is then an egress path ID. Bit 4 marks a EGRESS_REGISTER of an egress bridge. Bit 5 marks a REGISTER whose return IP is the via of an ingress reflect path. The other bits must be zero. |
+| 7 | 1 | flags | Bit 0 means that the return IP field holds one return IP. Bit 1 means that it holds the base of a return pool. Bit 2 selects the per-packet balance mode of a pool. Bit 3 marks a PROBE or a PROBE_REPLY of an egress path, and its path ID is then an egress path ID. Bit 4 marks a EGRESS_REGISTER of an egress bridge. Bit 6 marks a EGRESS_REGISTER of an egress bridge whose return IP or pool applies to the leg from the server to the bridge. Bit 6 needs bit 4 and bit 0 or bit 1. Bit 5 marks a REGISTER whose return IP is the via of an ingress reflect path. The other bits must be zero. |
 | 8 | 2 | length | 48. |
 | 10 | 2 | status | 0 is OK. 7 is NO_REFLECTOR: the return pool of the path has no healthy reflector. Values 1 to 6 name errors, but the server does not send them. |
 | 12 | 2 | path ID | 0 to 7, the slot of the path in the client. |
@@ -362,9 +365,9 @@ A dead path becomes unhealthy about 5 to 15 seconds after it fails. The delay de
 
 ### Egress path health
 
-Every 2 seconds, the server sends a PROBE on each egress path of each client, in the same way as a reply. A path with a pool gets one probe through each member. The client answers each probe with a PROBE_REPLY on its healthy ingress path with the lowest priority. The reply travels like the REGISTER of that path. If no ingress path is healthy, it answers on every ingress path. The reply names the source of the probe, which is the member of a pool.
+Every 2 seconds, the server sends a PROBE on each egress path of each client, in the same way as a reply. A path with a pool gets one probe through each member. The client answers each probe with a PROBE_REPLY on its healthy ingress path with the lowest priority. The reply travels like the REGISTER of that path. If no ingress path is healthy, it answers on every ingress path. The reply names the source of the probe, which is the member of a pool. On a path with flag bit 6, the client sees only the bridge address as the source. So the PROBE names its member in the return IP field, with flag bit 0, and the client copies that member into the PROBE_REPLY.
 
-An egress path, or a member of its pool, is healthy for 6 seconds after its latest reply. A new egress path is healthy for its first 6 seconds. A new egress bridge is unhealthy until its first reply, because the bridge drops the wrapped probes of the other servers. The members of a pool come from the sweeps of the pool, but each egress path keeps its own member health. So a member that answers the ping of the server but does not reach the client carries no replies of that client.
+An egress path, or a member of its pool, is healthy for 6 seconds after its latest reply. A new egress path is healthy for its first 6 seconds. A new egress bridge is unhealthy until its first reply, because the bridge drops the wrapped probes of servers that it does not allow. The members of a pool come from the sweeps of the pool, but each egress path keeps its own member health. So a member that answers the ping of the server but does not reach the client carries no replies of that client.
 
 The client shows an egress path as healthy while its probes arrive. It shows an egress path as in use while the program accepts replies on it.
 
@@ -601,7 +604,7 @@ A host can spoof the source address of a registered client. That host can then r
 
 The duplicate cache is a filter for repeater copies, not a replay defense. WireGuard provides replay protection for its transport data.
 
-A bridge keeps the source of each ingress packet, and it sends only MUP packets and only to its server. So the ingress through a bridge gives no host a new way to spoof an address. On the egress, a bridge sends packets with any source. So it takes wrapped replies only from its server and its `allow` ranges, and only with a MUP packet inside. A host that spoofs the address of the server can still make the bridge send MUP packets to any address.
+A bridge keeps the source of each ingress packet, and it sends only MUP packets and only to its server. So the ingress through a bridge gives no host a new way to spoof an address. On the egress, a bridge sends packets with any source. So it takes wrapped replies only from its server and its `allow` ranges, and only with a MUP packet inside. With a bridge via, an `allow` range holds the members of the via. A host that spoofs the address of the server can still make the bridge send MUP packets to any address.
 
 ## Limits
 

@@ -59,3 +59,71 @@ func TestBridgeSettingsEncoding(t *testing.T) {
 		t.Fatal("a bridge without ports encoded")
 	}
 }
+
+func TestEncodeEgressPathEntryOfABridgeVia(t *testing.T) {
+	t.Parallel()
+
+	client := ClientKey{AdvertisedIP: netip.MustParseAddr("192.0.2.10"), InstanceNonce: 7}
+	entry := EgressPathEntry{
+		Client: client, PathID: 1, Server: netip.MustParseAddr("192.0.2.80"), ServerPort: 9300,
+		Transport: protocol.TransportUDP, Ifindex: 3, ReturnIP: netip.MustParseAddr("198.51.100.9"),
+		Bridge: true, BridgeVia: true, LocalIP: netip.MustParseAddr("203.0.113.5"),
+	}
+	_, value, err := encodeEgressPathEntry(entry)
+	if err != nil {
+		t.Fatalf("encodeEgressPathEntry: %v", err)
+	}
+	if value.Flags != protocol.ControlFlagReturnIP|protocol.ControlFlagBridge|protocol.ControlFlagBridgeVia ||
+		ipv4FromWord(value.ReturnIp) != entry.ReturnIP || ipv4FromWord(value.ServerIp) != entry.Server {
+		t.Fatalf("value = %#v", value)
+	}
+
+	pool := entry
+	pool.ReturnIP = netip.Addr{}
+	pool.Pool, pool.PerPacket = true, true
+	pool.Members = []netip.Addr{netip.MustParseAddr("198.51.100.40"), netip.MustParseAddr("198.51.100.41")}
+	if _, value, err = encodeEgressPathEntry(pool); err != nil {
+		t.Fatalf("encodeEgressPathEntry of a pool: %v", err)
+	}
+	if value.Flags != protocol.ControlFlagReturnPool|protocol.ControlFlagBalancePerPacket|protocol.ControlFlagBridge|protocol.ControlFlagBridgeVia ||
+		value.Count != 2 {
+		t.Fatalf("pool value = %#v", value)
+	}
+
+	noBridge := entry
+	noBridge.Bridge = false
+	noVia := entry
+	noVia.ReturnIP = netip.Addr{}
+	for name, bad := range map[string]EgressPathEntry{"without a bridge": noBridge, "without a return IP or pool": noVia} {
+		if _, _, err := encodeEgressPathEntry(bad); err == nil {
+			t.Fatalf("a bridge via %s encoded", name)
+		}
+	}
+}
+
+func TestClientEgressPathOfABridgeViaExpectsTheBridge(t *testing.T) {
+	t.Parallel()
+
+	path := config.Path{
+		Server: netip.MustParseAddr("192.0.2.80"), ServerPort: 9300, Transport: protocol.TransportUDP,
+		ReturnIP: netip.MustParseAddr("198.51.100.0"), ReturnPrefix: 28, Bridge: true, BridgeVia: true,
+	}
+	settings := EgressPathFromConfig(path)
+	if settings.Server != path.Server || settings.ReturnIP.IsValid() || settings.ReturnPrefix != 0 {
+		t.Fatalf("settings = %#v, want the bridge address without a return IP", settings)
+	}
+	encoded, err := encodeClientEgressPath(2, settings)
+	if err != nil {
+		t.Fatalf("encodeClientEgressPath: %v", err)
+	}
+	if encoded.Flags != 0 || encoded.ReturnIp != 0 || encoded.Prefix != 0 || ipv4FromWord(encoded.ServerIp) != path.Server {
+		t.Fatalf("encoded = %#v, want the bridge address only", encoded)
+	}
+
+	// A bridge path without BridgeVia keeps its via, because the bridge emits
+	// the reflected reply.
+	path.BridgeVia = false
+	if settings := EgressPathFromConfig(path); settings.ReturnIP != path.ReturnIP || settings.ReturnPrefix != 28 {
+		t.Fatalf("settings = %#v, want the pool", settings)
+	}
+}

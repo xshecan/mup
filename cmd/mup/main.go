@@ -23,7 +23,7 @@ const usage = `usage:
   mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP]" [-u ...] -s CLIENT_IP
              [-r RETURN_IP] [--mode failover|balancer|repeater] [--control-socket PATH]
   mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp" [--ingress ...]
-             --egress "SERVER_IP:PORT/udp|icmp [via RETURN_IP]" [--egress ...] -s CLIENT_IP
+             --egress "SERVER_IP:PORT/udp|icmp [via RETURN_IP [bridge BRIDGE_IP]]" [--egress ...] -s CLIENT_IP
              [--ingress-bridge "BRIDGE_IP[%IFACE]:PORT[-LAST]/udp|icmp"] [--ingress-bridge ...]
              [--egress-bridge "BRIDGE_IP:PORT/udp|icmp [via RETURN_IP]"] [--egress-bridge ...]
              [--ingress-mode MODE] [--egress-mode MODE] [--control-socket PATH]
@@ -235,19 +235,29 @@ func parseSplitClientArgs(listenPort uint16, advertised netip.Addr, controlSocke
 		flagName string
 		raws     []string
 		bridge   bool
+		egress   bool
 		into     *[]config.Path
 	}{
-		{"ingress", split.ingress, false, &group.Paths},
-		{"ingress-bridge", split.ingressBridges, true, &group.Paths},
-		{"egress", split.egress, false, &group.EgressPaths},
-		{"egress-bridge", split.egressBridges, true, &group.EgressPaths},
+		{"ingress", split.ingress, false, false, &group.Paths},
+		{"ingress-bridge", split.ingressBridges, true, false, &group.Paths},
+		{"egress", split.egress, false, true, &group.EgressPaths},
+		{"egress-bridge", split.egressBridges, true, true, &group.EgressPaths},
 	} {
 		for i, raw := range part.raws {
 			path, err := config.ParsePath(raw)
 			if err != nil {
 				return nil, fmt.Errorf("client --%s[%d]: %w", part.flagName, i, err)
 			}
-			path.Bridge = part.bridge
+			// An egress path follows the rules of the file, so a bridge
+			// suffix and a bridge entry with a via mean the same here.
+			if part.egress {
+				path, err = config.NormalizeEgressPath(path, part.bridge)
+				if err != nil {
+					return nil, fmt.Errorf("client --%s[%d]: %w", part.flagName, i, err)
+				}
+			} else {
+				path.Bridge = part.bridge
+			}
 			*part.into = append(*part.into, path)
 		}
 	}

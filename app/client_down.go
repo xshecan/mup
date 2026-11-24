@@ -194,6 +194,9 @@ func egressRegisterFrame(registration pathRegistration, slot uint16, path config
 	if path.Bridge {
 		frame.Flags |= protocol.ControlFlagBridge
 	}
+	if path.BridgeVia {
+		frame.Flags |= protocol.ControlFlagBridgeVia
+	}
 	packet := make([]byte, protocol.ControlFrameLength)
 	if err := protocol.EncodeControlFrame(packet, frame); err != nil {
 		return nil, err
@@ -201,9 +204,16 @@ func egressRegisterFrame(registration pathRegistration, slot uint16, path config
 	return packet, nil
 }
 
-// egressProbeReplyFrame answers a probe of an egress path. It names the source that
-// the probe came from, which is the reflector of a reflected path.
+// egressProbeReplyFrame answers a probe of an egress path. It names the return IP
+// of the probe when the probe has one. The server puts the member there for a
+// bridge via path, because the client sees only the bridge address. Otherwise
+// it names the source that the probe came from, which is the reflector of a
+// reflected path.
 func egressProbeReplyFrame(registration pathRegistration, probe egressProbe, path config.Path) ([]byte, error) {
+	named := probe.source
+	if probe.frame.Flags&protocol.ControlFlagReturnIP != 0 && probe.frame.ReturnIP.IsValid() {
+		named = probe.frame.ReturnIP
+	}
 	frame := protocol.ControlFrame{
 		Type:          protocol.ControlProbeReply,
 		Transport:     path.Transport,
@@ -214,7 +224,7 @@ func egressProbeReplyFrame(registration pathRegistration, probe egressProbe, pat
 		ServerPort:    path.ServerPort,
 		InstanceNonce: registration.nonce,
 		AdvertisedIP:  registration.advertisedIP,
-		ReturnIP:      probe.source,
+		ReturnIP:      named,
 	}
 	packet := make([]byte, protocol.ControlFrameLength)
 	if err := protocol.EncodeControlFrame(packet, frame); err != nil {
@@ -224,12 +234,15 @@ func egressProbeReplyFrame(registration pathRegistration, probe egressProbe, pat
 }
 
 // egressSourceMatches reports whether a packet source and port fit an egress path:
-// the server of a direct path, its return IP, or an address in its pool.
+// the server of a direct path, its return IP, or an address in its pool. The via
+// of a bridge via path is on the leg to the bridge, so its source is the bridge.
 func egressSourceMatches(path config.Path, source netip.Addr, transport protocol.TransportID, port uint16) bool {
 	if path.Transport != transport || path.ServerPort != port {
 		return false
 	}
 	switch {
+	case path.BridgeVia:
+		return path.Server == source
 	case path.IsPool():
 		return netip.PrefixFrom(path.ReturnIP, int(path.ReturnPrefix)).Contains(source)
 	case path.ReturnIP.IsValid():

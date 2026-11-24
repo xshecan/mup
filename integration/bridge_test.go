@@ -14,10 +14,11 @@ import (
 )
 
 // TestPrivilegedBridge runs a group whose ingress path and egress path both go
-// through a bridge at 10.210.1.4. The egress path reflects through 10.210.1.3,
-// so its replies need a spoofed source. The switch drops every packet of the
-// server with another source, so only the bridge can send them. When the
-// bridge stops, both paths become unhealthy, and they come back with it.
+// through a bridge at 10.210.1.4. The egress path is a route with a bridge suffix
+// that reflects through 10.210.1.3, so the bridge spoofs the source of its
+// replies. The switch drops every packet of the server with another source, so
+// only the bridge can send them. When the bridge stops, both paths become
+// unhealthy, and they come back with it.
 func TestPrivilegedBridge(t *testing.T) {
 	requirePrivilegedLinux(t)
 	binaryPath := buildDaemon(t)
@@ -81,8 +82,8 @@ func TestPrivilegedBridge(t *testing.T) {
       ingress:
         bridges: [10.210.1.4:5000/udp]
       egress:
-        bridges:
-          - "10.210.1.4:5010/icmp via 10.210.1.3"
+        routes:
+          - "10.210.1.2:5010/icmp via 10.210.1.3 bridge 10.210.1.4"
 `, clientSocket)
 	if err := os.WriteFile(configuration, []byte(content), 0o600); err != nil {
 		t.Fatalf("write client configuration: %v", err)

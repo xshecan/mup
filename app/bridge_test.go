@@ -32,9 +32,11 @@ func TestBridgePathRuntimeChanges(t *testing.T) {
 	if _, err := controller.AddBridge("5.6.7.8:9601/udp", 51821); statusOf(err) != http.StatusConflict {
 		t.Fatalf("AddBridge in a paired group error = %v", err)
 	}
-	egress, err := controller.AddEgressBridge("5.6.7.8:9700/icmp via 203.0.113.0/28", 51820)
+	// The bridge sends the replies from the pool, so the egress path is a
+	// route with a bridge suffix.
+	egress, err := controller.AddEgressPath("198.51.100.1:9700/icmp via 203.0.113.0/28 bridge 5.6.7.8", 51820)
 	if err != nil {
-		t.Fatalf("AddEgressBridge: %v", err)
+		t.Fatalf("AddEgressPath: %v", err)
 	}
 	if !egress.Bridge || egress.Direction != directionEgress || egress.ID != 2 {
 		t.Fatalf("egress bridge = %#v", egress)

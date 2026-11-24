@@ -26,7 +26,7 @@ var (
 )
 
 // allControlFlags holds every defined control flag bit.
-const allControlFlags = ControlFlagReturnIP | ControlFlagReturnPool | ControlFlagBalancePerPacket | ControlFlagEgressPath | ControlFlagBridge | ControlFlagIngressReflect
+const allControlFlags = ControlFlagReturnIP | ControlFlagReturnPool | ControlFlagBalancePerPacket | ControlFlagEgressPath | ControlFlagBridge | ControlFlagIngressReflect | ControlFlagBridgeVia
 
 // MaxEgressMode is the largest egress mode of a EGRESS_REGISTER: 0 is failover, 1
 // is balancer, and 2 is repeater.
@@ -180,6 +180,10 @@ func validateControlFrame(frame ControlFrame) error {
 		return ErrControlFlags
 	}
 	if frame.Flags&ControlFlagBridge != 0 && frame.Type != ControlEgressRegister {
+		return ErrControlFlags
+	}
+	if frame.Flags&ControlFlagBridgeVia != 0 &&
+		(frame.Flags&ControlFlagBridge == 0 || frame.Flags&(ControlFlagReturnIP|ControlFlagReturnPool) == 0) {
 		return ErrControlFlags
 	}
 	if frame.Flags&ControlFlagIngressReflect != 0 {

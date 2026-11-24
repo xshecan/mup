@@ -83,6 +83,12 @@ const (
 	// the reflected ingress from that source, and it does not reflect the
 	// replies of the path.
 	ControlFlagIngressReflect uint8 = 1 << 5
+	// ControlFlagBridgeVia marks an EGRESS_REGISTER of an egress path through a
+	// MUP bridge whose return IP or pool applies to the leg from the server to
+	// the bridge. The server sends the wrapped reply with the member as its
+	// source, and the bridge sends the reply from its own address. It needs
+	// ControlFlagBridge and ControlFlagReturnIP or ControlFlagReturnPool.
+	ControlFlagBridgeVia uint8 = 1 << 6
 )
 
 type DropReason uint32

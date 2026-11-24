@@ -253,6 +253,34 @@ func TestEgressPathFlagAndModeRules(t *testing.T) {
 			frame.EgressServer = netip.Addr{}
 			frame.Flags = ControlFlagBridge
 		}, err: ErrControlFlags},
+		{name: "bridge via with a return IP", alter: func(frame *ControlFrame) {
+			frame.Flags = ControlFlagBridge | ControlFlagBridgeVia | ControlFlagReturnIP
+			frame.ReturnIP = netip.MustParseAddr("198.51.100.7")
+		}},
+		{name: "bridge via with a return pool", alter: func(frame *ControlFrame) {
+			frame.Flags = ControlFlagBridge | ControlFlagBridgeVia | ControlFlagReturnPool | ControlFlagBalancePerPacket
+			frame.ReturnIP = netip.MustParseAddr("198.51.100.0")
+			frame.ReturnPrefix = 28
+		}},
+		{name: "bridge via without the bridge flag", alter: func(frame *ControlFrame) {
+			frame.Flags = ControlFlagBridgeVia | ControlFlagReturnIP
+			frame.ReturnIP = netip.MustParseAddr("198.51.100.7")
+		}, err: ErrControlFlags},
+		{name: "bridge via without a return IP or pool", alter: func(frame *ControlFrame) {
+			frame.Flags = ControlFlagBridge | ControlFlagBridgeVia
+		}, err: ErrControlFlags},
+		{name: "bridge via on a register", alter: func(frame *ControlFrame) {
+			frame.Type = ControlRegister
+			frame.EgressServer = netip.Addr{}
+			frame.Flags = ControlFlagBridgeVia | ControlFlagReturnIP
+			frame.ReturnIP = netip.MustParseAddr("198.51.100.7")
+		}, err: ErrControlFlags},
+		{name: "bridge via on a probe", alter: func(frame *ControlFrame) {
+			frame.Type = ControlProbe
+			frame.EgressServer = netip.Addr{}
+			frame.Flags = ControlFlagBridge | ControlFlagBridgeVia | ControlFlagReturnIP
+			frame.ReturnIP = netip.MustParseAddr("198.51.100.7")
+		}, err: ErrControlFlags},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -263,5 +291,67 @@ func TestEgressPathFlagAndModeRules(t *testing.T) {
 				t.Fatalf("EncodeControlFrame error = %v, want %v", err, tt.err)
 			}
 		})
+	}
+}
+
+func TestBridgeViaEgressRegisterRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	want := ControlFrame{
+		Type:          ControlEgressRegister,
+		Transport:     TransportUDP,
+		Flags:         ControlFlagBridge | ControlFlagBridgeVia | ControlFlagReturnIP,
+		PathID:        1,
+		ListenPort:    51820,
+		ServerPort:    9300,
+		AdvertisedIP:  netip.MustParseAddr("192.0.2.10"),
+		ReturnIP:      netip.MustParseAddr("198.51.100.7"),
+		InstanceNonce: 7,
+		Sequence:      4,
+		LeaseSeconds:  30,
+		EgressServer:  netip.MustParseAddr("192.0.2.80"),
+	}
+	buf := make([]byte, ControlFrameLength)
+	if err := EncodeControlFrame(buf, want); err != nil {
+		t.Fatalf("EncodeControlFrame: %v", err)
+	}
+	got, err := DecodeControlFrame(buf)
+	if err != nil {
+		t.Fatalf("DecodeControlFrame: %v", err)
+	}
+	if got != want {
+		t.Fatalf("decoded frame = %#v, want %#v", got, want)
+	}
+}
+
+// The server puts the member that answers an egress path in the return IP of
+// its PROBE, and the client echoes it in the PROBE_REPLY.
+func TestEgressProbeWithAReturnIPRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	for _, frameType := range []ControlType{ControlProbe, ControlProbeReply} {
+		want := ControlFrame{
+			Type:          frameType,
+			Transport:     TransportICMP,
+			Flags:         ControlFlagEgressPath | ControlFlagReturnIP,
+			PathID:        2,
+			ListenPort:    51820,
+			ServerPort:    9300,
+			AdvertisedIP:  netip.MustParseAddr("192.0.2.10"),
+			ReturnIP:      netip.MustParseAddr("198.51.100.40"),
+			InstanceNonce: 7,
+			Sequence:      5,
+		}
+		buf := make([]byte, ControlFrameLength)
+		if err := EncodeControlFrame(buf, want); err != nil {
+			t.Fatalf("type %d: EncodeControlFrame: %v", frameType, err)
+		}
+		got, err := DecodeControlFrame(buf)
+		if err != nil {
+			t.Fatalf("type %d: DecodeControlFrame: %v", frameType, err)
+		}
+		if got != want {
+			t.Fatalf("type %d: decoded frame = %#v, want %#v", frameType, got, want)
+		}
 	}
 }

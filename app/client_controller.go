@@ -687,7 +687,10 @@ func (c *clientController) addEgressPath(raw string, listenPort uint16, bridge b
 	if err != nil {
 		return api.Path{}, badRequest(err)
 	}
-	path.Bridge = bridge
+	path, err = config.NormalizeEgressPath(path, bridge)
+	if err != nil {
+		return api.Path{}, badRequest(err)
+	}
 	if err := path.ValidateEgress(); err != nil {
 		return api.Path{}, badRequest(err)
 	}
@@ -1140,6 +1143,7 @@ func (c *clientController) egressPathLocked(slot int, seen [dataplane.MaxEgressP
 		ID:         slot,
 		Direction:  directionEgress,
 		Bridge:     egress.path.Bridge,
+		BridgeVia:  egress.path.BridgeVia,
 		ListenPort: egress.group.settings.ListenPort,
 		Server:     egress.path.Server.String(),
 		Port:       egress.path.ServerPort,

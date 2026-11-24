@@ -332,6 +332,59 @@ func TestParseArgsClientBridges(t *testing.T) {
 	}
 }
 
+func TestParseArgsClientEgressBridgesMatchTheFile(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "mup.yaml")
+	content := `client:
+  advertise: 160.119.74.74
+  servers:
+    - port: 51820
+      ingress:
+        routes: [46.102.130.95:9000/icmp]
+      egress:
+        routes:
+          - 46.102.130.95:9201/udp via 87.107.117.9 bridge 5.6.7.8
+        bridges:
+          - 5.6.7.8:9202/icmp via 87.107.117.192/28
+          - 5.6.7.8:9203/udp
+`
+	if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	fromFile, err := config.Load(file)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	fromFlags, err := parseArgs([]string{
+		"client", "-p", "51820", "-s", "160.119.74.74",
+		"--ingress", "46.102.130.95:9000/icmp",
+		"--egress", "46.102.130.95:9201/udp via 87.107.117.9 bridge 5.6.7.8",
+		"--egress-bridge", "5.6.7.8:9202/icmp via 87.107.117.192/28",
+		"--egress-bridge", "5.6.7.8:9203/udp",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	want, got := fromFile.Client.Groups[0].EgressPaths, fromFlags.Client.Groups[0].EgressPaths
+	if len(got) != len(want) {
+		t.Fatalf("egress paths = %#v, the file gives %#v", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("egress path %d = %#v, the file gives %#v", index, got[index], want[index])
+		}
+	}
+	if !got[0].Bridge || got[0].BridgeVia || !got[1].BridgeVia || got[2].BridgeVia {
+		t.Fatalf("egress paths = %#v, want a bridge that reflects, a bridge via, and a plain bridge", got)
+	}
+	_, err = parseArgs([]string{
+		"client", "-p", "51820", "-s", "160.119.74.74",
+		"--ingress", "46.102.130.95:9000/icmp", "--egress", "46.102.130.95:9201/udp bridge 5.6.7.8",
+	})
+	if err == nil || !strings.Contains(err.Error(), "needs a via") || !strings.Contains(err.Error(), "--egress[0]") {
+		t.Fatalf("parseArgs with a bridge suffix and no via error = %v", err)
+	}
+}
+
 func TestParseArgsBridge(t *testing.T) {
 	appConfig, err := parseArgs([]string{"bridge", "-s", "46.102.130.95", "-p", "9000-9399", "-a", "46.102.130.0/24", "--control-socket", ""})
 	if err != nil {

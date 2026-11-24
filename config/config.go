@@ -222,6 +222,59 @@ func (d Direction) all() []Path {
 	return paths
 }
 
+// allEgress returns the paths of an egress direction. NormalizeEgressPath turns
+// each route and each bridge entry into its path, and the routes come before
+// the bridge entries.
+func (d Direction) allEgress() ([]Path, error) {
+	paths := make([]Path, 0, len(d.Paths)+len(d.Bridges))
+	for _, route := range d.Paths {
+		path, err := NormalizeEgressPath(route, false)
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, path)
+	}
+	for _, bridge := range d.Bridges {
+		path, err := NormalizeEgressPath(bridge, true)
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, path)
+	}
+	return paths, nil
+}
+
+// NormalizeEgressPath applies the rules of the configuration file to one parsed
+// egress path. A route with a bridge suffix becomes the path of a bridge that
+// spoofs the reply from the via, and the suffix needs a via. A bridge entry
+// is a bridge path, and a bridge entry with a via is a BridgeVia path, because
+// the server sends its replies to the bridge from the via.
+func NormalizeEgressPath(path Path, bridgeEntry bool) (Path, error) {
+	if bridgeEntry {
+		path.Bridge = true
+		path.BridgeVia = path.ReturnIP.IsValid()
+		return path, nil
+	}
+	if !path.ProxyBridge.IsValid() {
+		return path, nil
+	}
+	if !path.ReturnIP.IsValid() {
+		return Path{}, fmt.Errorf("egress route %s: a bridge suffix needs a via, because the bridge spoofs the reply (a bridge that sends from its own address belongs in bridges)", path)
+	}
+	return Path{
+		Server:       path.ProxyBridge,
+		ServerPort:   path.ServerPort,
+		LastPort:     path.LastPort,
+		Transport:    path.Transport,
+		Interface:    path.Interface,
+		ReturnIP:     path.ReturnIP,
+		ReturnPrefix: path.ReturnPrefix,
+		Balance:      path.Balance,
+		Bridge:       true,
+		NamedServer:  path.Server,
+	}, nil
+}
+
 // Split reports whether the group has its own egress paths.
 func (g Group) Split() bool {
 	return len(g.EgressPaths) > 0
@@ -260,7 +313,11 @@ func (g *Group) UnmarshalYAML(unmarshal func(any) error) error {
 	g.Mode = raw.Ingress.Mode
 	g.Paths = raw.Ingress.all()
 	g.EgressMode = raw.Egress.Mode
-	g.EgressPaths = raw.Egress.all()
+	egress, err := raw.Egress.allEgress()
+	if err != nil {
+		return fmt.Errorf("server %d: %w", raw.ListenPort, err)
+	}
+	g.EgressPaths = egress
 	return nil
 }
 
@@ -375,6 +432,10 @@ func (g Group) validate() error {
 // If Bridge is set, Server is the address of a MUP bridge. An ingress bridge passes
 // the packets of the path to its server. An egress bridge sends the replies that
 // a server wraps for it, and the address of the path is the bridge address.
+// A bridge from an egress route with a bridge suffix has a via, and the bridge
+// sends the replies from it. NamedServer is the server of that route.
+// An egress bridge entry with a via is a BridgeVia path, and the server sends
+// the wrapped replies to the bridge from the via.
 //
 // If LastPort is nonzero, the path has the server ports from ServerPort to
 // LastPort. It starts on ServerPort, and the client moves it to another port
@@ -389,6 +450,14 @@ type Path struct {
 	ReturnPrefix uint8
 	Balance      Balance
 	Bridge       bool
+	// BridgeVia is set on an egress bridge entry that has a via. The server sends
+	// the wrapped reply to the bridge with the via as the source address, and the
+	// bridge sends the reply to the client from its own address.
+	BridgeVia bool
+	// NamedServer is the server that an egress route with a bridge suffix named.
+	// The route is a bridge path with the bridge in Server. NamedServer is for
+	// the reader and for String.
+	NamedServer netip.Addr
 	// ProxyBridge is set on an ingress reflect route that a bridge emits. The client
 	// reflects the ingress to Server through the via, but it cannot send the
 	// spoofed packet, so it wraps the packet for the bridge at ProxyBridge, and
@@ -460,9 +529,13 @@ func (p Path) SharesServerPort(other Path) bool {
 }
 
 // String formats the path as SERVER[%IFACE]:PORT[-LAST]/TRANSPORT
-// [via RETURN_IP], the form that ParsePath accepts.
+// [via RETURN_IP], the form that ParsePath accepts. A bridge that spoofs the
+// last leg prints as the egress route that named it, with the bridge suffix.
 func (p Path) String() string {
 	host := p.Server.String()
+	if p.NamedServer.IsValid() {
+		host = p.NamedServer.String()
+	}
 	if p.Interface != "" {
 		host += "%" + p.Interface
 	}
@@ -474,6 +547,8 @@ func (p Path) String() string {
 	}
 	if p.ProxyBridge.IsValid() {
 		text += " bridge " + p.ProxyBridge.String()
+	} else if p.NamedServer.IsValid() {
+		text += " bridge " + p.Server.String()
 	}
 	return text
 }
@@ -638,6 +713,9 @@ func (b Bridge) Validate() error {
 // ParsePath parses SERVER[%IFACE]:PORT/udp or SERVER[%IFACE]:PORT/icmp, where
 // PORT can be a range FIRST-LAST. It accepts an optional "via RETURN_IP", or
 // "via POOL_CIDR" with an optional "per-peer" or "per-packet" after the pool.
+// A trailing "bridge BRIDGE_IP" needs a via. On an ingress route it makes the
+// bridge emit the reflected ingress. On an egress route it makes the bridge
+// spoof the reply that the server wraps for it. Other paths refuse the suffix.
 func ParsePath(raw string) (Path, error) {
 	fields := strings.Fields(raw)
 	var returnIP netip.Addr

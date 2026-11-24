@@ -1567,6 +1567,7 @@ static __always_inline int down_send_core(struct __sk_buff *skb,
 	__u16 listen_port = meta & 0xffff;
 	__u32 cursor_key = 0;
 	__be32 member = 0;
+	__be32 wrap_source;
 	__be32 source_ip;
 	__be32 destination_ip;
 	__u32 reason = MUP_DROP_NONE;
@@ -1633,6 +1634,15 @@ static __always_inline int down_send_core(struct __sk_buff *skb,
 	} else if (flags & MUP_FLAG_RETURN_IP) {
 		member = mapped->return_ip;
 	}
+	/*
+	 * A bridge path with MUP_FLAG_BRIDGE_VIA builds the direct reply from
+	 * the bridge address and wraps it from the member.
+	 */
+	wrap_source = mapped->local_ip;
+	if ((flags & MUP_FLAG_BRIDGE_VIA) && member) {
+		wrap_source = member;
+		member = 0;
+	}
 
 	if (transport == MUP_TRANSPORT_UDP) {
 		source_ip = member ? member : mapped->server_ip;
@@ -1687,7 +1697,7 @@ static __always_inline int down_send_core(struct __sk_buff *skb,
 	 * the reply as it was.
 	 */
 	if (flags & MUP_FLAG_BRIDGE) {
-		reason = mup_bridge_wrap(skb, mapped->local_ip, mapped->server_ip,
+		reason = mup_bridge_wrap(skb, wrap_source, mapped->server_ip,
 					 server_port, ifindex);
 		if (reason == MUP_DROP_BRIDGE_SIZE)
 			goto fail;

@@ -264,3 +264,169 @@ func TestServerRepeaterUnwrapsAfterTheBridgeCopy(t *testing.T) {
 		t.Fatalf("BRIDGE_PACKET drops = %d", drops)
 	}
 }
+
+// egressBridgeViaCollection is egressReplyCollection with path 0 through a
+// bridge with BRIDGE_VIA, on the transport. One member is a return IP, and
+// more members are a pool.
+func egressBridgeViaCollection(t *testing.T, transport protocol.TransportID, perPacket bool, members ...netip.Addr) *ebpf.Collection {
+	t.Helper()
+	collection := egressReplyCollection(t, 0, 0b01)
+	client := mupClientKeyV1{AdvertisedIp: mustTestWord(t, ingressClient), InstanceNonce: 7}
+	path := mupDownPathV1{
+		ServerIp: mustTestWord(t, bridgeAddress), Ifindex: 1, ServerPort: 9300, Transport: uint8(transport),
+		Flags: protocol.ControlFlagBridge | protocol.ControlFlagBridgeVia, LocalIp: mustTestWord(t, bridgeServer),
+	}
+	if len(members) == 1 {
+		path.Flags |= protocol.ControlFlagReturnIP
+		path.ReturnIp = mustTestWord(t, members[0])
+	} else {
+		path.Flags |= protocol.ControlFlagReturnPool
+		if perPacket {
+			path.Flags |= protocol.ControlFlagBalancePerPacket
+		}
+		for index, member := range members {
+			path.Members[index] = mustTestWord(t, member)
+		}
+		path.Count = uint32(len(members))
+	}
+	if err := collection.Maps["server_down_paths"].Update(mupDownPathKeyV1{Client: client, PathId: 0}, path, ebpf.UpdateAny); err != nil {
+		t.Fatalf("update egress path: %v", err)
+	}
+	var icmpMask uint8
+	if transport == protocol.TransportICMP {
+		icmpMask = 0b01
+	}
+	if err := collection.Maps["server_down_groups"].Update(mupDownGroupKeyV1{Client: client, ListenPort: 51821}, mupDownGroupV1{
+		PathMask: 0b11, HealthyMask: 0b01, IcmpMask: icmpMask,
+	}, ebpf.UpdateAny); err != nil {
+		t.Fatalf("update egress group: %v", err)
+	}
+	return collection
+}
+
+// assertBridgeViaWrapper checks that a frame is a wrapper from the member to
+// the bridge on port 9300 with a zero UDP checksum, and returns the frame with
+// the inner packet.
+func assertBridgeViaWrapper(t *testing.T, frame []byte, member netip.Addr, protocolID uint8) []byte {
+	t.Helper()
+	ip := frame[14:]
+	if source, destination := netip.AddrFrom4([4]byte(ip[12:16])), netip.AddrFrom4([4]byte(ip[16:20])); ip[9] != protocol.IPProtocolUDP ||
+		source != member || destination != bridgeAddress || onesComplement(ip[:20], 0) != 0 {
+		t.Fatalf("outer header %x, want valid UDP from %s to %s", ip[:20], member, bridgeAddress)
+	}
+	if binary.BigEndian.Uint16(ip[20:22]) != 9300 || binary.BigEndian.Uint16(ip[22:24]) != 9300 ||
+		binary.BigEndian.Uint16(ip[24:26]) != binary.BigEndian.Uint16(ip[2:4])-20 || binary.BigEndian.Uint16(ip[26:28]) != 0 ||
+		!bytes.Equal(ip[28:32], []byte{0x4d, 0x42, 1, protocolID}) {
+		t.Fatalf("wrapper %x", ip[20:40])
+	}
+	inner, err := protocol.UnwrapBridge(ip[:binary.BigEndian.Uint16(ip[2:4])])
+	if err != nil {
+		t.Fatalf("UnwrapBridge: %v", err)
+	}
+	return append(bytes.Clone(frame[:14]), inner...)
+}
+
+// setReflectorCursor sets the per-packet cursor on every CPU, so the next
+// reply takes the same member wherever the test runs.
+func setReflectorCursor(t *testing.T, collection *ebpf.Collection, value uint32) {
+	t.Helper()
+	cpus, err := ebpf.PossibleCPU()
+	if err != nil {
+		t.Fatalf("possible CPUs: %v", err)
+	}
+	values := make([]uint32, cpus)
+	for index := range values {
+		values[index] = value
+	}
+	if err := collection.Maps["reflector_cursor"].Update(uint32(0), values, ebpf.UpdateAny); err != nil {
+		t.Fatalf("update reflector cursor: %v", err)
+	}
+}
+
+// With BRIDGE_VIA, the server applies the return IP to the leg to the bridge.
+// The wrapper leaves from the return IP, and the bridge gets the direct reply
+// from its own address.
+func TestServerWrapsTheReplyOfABridgeViaFromTheReturnIP(t *testing.T) {
+	collection := egressBridgeViaCollection(t, protocol.TransportUDP, false, egressMemberA)
+	defer collection.Close()
+	result, output := targetReply(t, collection)
+	if result != tcActOK && result != tcActRedirect {
+		t.Fatalf("return value = %d, want pass or redirect", int32(result))
+	}
+	inner := assertBridgeViaWrapper(t, output, egressMemberA, protocol.IPProtocolUDP)
+	assertUDPHeader(t, inner, bridgeAddress, ingressClient, 9300, 51821)
+}
+
+// A per-packet pool on a bridge via path spreads the wrappers over its
+// members, and the inner reply stays the direct reply from the bridge.
+func TestServerSpreadsTheWrappersOfABridgeViaOverThePool(t *testing.T) {
+	collection := egressBridgeViaCollection(t, protocol.TransportUDP, true, egressMemberA, egressMemberB)
+	defer collection.Close()
+	for cursor, member := range []netip.Addr{egressMemberA, egressMemberB} {
+		setReflectorCursor(t, collection, uint32(cursor))
+		result, output := targetReply(t, collection)
+		if result != tcActOK && result != tcActRedirect {
+			t.Fatalf("reply %d: return value = %d, want pass or redirect", cursor, int32(result))
+		}
+		inner := assertBridgeViaWrapper(t, output, member, protocol.IPProtocolUDP)
+		assertUDPHeader(t, inner, bridgeAddress, ingressClient, 9300, 51821)
+	}
+}
+
+// An ICMP bridge via path wraps an Echo Reply from the bridge address to the
+// client, not an Echo Request to the member.
+func TestServerWrapsAnEchoReplyOfAnICMPBridgeVia(t *testing.T) {
+	collection := egressBridgeViaCollection(t, protocol.TransportICMP, false, egressMemberA)
+	defer collection.Close()
+	result, output := targetReply(t, collection)
+	if result != tcActOK && result != tcActRedirect {
+		t.Fatalf("return value = %d, want pass or redirect", int32(result))
+	}
+	ip := assertBridgeViaWrapper(t, output, egressMemberA, protocol.IPProtocolICMP)[14:]
+	l4 := ip[20:binary.BigEndian.Uint16(ip[2:4])]
+	if source, destination := netip.AddrFrom4([4]byte(ip[12:16])), netip.AddrFrom4([4]byte(ip[16:20])); ip[9] != protocol.IPProtocolICMP ||
+		source != bridgeAddress || destination != ingressClient {
+		t.Fatalf("inner header %x, want ICMP from %s to %s", ip[:20], bridgeAddress, ingressClient)
+	}
+	if l4[0] != 0 || binary.BigEndian.Uint16(l4[4:6]) != 9300 {
+		t.Fatalf("ICMP type %d, identifier %d, want an Echo Reply with identifier 9300", l4[0], binary.BigEndian.Uint16(l4[4:6]))
+	}
+	if onesComplement(ip[:20], 0) != 0 || onesComplement(l4, 0) != 0 {
+		t.Fatal("a checksum is invalid")
+	}
+	if token := l4[9:12]; token[0] != 0 || token[1] != 0 || token[2] != 9 {
+		t.Fatalf("token bytes = %x, want 000009", token)
+	}
+}
+
+// The bridge takes the wrapper of a bridge via path when the member is in its
+// allow list, and sends the inner reply from its own address. It drops the
+// wrapper of a member that it does not allow.
+func TestBridgeUnwrapsTheReplyOfABridgeViaFromAnAllowedMember(t *testing.T) {
+	server := egressBridgeViaCollection(t, protocol.TransportUDP, false, egressMemberA)
+	defer server.Close()
+	result, wrapped := targetReply(t, server)
+	if result != tcActOK && result != tcActRedirect {
+		t.Fatalf("server return value = %d, want pass or redirect", int32(result))
+	}
+
+	bridge := bridgeCollection(t)
+	defer bridge.Close()
+	before := dropCount(t, bridge, protocol.DropBridgeSource)
+	result, _, err := bridge.Programs["mup_bridge_ingress"].Test(wrapped)
+	if err != nil {
+		t.Fatalf("program test: %v", err)
+	}
+	if after := dropCount(t, bridge, protocol.DropBridgeSource); result != tcActShot || after != before+1 {
+		t.Fatalf("return value = %d, BRIDGE_SOURCE drops %d to %d, want a drop", int32(result), before, after)
+	}
+
+	if err := bridge.Maps["bridge_allow"].Update(mupBridgeAllowKeyV1{Prefixlen: 32, Address: mustTestWord(t, egressMemberA)}, uint8(1), ebpf.UpdateAny); err != nil {
+		t.Fatalf("update bridge_allow: %v", err)
+	}
+	result, output := runBridge(t, bridge, wrapped)
+	if result != tcActRedirect {
+		t.Fatalf("return value = %d, want a redirect", int32(result))
+	}
+	assertUDPHeader(t, output, bridgeAddress, ingressClient, 9300, 51821)
+}

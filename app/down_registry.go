@@ -54,11 +54,13 @@ type egressKey struct {
 
 // serverEgressPath is one egress path of one client on this server. A path with
 // bridge goes through a MUP bridge: server is the bridge address, and the
-// wrapped replies leave from localIP.
+// wrapped replies leave from localIP. A path with bridgeVia as well sends the
+// wrapped replies from a member, and the bridge sends them from its own address.
 type serverEgressPath struct {
 	key        egressKey
 	listenPort uint16
 	bridge     bool
+	bridgeVia  bool
 	localIP    netip.Addr
 	server     netip.Addr
 	port       uint16
@@ -80,12 +82,25 @@ func (p *serverEgressPath) pool() bool {
 	return p.prefix != 0
 }
 
+// poolTransport is the transport of the pool of the path. The members of a
+// bridge via path are only the forged sources of the UDP wrapper to the
+// bridge, whatever the transport of the path is. An ICMP pool lists only the
+// hosts that answer pings, so the path uses the UDP pool, which lists every
+// address that the server can forge.
+func (p *serverEgressPath) poolTransport() protocol.TransportID {
+	if p.bridgeVia {
+		return protocol.TransportUDP
+	}
+	return p.transport
+}
+
 // sameAs reports whether a EGRESS_REGISTER describes the path as it is.
 func (p *serverEgressPath) sameAs(frame protocol.ControlFrame) bool {
 	return p.server == frame.EgressServer && p.port == frame.ServerPort && p.transport == frame.Transport &&
 		p.returnIP == frame.ReturnIP && p.prefix == frame.ReturnPrefix &&
 		p.perPacket == (frame.Flags&protocol.ControlFlagBalancePerPacket != 0) &&
-		p.bridge == (frame.Flags&protocol.ControlFlagBridge != 0)
+		p.bridge == (frame.Flags&protocol.ControlFlagBridge != 0) &&
+		p.bridgeVia == (frame.Flags&protocol.ControlFlagBridgeVia != 0)
 }
 
 // destination is the address that the server sends a reply of the path to:
@@ -115,7 +130,8 @@ type serverEgressGroup struct {
 // egressTarget is one way to send a control frame on an egress path. Member is the
 // reflector of a path with a return IP or a pool, and invalid for a direct
 // path. A target with bridge goes through the bridge at server, wrapped from
-// localIP.
+// localIP. A target with bridgeVia as well is wrapped from member, and the
+// bridge sends the direct form from its own address.
 type egressTarget struct {
 	client     dataplane.ClientKey
 	pathID     uint16
@@ -125,6 +141,7 @@ type egressTarget struct {
 	transport  protocol.TransportID
 	member     netip.Addr
 	bridge     bool
+	bridgeVia  bool
 	localIP    netip.Addr
 }
 
@@ -198,6 +215,7 @@ func (r *egressRegistry) register(frame protocol.ControlFrame, now time.Time) er
 			prefix:     frame.ReturnPrefix,
 			perPacket:  frame.Flags&protocol.ControlFlagBalancePerPacket != 0,
 			bridge:     bridge,
+			bridgeVia:  frame.Flags&protocol.ControlFlagBridgeVia != 0,
 			since:      now,
 			replies:    make(map[netip.Addr]time.Time),
 		}
@@ -218,7 +236,7 @@ func (r *egressRegistry) register(frame protocol.ControlFrame, now time.Time) er
 			path.ifindex = ifindex
 		}
 		if path.pool() {
-			if err := r.plane.ObservePool(path.returnIP, path.prefix, path.transport); err != nil {
+			if err := r.plane.ObservePool(path.returnIP, path.prefix, path.poolTransport()); err != nil {
 				return err
 			}
 		}
@@ -287,7 +305,7 @@ func (r *egressRegistry) revoke(client dataplane.ClientKey, now time.Time) {
 func (r *egressRegistry) candidatesLocked(path *serverEgressPath) []netip.Addr {
 	switch {
 	case path.pool():
-		return r.plane.PoolMembers(dataplane.PoolKey{Base: path.returnIP, Transport: path.transport})
+		return r.plane.PoolMembers(dataplane.PoolKey{Base: path.returnIP, Transport: path.poolTransport()})
 	case path.returnIP.IsValid():
 		return []netip.Addr{path.returnIP}
 	default:
@@ -321,6 +339,7 @@ func (path *serverEgressPath) target(member netip.Addr) egressTarget {
 		port:       path.port,
 		transport:  path.transport,
 		bridge:     path.bridge,
+		bridgeVia:  path.bridgeVia,
 		localIP:    path.localIP,
 	}
 	if path.returnIP.IsValid() {
@@ -420,6 +439,7 @@ func (r *egressRegistry) syncClientLocked(client dataplane.ClientKey, now time.T
 			Pool:       path.pool(),
 			PerPacket:  path.perPacket,
 			Bridge:     path.bridge,
+			BridgeVia:  path.bridgeVia,
 			LocalIP:    path.localIP,
 		}
 		if path.pool() {
@@ -483,7 +503,7 @@ func sameEgressEntry(a, b dataplane.EgressPathEntry) bool {
 	return members && a.Client == b.Client && a.PathID == b.PathID && a.Server == b.Server &&
 		a.ServerPort == b.ServerPort && a.Transport == b.Transport && a.Ifindex == b.Ifindex &&
 		a.ReturnIP == b.ReturnIP && a.Pool == b.Pool && a.PerPacket == b.PerPacket &&
-		a.Bridge == b.Bridge && a.LocalIP == b.LocalIP
+		a.Bridge == b.Bridge && a.BridgeVia == b.BridgeVia && a.LocalIP == b.LocalIP
 }
 
 // clients returns the egress groups of each client for mupctl, keyed by client
@@ -502,6 +522,7 @@ func (r *egressRegistry) clients(now time.Time) map[dataplane.ClientKey][]api.Eg
 			egress := api.EgressPath{
 				ID:             key.id,
 				Bridge:         path.bridge,
+				BridgeVia:      path.bridgeVia,
 				Server:         path.server.String(),
 				Port:           path.port,
 				Transport:      path.transport.String(),

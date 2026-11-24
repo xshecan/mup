@@ -4,7 +4,6 @@ package app
 
 import (
 	"context"
-	"encoding/binary"
 	"log"
 	"net/netip"
 	"time"
@@ -108,26 +107,4 @@ func openSpoofSocket() (int, error) {
 		return -1, err
 	}
 	return fd, nil
-}
-
-// buildIPv4UDP builds an IPv4 UDP packet with the given header fields. The UDP
-// checksum is zero, which IPv4 allows.
-func buildIPv4UDP(source, destination netip.Addr, sourcePort, destinationPort uint16, payload []byte) []byte {
-	udpLength := 8 + len(payload)
-	totalLength := 20 + udpLength
-	packet := make([]byte, totalLength)
-	packet[0] = 0x45
-	binary.BigEndian.PutUint16(packet[2:4], uint16(totalLength))
-	packet[8] = 64
-	packet[9] = unix.IPPROTO_UDP
-	sourceBytes := source.As4()
-	destinationBytes := destination.As4()
-	copy(packet[12:16], sourceBytes[:])
-	copy(packet[16:20], destinationBytes[:])
-	binary.BigEndian.PutUint16(packet[10:12], internetChecksum(packet[0:20]))
-	binary.BigEndian.PutUint16(packet[20:22], sourcePort)
-	binary.BigEndian.PutUint16(packet[22:24], destinationPort)
-	binary.BigEndian.PutUint16(packet[24:26], uint16(udpLength))
-	copy(packet[28:], payload)
-	return packet
 }
