@@ -384,7 +384,10 @@ func (s *icmpPathConn) register(frame []byte, sentAt time.Time, sequence uint32)
 		drainRouted(s.routed)
 	}
 	echo := marshalICMPEcho(icmpEchoRequest, path.ServerPort, uint16(sequence), frame)
-	_ = s.connection.SetDeadline(sentAt.Add(controlReplyTimeout))
+	// Only the read has a deadline. A deadline on the writes would still be in
+	// the past at the next round, and the EGRESS_REGISTER frames above would
+	// then fail without a word, so the server would lose the egress paths.
+	_ = s.connection.SetReadDeadline(sentAt.Add(controlReplyTimeout))
 	if _, err := s.connection.WriteToIP(echo, s.destination); err != nil {
 		return registerMissed
 	}
