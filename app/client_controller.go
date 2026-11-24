@@ -283,7 +283,7 @@ func (c *clientController) start(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			if _, err := c.health.StartHealthy(slot); err != nil {
+			if err := c.startHealthLocked(slot, path.IngressReflect(group.egresses != nil)); err != nil {
 				_ = conn.Close()
 				return err
 			}
@@ -293,6 +293,17 @@ func (c *clientController) start(ctx context.Context) error {
 	}
 	c.nextPriority = len(c.initial)
 	return c.publishHealthLocked()
+}
+
+// startHealthLocked starts to track a path of the configuration. An ingress reflect
+// path starts unhealthy, because the dataplane has no member list for it until its
+// first round finds a member, and the data path would send its packets unreflected.
+func (c *clientController) startHealthLocked(slot int, ingressReflect bool) error {
+	if ingressReflect {
+		return c.health.StartUnhealthy(slot)
+	}
+	_, err := c.health.StartHealthy(slot)
+	return err
 }
 
 // registrationLocked takes the path on the server port that it uses now.
@@ -314,6 +325,13 @@ func (c *clientController) registrationLocked(group *pathGroup, path config.Path
 			c.reflectMu.Lock()
 			c.reflectHealthy[slot] = slices.Clone(members)
 			c.reflectMu.Unlock()
+			// An empty list never reaches the dataplane, because the data path
+			// sends a packet unreflected when the list is empty, and the
+			// server drops it. The dataplane keeps its last list. By then the
+			// path missed its rounds and has left the path mask, or is about to.
+			if len(members) == 0 {
+				return nil
+			}
 			return c.dataplane.SetIngressReflect(slot, members, registration.perPacket)
 		}
 		// An older path in the slot can leave members of another pool, so

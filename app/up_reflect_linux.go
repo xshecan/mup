@@ -16,15 +16,17 @@ import (
 
 // ingressReflectPathConn registers an ingress reflect path. Each cycle it sends a REGISTER
 // reflected through every candidate member, collects the ACKs that come back on
-// the egress paths, and publishes the members that answered to the dataplane. The
-// path is healthy while at least one member answers. The socket includes the
+// the egress paths, and publishes the members that answered in the latest rounds
+// to the dataplane. The path is healthy while at least one member answers. The socket includes the
 // IPv4 header, so the reflected packets carry a spoofed source.
 type ingressReflectPathConn struct {
 	fd           int
 	registration pathRegistration
 	router       *ackRouter
 	routed       *ackWaiter
-	// healthy holds the members that answered in the latest cycle.
+	// members tracks the candidates across rounds.
+	members *reflectMemberSet
+	// healthy holds the members that the latest round published.
 	healthy []netip.Addr
 }
 
@@ -44,6 +46,7 @@ func openIngressReflectPathConn(registration pathRegistration, router *ackRouter
 		registration: registration,
 		router:       router,
 		routed:       router.subscribe(registration.pathID),
+		members:      newReflectMemberSet(registration.members),
 	}, nil
 }
 
@@ -60,11 +63,11 @@ func (s *ingressReflectPathConn) Run(ctx context.Context, report probeReporter) 
 	for {
 		sequence++
 		sentAt := time.Now()
-		result, repliedAt := s.registerMembers(sequence, sentAt)
+		result, repliedAt, pending := s.registerMembers(sequence, sentAt)
 		if err := report(ctx, sequence, sentAt, repliedAt, result); err != nil {
 			return err
 		}
-		if err := sleepContext(ctx, registrationDelay(result == registerAcked)); err != nil {
+		if err := sleepContext(ctx, reflectRegistrationDelay(result == registerAcked, pending)); err != nil {
 			return err
 		}
 	}
@@ -72,8 +75,9 @@ func (s *ingressReflectPathConn) Run(ctx context.Context, report probeReporter) 
 
 // registerMembers sends the egress registrations to the server, a REGISTER
 // reflected through each member, and returns whether any member answered, with
-// the time of the first answer. It publishes the members that answered.
-func (s *ingressReflectPathConn) registerMembers(sequence uint32, sentAt time.Time) (registerResult, time.Time) {
+// the time of the first answer. It publishes the members that answered in the
+// latest rounds, and it returns whether a published member missed a round.
+func (s *ingressReflectPathConn) registerMembers(sequence uint32, sentAt time.Time) (registerResult, time.Time, bool) {
 	reg := s.registration
 	if reg.egresses != nil {
 		for _, egress := range reg.egressFrames(sequence) {
@@ -94,15 +98,16 @@ func (s *ingressReflectPathConn) registerMembers(sequence uint32, sentAt time.Ti
 			_ = s.sendReflected(reg, member, frame, sequence)
 		}
 	}
-	healthy, repliedAt := s.collectHealthy(sequence, sentAt)
-	s.healthy = healthy
+	answered, repliedAt := s.collectHealthy(sequence, sentAt)
+	published, pending := s.members.round(answered)
+	s.healthy = published
 	if reg.writeMembers != nil {
-		_ = reg.writeMembers(healthy)
+		_ = reg.writeMembers(published)
 	}
-	if len(healthy) == 0 {
-		return registerMissed, time.Time{}
+	if len(answered) == 0 {
+		return registerMissed, time.Time{}, pending
 	}
-	return registerAcked, repliedAt
+	return registerAcked, repliedAt, pending
 }
 
 // collectHealthy reads the REGISTER_ACK frames that arrive on the egress paths
