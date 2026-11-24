@@ -395,6 +395,9 @@ func TestParseArgsBridge(t *testing.T) {
 		len(bridge.Allow) != 1 || bridge.ControlSocket != "" {
 		t.Fatalf("bridge = %#v", bridge)
 	}
+	if entries := appConfig.BridgeEntries(); len(entries) != 1 || entries[0].Server != bridge.Server || appConfig.BridgeControlSocket() != "" {
+		t.Fatalf("bridge entries = %#v", entries)
+	}
 	for _, args := range [][]string{
 		{"bridge", "-p", "9000"},
 		{"bridge", "-s", "46.102.130.95"},

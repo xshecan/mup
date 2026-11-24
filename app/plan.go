@@ -30,7 +30,7 @@ type runtimePlan struct {
 
 func buildPlan(appConfig config.App, nonce uint64, resolver routeResolver) (runtimePlan, error) {
 	roles := 0
-	for _, set := range []bool{appConfig.Client != nil, appConfig.Server != nil, appConfig.Bridge != nil} {
+	for _, set := range []bool{appConfig.Client != nil, appConfig.Server != nil, len(appConfig.BridgeEntries()) > 0} {
 		if set {
 			roles++
 		}
@@ -44,7 +44,7 @@ func buildPlan(appConfig config.App, nonce uint64, resolver routeResolver) (runt
 	}
 	// A bridge takes packets on every interface, and the start writes its
 	// settings with the addresses of that moment.
-	if appConfig.Bridge != nil {
+	if len(appConfig.BridgeEntries()) > 0 {
 		return runtimePlan{
 			pinRoot:         defaultPinRoot + "/bridge",
 			attachIfindexes: uniqueSortedPositive(attachIfindexes),

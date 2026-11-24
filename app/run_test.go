@@ -27,6 +27,11 @@ func TestDaemonOptionsResolveEveryDependency(t *testing.T) {
 			Groups:       []config.Group{{ListenPort: 51820, Paths: []config.Path{path}}},
 		}},
 		"server": {Server: &config.Server{Port: config.SinglePort(5000), Target: netip.MustParseAddrPort("198.51.100.7:51820")}},
+		"bridge": {Bridge: &config.Bridge{Server: netip.MustParseAddr("198.51.100.1"), Port: config.SinglePort(9000)}},
+		"bridge list": {Bridges: []config.Bridge{
+			{Server: netip.MustParseAddr("198.51.100.1"), Port: config.SinglePort(9000)},
+			{Server: netip.MustParseAddr("198.51.100.2"), Port: config.SinglePort(9001)},
+		}},
 	}
 	for name, appConfig := range roles {
 		t.Run(name, func(t *testing.T) {

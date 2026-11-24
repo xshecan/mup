@@ -41,7 +41,7 @@ func daemonOptions(appConfig config.App, logger *log.Logger) fx.Option {
 	case appConfig.Server != nil:
 		role = serverModule(*appConfig.Server)
 	default:
-		role = bridgeModule(*appConfig.Bridge)
+		role = bridgeModule(appConfig.BridgeEntries(), appConfig.BridgeControlSocket())
 	}
 	return fx.Options(
 		fx.Supply(appConfig, time.Now(), logger),
@@ -96,11 +96,11 @@ func serverModule(server config.Server) fx.Option {
 	)
 }
 
-func bridgeModule(bridge config.Bridge) fx.Option {
+func bridgeModule(entries []config.Bridge, socket string) fx.Option {
 	return fx.Module("bridge",
-		fx.Supply(bridge),
+		fx.Supply(entries),
 		fx.Provide(
-			func() controlSocket { return controlSocket(bridge.ControlSocket) },
+			func() controlSocket { return controlSocket(socket) },
 			func(runtime *dataplane.Runtime) bridgeDataplane { return runtime },
 			newBridgeInspector,
 			func(inspector *bridgeInspector) http.Handler { return newBridgeAPIHandler(inspector) },
@@ -169,7 +169,7 @@ func attachServer(lifecycle fx.Lifecycle, runtime *dataplane.Runtime, plan runti
 	}))
 }
 
-func attachBridge(lifecycle fx.Lifecycle, runtime *dataplane.Runtime, plan runtimePlan, bridge config.Bridge, logger *log.Logger) {
+func attachBridge(lifecycle fx.Lifecycle, runtime *dataplane.Runtime, plan runtimePlan, entries []config.Bridge, logger *log.Logger) {
 	lifecycle.Append(fx.StartHook(func() error {
 		if err := checkForwarding("/proc/sys/net/ipv4/ip_forward"); err != nil {
 			return err
@@ -178,13 +178,15 @@ func attachBridge(lifecycle fx.Lifecycle, runtime *dataplane.Runtime, plan runti
 		if err != nil {
 			return fmt.Errorf("read the host addresses: %w", err)
 		}
-		if err := runtime.ConfigureBridge(bridgeSettings(bridge, addresses)); err != nil {
+		if err := runtime.ConfigureBridge(bridgeSettings(entries, addresses)); err != nil {
 			return err
 		}
 		if err := runtime.AttachBridge(plan.attachIfindexes); err != nil {
 			return err
 		}
-		logger.Printf("mup bridge: %s", describeBridge(bridge))
+		for _, entry := range entries {
+			logger.Printf("mup bridge: %s", describeBridge(entry))
+		}
 		return nil
 	}))
 }

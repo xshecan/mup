@@ -28,16 +28,16 @@ type bridgeDataplane interface {
 
 // bridgeInspector answers the API calls of a bridge.
 type bridgeInspector struct {
-	bridge    config.Bridge
+	entries   []config.Bridge
 	dataplane bridgeDataplane
 	startedAt time.Time
 	addresses func() ([]netip.Addr, error)
 	interval  time.Duration
 }
 
-func newBridgeInspector(bridge config.Bridge, plane bridgeDataplane, startedAt time.Time) *bridgeInspector {
+func newBridgeInspector(entries []config.Bridge, plane bridgeDataplane, startedAt time.Time) *bridgeInspector {
 	return &bridgeInspector{
-		bridge:    bridge,
+		entries:   entries,
 		dataplane: plane,
 		startedAt: startedAt,
 		addresses: hostIPv4Addresses,
@@ -55,16 +55,23 @@ func (b *bridgeInspector) Status() (api.Status, error) {
 		return api.Status{}, err
 	}
 	status := &api.BridgeStatus{
-		Server:         b.bridge.Server.String(),
-		Port:           b.bridge.Port.First,
-		PortLast:       b.bridge.Port.Last,
 		IngressPackets: counters.IngressPackets,
 		IngressBytes:   counters.IngressBytes,
 		EgressPackets:  counters.EgressPackets,
 		EgressBytes:    counters.EgressBytes,
 	}
-	for _, prefix := range b.bridge.Allow {
-		status.Allow = append(status.Allow, prefix.String())
+	for _, entry := range b.entries {
+		entryStatus := api.BridgeEntryStatus{Server: entry.Server.String(), Port: entry.Port.First, PortLast: entry.Port.Last}
+		for _, prefix := range entry.Allow {
+			entryStatus.Allow = append(entryStatus.Allow, prefix.String())
+		}
+		status.Entries = append(status.Entries, entryStatus)
+	}
+	// The top-level fields show the first entry, so an older mupctl still
+	// shows a bridge.
+	if len(status.Entries) > 0 {
+		first := status.Entries[0]
+		status.Server, status.Port, status.PortLast, status.Allow = first.Server, first.Port, first.PortLast, first.Allow
 	}
 	if addresses, err := b.addresses(); err == nil {
 		for _, address := range addresses {
@@ -140,13 +147,16 @@ func checkForwarding(path string) error {
 
 // bridgeSettings builds the dataplane settings of a bridge, with the current
 // addresses of the host.
-func bridgeSettings(bridge config.Bridge, addresses []netip.Addr) dataplane.BridgeSettings {
-	return dataplane.BridgeSettings{
-		Server:    bridge.Server,
-		Ports:     bridge.Port,
-		Allow:     bridge.Allow,
-		Addresses: addresses,
+func bridgeSettings(entries []config.Bridge, addresses []netip.Addr) dataplane.BridgeSettings {
+	settings := dataplane.BridgeSettings{Addresses: addresses}
+	for _, entry := range entries {
+		settings.Entries = append(settings.Entries, dataplane.BridgeEntry{
+			Server: entry.Server,
+			Ports:  entry.Port,
+			Allow:  entry.Allow,
+		})
 	}
+	return settings
 }
 
 func describeBridge(bridge config.Bridge) string {

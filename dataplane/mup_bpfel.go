@@ -16,6 +16,7 @@ import (
 type mupBridgeAllowKeyV1 struct {
 	_         structs.HostLayout
 	Prefixlen uint32
+	Bridge    uint32
 	Address   uint32
 }
 

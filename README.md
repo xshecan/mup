@@ -155,6 +155,7 @@ server:
 | `bridge.port` | `-p` | The UDP ports and the ICMP Echo identifiers that the bridge takes, as `PORT` or `FIRST-LAST`. |
 | `bridge.allow` | `-a` | Optional. More senders of wrapped replies, as IPv4 CIDRs. Use it for a server behind NAT, for more servers, and for the return IPs of an egress bridge with `via`. |
 | `bridge.control_socket` | `--control-socket` | Optional. The socket for `mupctl`. The default is `/run/mup/bridge.sock`. An empty value turns the socket off. |
+| `bridges` | None | Optional. A list of up to 8 entries with the same keys as `bridge`, in place of `bridge`. A list needs a configuration file. See [More than one server](#more-than-one-server). |
 
 The daemon does not start with an unknown key in the file. A value can use `${VARIABLE}`, or `${VARIABLE:default}` with a default value.
 
@@ -239,7 +240,7 @@ The client must send a packet whose source is not the client address, which is t
 
 ## Bridges
 
-A bridge is a second host between a client and a server. It runs `mup bridge`. It passes the ingress on to one MUP server, its `server`. It unwraps the replies of that server and of the senders in `bridge.allow`.
+A bridge is a second host between a client and a server. It runs `mup bridge`. It passes the ingress on to one MUP server, its `server`. It unwraps the replies of that server and of the senders in `bridge.allow`. A bridge can have up to 8 entries, each with its own server. See [More than one server](#more-than-one-server).
 
 - An ingress bridge takes the packets of the client, in the same way as a server. It changes only the destination to its server, and it keeps the client address as the source. So the server gets the same packets as from the client, and it needs no change.
 - An egress bridge sends the replies of the server. The server builds each reply as for an egress route, wraps it in a UDP packet, and sends it to the bridge. The bridge removes the wrapper and sends the reply on to the client.
@@ -310,6 +311,33 @@ This form needs a server and a client of v0.5.0 or later. The bridge needs no up
 
 An older configuration can have an egress `bridges` entry with a `via` that means the first form. Move such an entry to `routes` with the server address and `bridge B`, or it gets the meaning of the second form. There is no alias.
 
+### More than one server
+
+A bridge can have up to 8 entries. Each entry has its own server, its own port range, and its own `allow` list. A configuration file writes the entries as a top-level `bridges` list:
+
+```yaml
+bridges:
+  - server: 160.119.74.33
+    port: 9000-9999
+    allow:
+      - 79.175.167.5/32
+  - server: 178.160.229.46
+    port: 5000-5005
+    allow:
+      - 178.160.228.0/24
+```
+
+These rules apply to the entries:
+
+- The single `bridge` form still works, and it means one entry. A file with both `bridge` and `bridges` is an error.
+- The port of a packet picks the entry. The port is the UDP destination port, or the ICMP Echo identifier. The port ranges of the entries must not overlap, and the daemon refuses a file with overlapping ranges. The same server can be in more than one entry.
+- A plain ingress packet on a port of an entry goes to the server of that entry.
+- The bridge accepts a wrapped reply on a port of an entry only from the server of that entry and from its `allow` list.
+- The first entry sets the `control_socket` of the daemon. Another entry must not set a different one.
+- The command line form `mup bridge -s SERVER -p PORTS` makes one entry. A list needs a configuration file.
+- `mupctl status` shows a table with the columns SERVER, PORT and ALLOW, with one row for each entry. The packet counters and the drop counters are for the whole bridge.
+- Servers and clients need no update. A bridge with a list needs mup v0.5.1 or later.
+
 ### Rules
 
 A bridge entry has the form of a route, with the bridge address in place of the server address. These rules apply:
@@ -317,9 +345,9 @@ A bridge entry has the form of a route, with the bridge address in place of the 
 - An ingress bridge has no `via`. It can have a port range and `%IFACE`.
 - An egress bridge has one port and no `%IFACE`. In `bridges`, it can have `via`. Without `via`, the bridge sends the replies from the bridge address and the server wraps them from its own address.
 - The routes and the bridges of a direction share its 8 path slots, and the routes come first. So in the failover mode, a healthy route carries the traffic before a bridge.
-- The `port` range of the bridge must include the ports of all bridge entries. The bridge sends the ingress to its server on the same port.
+- The `port` of the bridge must include the ports of all bridge entries. The bridge sends the ingress to the server of the entry that holds the port, on the same port.
 
-The bridge takes wrapped replies from its server and from the ranges in `bridge.allow`. So one bridge can pass the replies of more than one server, when each server address is in `bridge.allow`. A server behind NAT reaches the bridge from its NAT address, so put that address in `bridge.allow`. The bridge passes every other packet to the kernel, so a normal ping to the bridge still gets its reply.
+The bridge takes wrapped replies from the server of their entry and from the ranges in the `allow` of that entry. So one entry can pass the replies of more than one server, with each server address in its `allow`. A server behind NAT reaches the bridge from its NAT address, so put that address in `bridge.allow`. The bridge passes every other packet to the kernel, so a normal ping to the bridge still gets its reply.
 
 An egress bridge starts unhealthy, because a client does not know which server a bridge serves. Each server that gets the egress bridge probes it, and only the probes of an allowed server come back. For the bridge via, the server probes the path through each member. Each PROBE names its member in the return IP field. The client copies that member into the PROBE_REPLY. For the other forms, the reply names the packet source. A dead bridge makes its ingress paths and its egress paths unhealthy.
 
@@ -434,7 +462,7 @@ mup bridge -s SERVER_IP -p PORT[-LAST] [-a CIDR] [-a ...] [--control-socket PATH
 
 | Command | Role | What it does |
 | --- | --- | --- |
-| `mupctl status` | all | Shows an overview. A client lists its groups and paths, and a server lists its clients. A bridge shows its server and the packets that it sent in each direction. |
+| `mupctl status` | all | Shows an overview. A client lists its groups and paths, and a server lists its clients. A bridge shows its server and the packets that it sent in each direction. A bridge with more than one entry shows a table with the columns SERVER, PORT and ALLOW, with one row for each entry. The packet counters and the drop counters are for the whole bridge. |
 | `mupctl groups` | client | Lists the groups with their mode, healthy paths, and peers. |
 | `mupctl paths` | client | Lists the paths with their server port, return IP, state, the age of the last answer, and round-trip time. With `-o wide`, it also shows the port range, the priority, and the missed ACKs. |
 | `mupctl peers` | both | Lists the WireGuard peers of a client, or the peer routes of a server. |
@@ -577,6 +605,7 @@ MUP has no authentication of its own. A host can spoof the source address of a r
 
 - IPv4 only, with no IPv4 options and no fragments.
 - Up to 8 paths, up to 8 egress paths, and up to 4095 peers per client, shared by all of its groups. The bridges of a direction count as its paths.
+- Up to 8 entries per bridge. The port ranges of the entries must not overlap.
 - A reply on an egress bridge is 20 bytes larger between the server and the bridge. At a path MTU of 1500, it needs a WireGuard MTU of 1420 or less.
 - Up to 1024 peers from one source IP on a client.
 - Up to 41000 routes per server, and up to 4096 registered clients.

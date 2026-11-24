@@ -10,6 +10,7 @@ import (
 
 	"github.com/cilium/ebpf"
 
+	"github.com/xshecan/mup/config"
 	"github.com/xshecan/mup/protocol"
 )
 
@@ -19,11 +20,30 @@ var (
 	bridgeAllowed = netip.MustParseAddr("203.0.114.7")
 	bridgeClient  = netip.MustParseAddr("198.51.100.10")
 	bridgeMember  = netip.MustParseAddr("198.51.100.40")
+	// bridgeServer2 and bridgeAllowed2 belong to the second entry of a bridge
+	// with two entries.
+	bridgeServer2  = netip.MustParseAddr("203.0.113.6")
+	bridgeAllowed2 = netip.MustParseAddr("203.0.116.7")
 )
 
-// bridgeCollection loads a bridge at 192.0.2.80 for the server 203.0.113.5,
-// on ports 9000 to 9399, that also takes wrapped replies from 203.0.114.0/24.
+// bridgeEntry is the entry of bridgeCollection: the server 203.0.113.5, on
+// ports 9000 to 9399, that also takes wrapped replies from 203.0.114.0/24.
+var bridgeEntry = BridgeEntry{
+	Server: bridgeServer,
+	Ports:  config.PortRange{First: 9000, Last: 9399},
+	Allow:  []netip.Prefix{netip.MustParsePrefix("203.0.114.0/24")},
+}
+
+// bridgeCollection loads a bridge at 192.0.2.80 with the one entry
+// bridgeEntry.
 func bridgeCollection(t *testing.T) *ebpf.Collection {
+	t.Helper()
+	return bridgeCollectionOf(t, bridgeEntry)
+}
+
+// bridgeCollectionOf loads a bridge at 192.0.2.80 with the entries. It writes
+// the maps with the encoders of ConfigureBridge.
+func bridgeCollectionOf(t *testing.T, entries ...BridgeEntry) *ebpf.Collection {
 	t.Helper()
 	collection := loadTestCollection(t)
 	put := func(name string, key, value any) {
@@ -32,11 +52,35 @@ func bridgeCollection(t *testing.T) *ebpf.Collection {
 			t.Fatalf("update %s: %v", name, err)
 		}
 	}
-	put("bridge_config", uint32(0), mupBridgeConfigV1{ServerIp: mustTestWord(t, bridgeServer), PortFirst: 9000, PortLast: 9399})
+	settings := BridgeSettings{Entries: entries}
+	configurations, err := encodeBridgeConfigs(settings)
+	if err != nil {
+		t.Fatalf("encodeBridgeConfigs: %v", err)
+	}
+	senders, err := bridgeSenders(settings)
+	if err != nil {
+		t.Fatalf("bridgeSenders: %v", err)
+	}
+	for _, sender := range senders {
+		put("bridge_allow", sender, uint8(1))
+	}
 	put("bridge_addresses", mustTestWord(t, bridgeAddress), uint8(1))
-	put("bridge_allow", mupBridgeAllowKeyV1{Prefixlen: 32, Address: mustTestWord(t, bridgeServer)}, uint8(1))
-	put("bridge_allow", mupBridgeAllowKeyV1{Prefixlen: 24, Address: mustTestWord(t, netip.MustParseAddr("203.0.114.0"))}, uint8(1))
+	for index, configuration := range configurations {
+		put("bridge_config", uint32(index), configuration)
+	}
 	return collection
+}
+
+// twoEntryBridgeCollection loads a bridge with bridgeEntry and a second entry
+// for the server 203.0.113.6, on ports 9400 to 9499, that also takes wrapped
+// replies from 203.0.116.0/24.
+func twoEntryBridgeCollection(t *testing.T) *ebpf.Collection {
+	t.Helper()
+	return bridgeCollectionOf(t, bridgeEntry, BridgeEntry{
+		Server: bridgeServer2,
+		Ports:  config.PortRange{First: 9400, Last: 9499},
+		Allow:  []netip.Prefix{netip.MustParsePrefix("203.0.116.0/24")},
+	})
 }
 
 // runBridge runs the bridge program on a frame. A send is a redirect, or a
@@ -168,6 +212,95 @@ func TestBridgeUnwrapsTheRepliesOfItsServer(t *testing.T) {
 		}
 		if after := dropCount(t, collection, test.reason); result != tcActShot || after != before+1 {
 			t.Fatalf("%s: return value = %d, %s drops %d to %d, want a drop", name, int32(result), test.reason, before, after)
+		}
+	}
+}
+
+func TestBridgeSendsTheIngressOfEachEntryToTheServerOfThatEntry(t *testing.T) {
+	collection := twoEntryBridgeCollection(t)
+	defer collection.Close()
+
+	for _, test := range []struct {
+		port   uint16
+		server netip.Addr
+	}{{9100, bridgeServer}, {9399, bridgeServer}, {9400, bridgeServer2}, {9450, bridgeServer2}} {
+		result, output := runBridge(t, collection, udpWireGuardFrame(t, bridgeClient, bridgeAddress, 51820, test.port, 9))
+		if result != tcActRedirect {
+			t.Fatalf("UDP port %d: return value = %d, want a redirect", test.port, int32(result))
+		}
+		assertUDPHeader(t, output, bridgeClient, test.server, 51820, test.port)
+	}
+
+	result, output := runBridge(t, collection, icmpWireGuardFrame(t, bridgeClient, bridgeAddress, 8, 9450, 9))
+	if result != tcActRedirect {
+		t.Fatalf("ICMP return value = %d, want a redirect", int32(result))
+	}
+	ip := output[14:]
+	if destination := netip.AddrFrom4([4]byte(ip[16:20])); destination != bridgeServer2 {
+		t.Fatalf("ICMP destination %s, want %s", destination, bridgeServer2)
+	}
+}
+
+func TestBridgeTakesTheWrappedRepliesOfAnEntryOnlyFromItsSenders(t *testing.T) {
+	collection := twoEntryBridgeCollection(t)
+	defer collection.Close()
+
+	for name, test := range map[string]struct {
+		source netip.Addr
+		port   uint16
+	}{
+		"allow range of entry 1": {bridgeAllowed, 9200},
+		"server of entry 1":      {bridgeServer, 9200},
+		"allow range of entry 2": {bridgeAllowed2, 9450},
+		"server of entry 2":      {bridgeServer2, 9450},
+	} {
+		inner := icmpWireGuardFrame(t, bridgeClient, bridgeMember, 8, test.port, 9)
+		result, output := runBridge(t, collection, wrappedFrame(inner, test.source, test.port))
+		if result != tcActRedirect {
+			t.Fatalf("%s: return value = %d, want a redirect", name, int32(result))
+		}
+		if ip, want := output[14:], inner[14:]; len(ip) != len(want) || !bytes.Equal(ip[12:20], want[12:20]) {
+			t.Fatalf("%s: unwrapped header %x, want the inner header %x", name, ip[:20], want[:20])
+		}
+	}
+
+	for name, test := range map[string]struct {
+		source netip.Addr
+		port   uint16
+	}{
+		"allow range of entry 1 on a port of entry 2": {bridgeAllowed, 9450},
+		"server of entry 1 on a port of entry 2":      {bridgeServer, 9450},
+		"allow range of entry 2 on a port of entry 1": {bridgeAllowed2, 9200},
+		"server of entry 2 on a port of entry 1":      {bridgeServer2, 9200},
+	} {
+		inner := icmpWireGuardFrame(t, bridgeClient, bridgeMember, 8, test.port, 9)
+		before := dropCount(t, collection, protocol.DropBridgeSource)
+		result, _, err := collection.Programs["mup_bridge_ingress"].Test(wrappedFrame(inner, test.source, test.port))
+		if err != nil {
+			t.Fatalf("%s: program test: %v", name, err)
+		}
+		if after := dropCount(t, collection, protocol.DropBridgeSource); result != tcActShot || after != before+1 {
+			t.Fatalf("%s: return value = %d, BRIDGE_SOURCE drops %d to %d, want a drop", name, int32(result), before, after)
+		}
+	}
+}
+
+func TestBridgePassesAPacketOnAPortOfNoEntry(t *testing.T) {
+	collection := twoEntryBridgeCollection(t)
+	defer collection.Close()
+
+	for name, frame := range map[string][]byte{
+		"UDP below the entries":  udpWireGuardFrame(t, bridgeClient, bridgeAddress, 51820, 8999, 9),
+		"UDP above the entries":  udpWireGuardFrame(t, bridgeClient, bridgeAddress, 51820, 9500, 9),
+		"ICMP above the entries": icmpWireGuardFrame(t, bridgeClient, bridgeAddress, 8, 9500, 9),
+		"wrapped reply":          wrappedFrame(icmpWireGuardFrame(t, bridgeClient, bridgeMember, 8, 9500, 9), bridgeServer, 9500),
+	} {
+		result, output, err := collection.Programs["mup_bridge_ingress"].Test(frame)
+		if err != nil {
+			t.Fatalf("%s: program test: %v", name, err)
+		}
+		if result != tcxNext || !bytes.Equal(output, frame) {
+			t.Fatalf("%s: return value = %d, want the next program and an unchanged packet", name, int32(result))
 		}
 	}
 }
@@ -421,7 +554,7 @@ func TestBridgeUnwrapsTheReplyOfABridgeViaFromAnAllowedMember(t *testing.T) {
 		t.Fatalf("return value = %d, BRIDGE_SOURCE drops %d to %d, want a drop", int32(result), before, after)
 	}
 
-	if err := bridge.Maps["bridge_allow"].Update(mupBridgeAllowKeyV1{Prefixlen: 32, Address: mustTestWord(t, egressMemberA)}, uint8(1), ebpf.UpdateAny); err != nil {
+	if err := bridge.Maps["bridge_allow"].Update(mupBridgeAllowKeyV1{Prefixlen: 64, Bridge: 0, Address: mustTestWord(t, egressMemberA)}, uint8(1), ebpf.UpdateAny); err != nil {
 		t.Fatalf("update bridge_allow: %v", err)
 	}
 	result, output := runBridge(t, bridge, wrapped)

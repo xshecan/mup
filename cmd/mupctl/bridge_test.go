@@ -121,3 +121,63 @@ func TestStatusShowsABridge(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusShowsABridgeWithOneEntryAsBefore(t *testing.T) {
+	t.Parallel()
+
+	bridge := api.BridgeStatus{
+		Server: "46.102.130.95", Port: 9000, PortLast: 9399, Allow: []string{"46.102.130.0/24"}, Addresses: []string{"5.6.7.8"},
+		IngressPackets: 12, IngressBytes: 2048, EgressPackets: 30, EgressBytes: 3 * 1024 * 1024,
+	}
+	status := api.Status{Role: api.RoleBridge, StartedAt: testNow.Add(-time.Minute), Bridge: &bridge}
+	var before strings.Builder
+	printStatus(&before, status, nil, false, testNow)
+
+	withEntries := bridge
+	withEntries.Entries = []api.BridgeEntryStatus{{Server: "46.102.130.95", Port: 9000, PortLast: 9399, Allow: []string{"46.102.130.0/24"}}}
+	status.Bridge = &withEntries
+	var after strings.Builder
+	printStatus(&after, status, nil, false, testNow)
+	if after.String() != before.String() {
+		t.Fatalf("status of one entry:\n%s\nwant the output without entries:\n%s", after.String(), before.String())
+	}
+	if strings.Contains(after.String(), "SERVER") {
+		t.Fatalf("status of one entry shows a table:\n%s", after.String())
+	}
+}
+
+func TestStatusShowsTheEntriesOfABridgeInATable(t *testing.T) {
+	t.Parallel()
+
+	status := api.Status{
+		Role:      api.RoleBridge,
+		StartedAt: testNow.Add(-time.Minute),
+		Bridge: &api.BridgeStatus{
+			Server: "160.119.74.33", Port: 9000, PortLast: 9999, Allow: []string{"79.175.167.5/32", "46.102.130.95/32"},
+			Entries: []api.BridgeEntryStatus{
+				{Server: "160.119.74.33", Port: 9000, PortLast: 9999, Allow: []string{"79.175.167.5/32", "46.102.130.95/32"}},
+				{Server: "178.160.229.46", Port: 5000, PortLast: 5005, Allow: []string{"79.175.167.5/32", "178.160.228.0/24"}},
+				{Server: "178.160.229.46", Port: 6000, PortLast: 6000},
+			},
+			Addresses:      []string{"5.6.7.8"},
+			IngressPackets: 12, IngressBytes: 2048, EgressPackets: 30, EgressBytes: 3 * 1024 * 1024,
+		},
+	}
+	var out strings.Builder
+	printStatus(&out, status, nil, false, testNow)
+	want := `Role:        bridge
+Addresses:   5.6.7.8
+Uptime:      1m
+Ingress:     12 packets, 2.0 KiB
+Egress:      30 packets, 3.0 MiB
+Drops:       0
+
+SERVER           PORT        ALLOW
+160.119.74.33    9000-9999   79.175.167.5/32, 46.102.130.95/32
+178.160.229.46   5000-5005   79.175.167.5/32, 178.160.228.0/24
+178.160.229.46   6000        -
+`
+	if out.String() != want {
+		t.Fatalf("status output:\n%s\nwant:\n%s", out.String(), want)
+	}
+}

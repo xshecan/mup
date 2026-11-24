@@ -150,18 +150,45 @@ func ParseBalance(raw string) (Balance, error) {
 }
 
 // App is the configuration of one daemon. Exactly one of Client, Server, and
-// Bridge is set.
+// a bridge is set. A bridge is either the one entry of Bridge or the list of
+// Bridges.
 type App struct {
-	Client *Client `yaml:"client"`
-	Server *Server `yaml:"server"`
-	Bridge *Bridge `yaml:"bridge"`
+	Client  *Client  `yaml:"client"`
+	Server  *Server  `yaml:"server"`
+	Bridge  *Bridge  `yaml:"bridge"`
+	Bridges []Bridge `yaml:"bridges"`
+}
+
+// BridgeEntries returns the entries of the bridge: the one entry of Bridge,
+// or the entries of Bridges, or nil for another role.
+func (a App) BridgeEntries() []Bridge {
+	if a.Bridge != nil {
+		return []Bridge{*a.Bridge}
+	}
+	if len(a.Bridges) == 0 {
+		return nil
+	}
+	return a.Bridges
+}
+
+// BridgeControlSocket returns the control socket of the bridge daemon. The
+// first entry holds the socket of a list.
+func (a App) BridgeControlSocket() string {
+	entries := a.BridgeEntries()
+	if len(entries) == 0 {
+		return ""
+	}
+	return entries[0].ControlSocket
 }
 
 // Validate applies the rules that are common to the flags and the
 // configuration file.
 func (a App) Validate() error {
+	if a.Bridge != nil && a.Bridges != nil {
+		return errors.New("the configuration must have bridge or bridges, not both")
+	}
 	roles := 0
-	for _, set := range []bool{a.Client != nil, a.Server != nil, a.Bridge != nil} {
+	for _, set := range []bool{a.Client != nil, a.Server != nil, len(a.BridgeEntries()) > 0} {
 		if set {
 			roles++
 		}
@@ -174,9 +201,35 @@ func (a App) Validate() error {
 		return a.Client.Validate()
 	case a.Server != nil:
 		return a.Server.Validate()
-	default:
+	case a.Bridge != nil:
 		return a.Bridge.Validate()
+	default:
+		return validateBridges(a.Bridges)
 	}
+}
+
+// validateBridges checks the entries of a bridge list. Each entry must be
+// valid, and the port ranges of two entries must not overlap, because the port
+// of a packet picks its entry. Two entries may share a server.
+func validateBridges(bridges []Bridge) error {
+	if len(bridges) > MaxBridges {
+		return fmt.Errorf("bridges has %d entries, and a bridge takes at most %d", len(bridges), MaxBridges)
+	}
+	for index, bridge := range bridges {
+		if err := bridge.Validate(); err != nil {
+			return fmt.Errorf("bridge entry %d: %w", index+1, err)
+		}
+		if index > 0 && bridge.ControlSocket != api.DefaultBridgeSocket && bridge.ControlSocket != bridges[0].ControlSocket {
+			return fmt.Errorf("bridge entry %d: control_socket %q differs from the first entry: set control_socket on the first entry only", index+1, bridge.ControlSocket)
+		}
+		for other := range index {
+			earlier := bridges[other]
+			if bridge.Port.First <= earlier.Port.Last && earlier.Port.First <= bridge.Port.Last {
+				return fmt.Errorf("the ports %s of bridge entry %d overlap the ports %s of bridge entry %d", earlier.Port, other+1, bridge.Port, index+1)
+			}
+		}
+	}
+	return nil
 }
 
 type Client struct {
@@ -666,13 +719,18 @@ func (s Server) Validate() error {
 	return nil
 }
 
-// MaxBridgeAllow limits the extra sender ranges of a bridge. It mirrors the
-// size of the bridge_allow map, which also holds the server address.
+// MaxBridges is the number of entries of a bridge. It mirrors the size of the
+// bridge_config map.
+const MaxBridges = 8
+
+// MaxBridgeAllow limits the extra sender ranges of a bridge entry. It mirrors
+// the share of each entry in the bridge_allow map, which also holds the server
+// address.
 const MaxBridgeAllow = 63
 
-// Bridge is the configuration of a MUP bridge. The bridge passes the packets
-// of the clients on its ports to Server, and it sends the replies that
-// Server wraps for it. It takes wrapped replies only from Server and from
+// Bridge is the configuration of a MUP bridge, or one entry of a bridge with
+// several entries. The bridge passes the packets of the clients on its ports
+// to Server, and it sends the replies that Server wraps for it. It takes wrapped replies only from Server and from
 // the Allow ranges, for example the NAT address of a server.
 type Bridge struct {
 	Server        netip.Addr     `yaml:"server"`

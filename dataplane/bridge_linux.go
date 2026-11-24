@@ -10,10 +10,11 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-// ConfigureBridge writes the configuration of a bridge: its server, its ports,
-// the senders of wrapped replies, and the addresses of the host.
+// ConfigureBridge writes the configuration of a bridge: the server and ports of
+// each entry, the senders of wrapped replies of each entry, and the addresses
+// of the host.
 func (r *Runtime) ConfigureBridge(settings BridgeSettings) error {
-	configuration, err := encodeBridgeConfig(settings)
+	configurations, err := encodeBridgeConfigs(settings)
 	if err != nil {
 		return err
 	}
@@ -37,9 +38,12 @@ func (r *Runtime) ConfigureBridge(settings BridgeSettings) error {
 	if err := r.setBridgeAddressesLocked(settings.Addresses); err != nil {
 		return err
 	}
-	// The configuration goes last, because it turns the program on.
-	if err := r.objects.BridgeConfig.Update(uint32(0), configuration, ebpf.UpdateAny); err != nil {
-		return fmt.Errorf("write bridge configuration: %w", err)
+	// The configuration goes last, because it turns the program on. Every
+	// index gets a value, so an entry of an earlier start does not stay.
+	for index, configuration := range configurations {
+		if err := r.objects.BridgeConfig.Update(uint32(index), configuration, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("write bridge configuration %d: %w", index, err)
+		}
 	}
 	return nil
 }

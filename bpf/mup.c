@@ -213,9 +213,13 @@ struct {
 	__type(value, struct down_path_v1);
 } server_down_paths SEC(".maps");
 
+/*
+ * bridge_config holds the entries of the bridge. The port of a packet picks
+ * the entry, and an entry with a zero server_ip is unused.
+ */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
+	__uint(max_entries, MUP_MAX_BRIDGES);
 	MUP_PINNED;
 	__type(key, __u32);
 	__type(value, struct bridge_config_v1);
@@ -231,12 +235,13 @@ struct {
 } bridge_addresses SEC(".maps");
 
 /*
- * bridge_allow holds the senders of wrapped replies: the server of the bridge,
- * and the allow ranges of its configuration.
+ * bridge_allow holds the senders of wrapped replies of each entry: the server
+ * of the entry, and the allow ranges of its configuration. The key starts with
+ * the entry index, so each entry has its own senders.
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
-	__uint(max_entries, 64);
+	__uint(max_entries, 64 * MUP_MAX_BRIDGES);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	MUP_PINNED;
 	__type(key, struct bridge_allow_key_v1);
@@ -2275,6 +2280,8 @@ static __always_inline int bridge_send(struct __sk_buff *skb,
  * source. A wrapped reply from the server or an allowed sender loses its
  * wrapper and goes on to its inner destination, with its inner source. Every
  * other packet goes on to the kernel, so a normal ping still gets its reply.
+ * The bridge has up to MUP_MAX_BRIDGES entries, and the port of a packet
+ * picks the entry with its server and its allowed senders.
  */
 SEC("tc")
 int mup_bridge_ingress(struct __sk_buff *skb)
@@ -2282,26 +2289,48 @@ int mup_bridge_ingress(struct __sk_buff *skb)
 	struct mup_packet packet = {};
 	struct bridge_config_v1 *configuration;
 	struct bridge_allow_key_v1 sender = {};
-	__u32 configuration_key = 0;
-	__be32 server_ip;
+	__u32 bridge = 0;
+	__be32 server_ip = 0;
 	__u8 inner_protocol;
 	int result;
 
 	result = parse_ipv4_l4(skb, &packet);
 	if (result != MUP_DROP_NONE)
 		return MUP_TCX_NEXT;
-	configuration = bpf_map_lookup_elem(&bridge_config, &configuration_key);
-	if (!configuration || !configuration->server_ip)
-		return MUP_TCX_NEXT;
-	server_ip = configuration->server_ip;
-	if (packet.server_port < configuration->port_first ||
-	    packet.server_port > configuration->port_last)
-		return MUP_TCX_NEXT;
+	/*
+	 * The address check comes before the entry search. A packet to another
+	 * host then leaves after one lookup, and only a packet to the bridge
+	 * host pays for the search of the entries.
+	 */
 	if (!bpf_map_lookup_elem(&bridge_addresses, &packet.ipv4->destination))
+		return MUP_TCX_NEXT;
+	/*
+	 * The first used entry whose port range holds the port of the packet
+	 * takes the packet. Go keeps the port ranges of the entries apart, so
+	 * at most one entry matches. The loop copies the server of the entry,
+	 * because a map value pointer must not be used after a helper changes
+	 * the packet.
+	 */
+#pragma clang loop unroll(full)
+	for (int index = 0; index < MUP_MAX_BRIDGES; index++) {
+		__u32 configuration_key = index;
+
+		configuration = bpf_map_lookup_elem(&bridge_config,
+						    &configuration_key);
+		if (!configuration || !configuration->server_ip ||
+		    packet.server_port < configuration->port_first ||
+		    packet.server_port > configuration->port_last)
+			continue;
+		bridge = index;
+		server_ip = configuration->server_ip;
+		break;
+	}
+	if (!server_ip)
 		return MUP_TCX_NEXT;
 
 	if (bridge_is_wrapped(&packet)) {
-		sender.prefixlen = 32;
+		sender.prefixlen = 64;
+		sender.bridge = bridge;
 		sender.address = packet.ipv4->source;
 		if (!bpf_map_lookup_elem(&bridge_allow, &sender))
 			return count_and_drop(skb, MUP_DROP_BRIDGE_SOURCE);

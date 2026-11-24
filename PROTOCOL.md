@@ -32,7 +32,7 @@ This document describes version 1 of the MUP protocol as the code implements it.
 | Path | One way from the client to a server. One client `-u` flag sets one path. |
 | Ingress path | A path of a group with separate egress paths. It carries only the packets from the client to the server. |
 | Egress path | A way that the server sends the replies of a group to the client. One `egress` route sets one egress path. |
-| Bridge | A host that runs `mup bridge` between the clients and one server. One `bridges` entry sets one ingress path or egress path through it. An egress route with a `bridge` suffix also sets one egress path through it. |
+| Bridge | A host that runs `mup bridge` between the clients and its servers. It has up to 8 entries, each with one server. One `bridges` entry sets one ingress path or egress path through it. An egress route with a `bridge` suffix also sets one egress path through it. |
 | Bridge wrapper | The 20 bytes that a server puts after the IPv4 header of a reply for a bridge: a UDP header and the bridge header. |
 | Group | One listen port with its mode and its paths. Each path has an optional return IP. |
 | Port | The number in `-u SERVER:PORT` and in server `-p`. For UDP, it is the destination port. For ICMP, it is the Echo identifier. |
@@ -156,9 +156,9 @@ An ingress path has no return IP. The client also accepts a reply from the serve
 
 ### Bridges
 
-A bridge passes the ingress on to one server. A path through a bridge names the bridge address in place of the server address. Only a group with separate egress paths has bridges.
+A bridge has up to 8 entries, and each entry has one server. A bridge passes the ingress on to the server of the entry that holds the port of the packet. A path through a bridge names the bridge address in place of the server address. Only a group with separate egress paths has bridges.
 
-An ingress bridge carries the ingress of a path. The client sends to the bridge in the same way as to a server. The bridge changes the destination to its server, and it keeps the source, the port, and the ICMP identifier. It updates the IPv4 checksum and the UDP checksum. So the server gets the same packet as from the client.
+An ingress bridge carries the ingress of a path. The client sends to the bridge in the same way as to a server. The bridge changes the destination to the server of the entry, and it keeps the source, the port, and the ICMP identifier. It updates the IPv4 checksum and the UDP checksum. So the server gets the same packet as from the client.
 
 An egress bridge carries the replies of an egress path. The server rewrites each reply as for an egress route, with the bridge address as the server address of the path. A direct reply thus comes from the bridge address. Then the server puts the reply in the bridge wrapper. An egress bridge has three forms, and they differ in the return IP of the path and in the source of the wrapper. An egress route with a bridge suffix, `SERVER:PORT/t via X bridge B`, builds the reply as for an egress route with that via. The bridge then sends the reply with the source that the via needs. An egress bridge with a via, `B:PORT/t via X`, builds the direct reply from the bridge address. The server sends the wrapper from X or from a member of the pool. An egress bridge without a via sends the wrapper from the server address, and the bridge sends the reply from its own address.
 
@@ -175,8 +175,8 @@ The transport header and the payload do not move. So the inner checksum stays va
 
 The bridge program handles each packet to an address of the bridge host and a port of the bridge:
 
-1. A UDP payload that starts with the bridge magic is a wrapped reply. It must come from the server, from an `allow` range, or from a member that an `allow` range holds, or the program counts reason 23. It must have version 1, UDP or ICMP inside, and a MUP packet inside, or the program counts reason 24. The program removes the wrapper and writes the inner protocol and addresses into the IPv4 header.
-2. Any other MUP packet goes to the server, except a packet from the server itself. A MUP packet is a control frame, or a WireGuard message with a token, in UDP or in an ICMP Echo Request.
+1. A UDP payload that starts with the bridge magic is a wrapped reply. It must come from the server of the entry for its port, or from an `allow` range of that entry. A member that such a range holds also counts. Otherwise, the program counts reason 23. It must have version 1, UDP or ICMP inside, and a MUP packet inside, or the program counts reason 24. The program removes the wrapper and writes the inner protocol and addresses into the IPv4 header.
+2. Any other MUP packet goes to the server of the entry for its port, except a packet from that server itself. A MUP packet is a control frame, or a WireGuard message with a token, in UDP or in an ICMP Echo Request.
 3. Every other packet goes on to the kernel. So a normal ping to the bridge still gets its reply.
 
 The program then finds the interface of the new destination with the FIB lookup of a forwarded packet, and it redirects the packet there. So the bridge host needs IPv4 forwarding.
@@ -410,9 +410,9 @@ Pinned BPF maps hold all dataplane state. Go writes the configuration and the re
 | `duplicate_cache` | LRU hash | 16384 | Route key and first 24 WireGuard bytes to the time seen. | Program |
 | `server_down_groups` | hash | 4096 | Client key to listen port, egress mode, and the masks of its egress paths. | Go |
 | `server_down_paths` | hash | 32768 | Client key and egress path ID to the egress path, its interface, and its healthy pool members. An egress bridge also has flag bit 4 and the source address of its wrapper. | Go |
-| `bridge_config` | array | 1 | The server of a bridge, and its first and last port. | Go |
+| `bridge_config` | array | 8 | The entries of a bridge: the server, and the first and last port of each. An entry with a zero server is unused. | Go |
 | `bridge_addresses` | hash | 64 | The IPv4 addresses of the bridge host. Go writes them again every 10 seconds. | Go |
-| `bridge_allow` | LPM trie | 64 | The senders of wrapped replies: the server, and the `allow` ranges. | Go |
+| `bridge_allow` | LPM trie | 512 | The senders of wrapped replies, for each entry. The key starts with the entry index, then the sender address. | Go |
 | `bridge_counters` | per-CPU array | 4 | The packets and bytes that a bridge sent ingress and egress. | Program |
 | `stats` | per-CPU array | 26 | Drop counters, one for each reason. | Program |
 | `events` | ring buffer | 256 KiB | Events for reasons 11, 12, and 13. | Program |
@@ -496,7 +496,7 @@ A program returns `TCX_NEXT` for traffic that it does not own. This traffic incl
 | 20 | `CHECKSUM` | A rewrite failed, for example on a UDP packet without a checksum and with a payload longer than 9216 bytes. |
 | 21 | `SOURCE_LIMIT` | The source IP of a new peer already has 1024 routes on the client. |
 | 22 | `EGRESS_SOURCE` | An egress packet came from a source that the group of the peer does not expect. |
-| 23 | `BRIDGE_SOURCE` | A bridge got a wrapped reply from a sender that is not its server or in an `allow` range. |
+| 23 | `BRIDGE_SOURCE` | A bridge got a wrapped reply from a sender that is neither the entry server nor in its `allow` range. |
 | 24 | `BRIDGE_PACKET` | A bridge got a wrapped reply with a bad version, a bad inner protocol, or no MUP packet inside. If a wrap or an unwrap fails half way, a server also counts it. |
 | 25 | `BRIDGE_SIZE` | A reply for an egress bridge does not fit the MTU of the interface to the bridge after the wrap. |
 
@@ -604,7 +604,7 @@ A host can spoof the source address of a registered client. That host can then r
 
 The duplicate cache is a filter for repeater copies, not a replay defense. WireGuard provides replay protection for its transport data.
 
-A bridge keeps the source of each ingress packet, and it sends only MUP packets and only to its server. So the ingress through a bridge gives no host a new way to spoof an address. On the egress, a bridge sends packets with any source. So it takes wrapped replies only from its server and its `allow` ranges, and only with a MUP packet inside. With a bridge via, an `allow` range holds the members of the via. A host that spoofs the address of the server can still make the bridge send MUP packets to any address.
+A bridge keeps the source of each ingress packet, and it sends only MUP packets and only to the server of its entry. So the ingress through a bridge gives no host a new way to spoof an address. On the egress, a bridge sends packets with any source. So it takes wrapped replies only from the entry server and the entry `allow` ranges, and only with a MUP packet inside. With a bridge via, an `allow` range holds the members of the via. A host that spoofs the address of the server can still make the bridge send MUP packets to any address.
 
 ## Limits
 

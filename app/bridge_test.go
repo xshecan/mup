@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -134,7 +135,7 @@ func TestBridgeAPIServesTheStatus(t *testing.T) {
 		Port:   config.PortRange{First: 9000, Last: 9399},
 		Allow:  []netip.Prefix{netip.MustParsePrefix("46.102.130.0/24")},
 	}
-	inspector := newBridgeInspector(bridge, &fakeBridgeDataplane{}, time.Unix(100, 0))
+	inspector := newBridgeInspector([]config.Bridge{bridge}, &fakeBridgeDataplane{}, time.Unix(100, 0))
 	inspector.addresses = func() ([]netip.Addr, error) { return []netip.Addr{netip.MustParseAddr("5.6.7.8")}, nil }
 	client := newTestDaemonClient(t, newBridgeAPIHandler(inspector))
 	status, err := client.Status(context.Background())
@@ -146,6 +147,9 @@ func TestBridgeAPIServesTheStatus(t *testing.T) {
 		len(got.Allow) != 1 || len(got.Addresses) != 1 || got.IngressPackets != 5 || got.EgressBytes != 700 {
 		t.Fatalf("status = %#v", status)
 	}
+	if len(got.Entries) != 1 || got.Entries[0].Server != "46.102.130.95" || got.Entries[0].PortLast != 9399 || len(got.Entries[0].Allow) != 1 {
+		t.Fatalf("entries = %#v", got.Entries)
+	}
 	if dropCountOf(status.Drops, "BRIDGE_SOURCE") != 3 {
 		t.Fatalf("drops = %#v", status.Drops)
 	}
@@ -155,6 +159,59 @@ func TestBridgeAPIServesTheStatus(t *testing.T) {
 	}
 	if _, err := client.Peers(context.Background()); responseStatus(err) != http.StatusConflict {
 		t.Fatalf("Peers on a bridge error = %v", err)
+	}
+}
+
+func TestBridgeStatusReportsEveryEntryAndTheFirstOneOnTop(t *testing.T) {
+	t.Parallel()
+
+	entries := []config.Bridge{
+		{
+			Server: netip.MustParseAddr("160.119.74.33"),
+			Port:   config.PortRange{First: 9000, Last: 9999},
+			Allow:  []netip.Prefix{netip.MustParsePrefix("79.175.167.5/32"), netip.MustParsePrefix("46.102.130.95/32")},
+		},
+		{
+			Server: netip.MustParseAddr("178.160.229.46"),
+			Port:   config.SinglePort(5000),
+		},
+	}
+	inspector := newBridgeInspector(entries, &fakeBridgeDataplane{}, time.Unix(100, 0))
+	inspector.addresses = func() ([]netip.Addr, error) { return nil, nil }
+	status, err := inspector.Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	got := status.Bridge
+	want := []api.BridgeEntryStatus{
+		{Server: "160.119.74.33", Port: 9000, PortLast: 9999, Allow: []string{"79.175.167.5/32", "46.102.130.95/32"}},
+		{Server: "178.160.229.46", Port: 5000, PortLast: 5000},
+	}
+	if got == nil || !reflect.DeepEqual(got.Entries, want) {
+		t.Fatalf("entries = %#v, want %#v", got, want)
+	}
+	if got.Server != "160.119.74.33" || got.Port != 9000 || got.PortLast != 9999 || !reflect.DeepEqual(got.Allow, want[0].Allow) {
+		t.Fatalf("top-level fields = %#v, want the first entry", got)
+	}
+}
+
+func TestBridgeSettingsCarryEveryEntry(t *testing.T) {
+	t.Parallel()
+
+	entries := []config.Bridge{
+		{Server: netip.MustParseAddr("160.119.74.33"), Port: config.PortRange{First: 9000, Last: 9999}, Allow: []netip.Prefix{netip.MustParsePrefix("79.175.167.5/32")}},
+		{Server: netip.MustParseAddr("178.160.229.46"), Port: config.PortRange{First: 5000, Last: 5005}},
+	}
+	addresses := []netip.Addr{netip.MustParseAddr("5.6.7.8")}
+	settings := bridgeSettings(entries, addresses)
+	if len(settings.Entries) != 2 || !reflect.DeepEqual(settings.Addresses, addresses) {
+		t.Fatalf("settings = %#v", settings)
+	}
+	for index, entry := range entries {
+		got := settings.Entries[index]
+		if got.Server != entry.Server || got.Ports != entry.Port || !reflect.DeepEqual(got.Allow, entry.Allow) {
+			t.Fatalf("entry %d = %#v, want %#v", index, got, entry)
+		}
 	}
 }
 
@@ -171,7 +228,7 @@ func TestBridgeRefreshesTheHostAddresses(t *testing.T) {
 	t.Parallel()
 
 	plane := &fakeBridgeDataplane{}
-	inspector := newBridgeInspector(config.Bridge{}, plane, time.Unix(100, 0))
+	inspector := newBridgeInspector([]config.Bridge{{}}, plane, time.Unix(100, 0))
 	calls := 0
 	inspector.addresses = func() ([]netip.Addr, error) {
 		calls++
@@ -217,6 +274,10 @@ func TestBuildPlanForABridge(t *testing.T) {
 	}
 	if plan.pinRoot != defaultPinRoot+"/bridge" || plan.client != nil || plan.server != nil {
 		t.Fatalf("plan = %#v", plan)
+	}
+	list := config.App{Bridges: []config.Bridge{bridge, {Server: netip.MustParseAddr("178.160.229.46"), Port: config.SinglePort(5000)}}}
+	if plan, err := buildPlan(list, 0, fakeResolver{catchAll: 2}); err != nil || plan.pinRoot != defaultPinRoot+"/bridge" {
+		t.Fatalf("buildPlan of a bridge list = %#v, %v", plan, err)
 	}
 	if _, err := buildPlan(config.App{}, 0, fakeResolver{catchAll: 2}); err == nil {
 		t.Fatal("buildPlan without a role succeeded")

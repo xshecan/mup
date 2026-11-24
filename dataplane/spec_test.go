@@ -52,9 +52,9 @@ func TestMupCollectionSpec(t *testing.T) {
 		"client_duplicate_cache":   {ebpf.LRUHash, 16384},
 		"server_down_groups":       {ebpf.Hash, 4096},
 		"server_down_paths":        {ebpf.Hash, 32768},
-		"bridge_config":            {ebpf.Array, 1},
+		"bridge_config":            {ebpf.Array, MaxBridges},
 		"bridge_addresses":         {ebpf.Hash, 64},
-		"bridge_allow":             {ebpf.LPMTrie, 64},
+		"bridge_allow":             {ebpf.LPMTrie, 64 * MaxBridges},
 		"bridge_counters":          {ebpf.PerCPUArray, 4},
 	}
 	for name, want := range wantMaps {

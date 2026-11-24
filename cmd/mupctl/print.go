@@ -81,22 +81,47 @@ func printStatus(w io.Writer, status api.Status, clients []api.RegisteredClient,
 		printClients(w, clients, wide)
 	case status.Bridge != nil:
 		bridge := status.Bridge
-		port := strconv.Itoa(int(bridge.Port))
-		if bridge.PortLast > bridge.Port {
-			port += "-" + strconv.Itoa(int(bridge.PortLast))
+		// A bridge with several entries shows them in a table after the
+		// fields. One entry keeps the Server, Port, and Allow fields.
+		several := len(bridge.Entries) > 1
+		if !several {
+			field("Server", bridge.Server)
+			field("Port", bridgePort(bridge.Port, bridge.PortLast))
+			field("Allow", orDash(strings.Join(bridge.Allow, ", ")))
 		}
-		field("Server", bridge.Server)
-		field("Port", port)
-		field("Allow", orDash(strings.Join(bridge.Allow, ", ")))
 		field("Addresses", orDash(strings.Join(bridge.Addresses, ", ")))
 		field("Uptime", humanDuration(now.Sub(status.StartedAt)))
 		field("Ingress", fmt.Sprintf("%d packets, %s", bridge.IngressPackets, humanBytes(bridge.IngressBytes)))
 		field("Egress", fmt.Sprintf("%d packets, %s", bridge.EgressPackets, humanBytes(bridge.EgressBytes)))
 		field("Drops", dropSummary(status.Drops))
 		_ = fields.Flush()
+		if several {
+			_, _ = fmt.Fprintln(w)
+			printBridgeEntries(w, bridge.Entries)
+		}
 	default:
 		_ = fields.Flush()
 	}
+}
+
+// bridgePort shows the ports of a bridge as FIRST-LAST, or as PORT for one
+// port.
+func bridgePort(first, last uint16) string {
+	port := strconv.Itoa(int(first))
+	if last > first {
+		port += "-" + strconv.Itoa(int(last))
+	}
+	return port
+}
+
+// printBridgeEntries shows one row for each entry of a bridge.
+func printBridgeEntries(w io.Writer, entries []api.BridgeEntryStatus) {
+	table := newTable(w)
+	row(table, "SERVER", "PORT", "ALLOW")
+	for _, entry := range entries {
+		row(table, entry.Server, bridgePort(entry.Port, entry.PortLast), orDash(strings.Join(entry.Allow, ", ")))
+	}
+	_ = table.Flush()
 }
 
 // humanBytes shows a byte count with a binary unit.

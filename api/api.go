@@ -25,19 +25,30 @@ type Status struct {
 	Drops     []Drop        `json:"drops"`
 }
 
-// BridgeStatus describes a bridge. It takes the ports from Port to PortLast,
-// sends the ingress to Server, and takes wrapped replies from Server and the
-// Allow ranges. The counters count the packets and bytes that it sent.
+// BridgeStatus describes a bridge. Entries holds every entry of the bridge.
+// Server, Port, PortLast, and Allow repeat the first entry, so an older mupctl
+// still shows a bridge. The counters count the packets and bytes that it sent.
 type BridgeStatus struct {
-	Server         string   `json:"server"`
-	Port           uint16   `json:"port"`
-	PortLast       uint16   `json:"port_last,omitempty"`
-	Allow          []string `json:"allow,omitempty"`
-	Addresses      []string `json:"addresses"`
-	IngressPackets uint64   `json:"ingress_packets"`
-	IngressBytes   uint64   `json:"ingress_bytes"`
-	EgressPackets  uint64   `json:"egress_packets"`
-	EgressBytes    uint64   `json:"egress_bytes"`
+	Server         string              `json:"server"`
+	Port           uint16              `json:"port"`
+	PortLast       uint16              `json:"port_last,omitempty"`
+	Allow          []string            `json:"allow,omitempty"`
+	Entries        []BridgeEntryStatus `json:"entries,omitempty"`
+	Addresses      []string            `json:"addresses"`
+	IngressPackets uint64              `json:"ingress_packets"`
+	IngressBytes   uint64              `json:"ingress_bytes"`
+	EgressPackets  uint64              `json:"egress_packets"`
+	EgressBytes    uint64              `json:"egress_bytes"`
+}
+
+// BridgeEntryStatus describes one entry of a bridge. It takes the ports from
+// Port to PortLast, sends the ingress to Server, and takes wrapped replies
+// from Server and the Allow ranges.
+type BridgeEntryStatus struct {
+	Server   string   `json:"server"`
+	Port     uint16   `json:"port"`
+	PortLast uint16   `json:"port_last,omitempty"`
+	Allow    []string `json:"allow,omitempty"`
 }
 
 type ClientStatus struct {

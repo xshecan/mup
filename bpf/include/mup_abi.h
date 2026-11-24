@@ -39,6 +39,11 @@
 #define MUP_FLAG_BRIDGE_VIA (1U << 6)
 #define MUP_MAX_POOL 16
 /*
+ * MUP_MAX_BRIDGES is the number of entries of a bridge. It must match
+ * dataplane.MaxBridges.
+ */
+#define MUP_MAX_BRIDGES 8
+/*
  * The bridge wrapper is a UDP header and a 12-byte bridge header between the
  * IPv4 header and the transport header of a packet. The bridge header holds
  * the magic "MB", the version, the inner protocol, and the inner source and
@@ -239,8 +244,8 @@ struct down_path_v1 {
 };
 
 /*
- * bridge_config_v1 is the configuration of a bridge: its server, and the
- * ports and ICMP identifiers that it takes.
+ * bridge_config_v1 is one entry of a bridge: its server, and the ports and
+ * ICMP identifiers that it takes. An entry with a zero server_ip is unused.
  */
 struct bridge_config_v1 {
 	__be32 server_ip;
@@ -248,9 +253,15 @@ struct bridge_config_v1 {
 	__u16 port_last;
 };
 
-/* bridge_allow_key_v1 is the key of the LPM trie of the bridge senders. */
+/*
+ * bridge_allow_key_v1 is the key of the LPM trie of the bridge senders. The
+ * LPM data is the 4 bytes of bridge, the entry index, followed by the 4 bytes
+ * of address. A sender prefix of N bits has a prefixlen of 32 + N, and the
+ * program looks up a sender with a prefixlen of 64.
+ */
 struct bridge_allow_key_v1 {
 	__u32 prefixlen;
+	__u32 bridge;
 	__be32 address;
 };
 
@@ -472,5 +483,5 @@ _Static_assert(sizeof(struct down_group_v1) == 4, "down_group_v1 ABI");
 _Static_assert(sizeof(struct down_path_key_v1) == 24, "down_path_key_v1 ABI");
 _Static_assert(sizeof(struct down_path_v1) == 88, "down_path_v1 ABI");
 _Static_assert(sizeof(struct bridge_config_v1) == 8, "bridge_config_v1 ABI");
-_Static_assert(sizeof(struct bridge_allow_key_v1) == 8, "bridge_allow_key_v1 ABI");
+_Static_assert(sizeof(struct bridge_allow_key_v1) == 12, "bridge_allow_key_v1 ABI");
 _Static_assert(sizeof(struct event_limit_v1) == 16, "event_limit_v1 ABI");

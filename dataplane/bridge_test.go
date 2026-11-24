@@ -34,29 +34,123 @@ func TestEncodeEgressPathEntryOfABridge(t *testing.T) {
 func TestBridgeSettingsEncoding(t *testing.T) {
 	t.Parallel()
 
-	settings := BridgeSettings{
+	settings := BridgeSettings{Entries: []BridgeEntry{{
 		Server: netip.MustParseAddr("46.102.130.95"),
 		Ports:  config.PortRange{First: 9000, Last: 9399},
 		Allow:  []netip.Prefix{netip.MustParsePrefix("46.102.130.17/24")},
+	}}}
+	configurations, err := encodeBridgeConfigs(settings)
+	if err != nil {
+		t.Fatalf("encodeBridgeConfigs: %v", err)
 	}
-	configuration, err := encodeBridgeConfig(settings)
-	if err != nil || ipv4FromWord(configuration.ServerIp) != settings.Server || configuration.PortFirst != 9000 || configuration.PortLast != 9399 {
-		t.Fatalf("configuration = %#v, %v", configuration, err)
+	if configuration := configurations[0]; ipv4FromWord(configuration.ServerIp) != settings.Entries[0].Server ||
+		configuration.PortFirst != 9000 || configuration.PortLast != 9399 {
+		t.Fatalf("configuration = %#v", configuration)
+	}
+	for index := 1; index < MaxBridges; index++ {
+		if configurations[index] != (mupBridgeConfigV1{}) {
+			t.Fatalf("configuration %d = %#v, want an unused entry", index, configurations[index])
+		}
 	}
 	senders, err := bridgeSenders(settings)
 	if err != nil {
 		t.Fatalf("bridgeSenders: %v", err)
 	}
-	if len(senders) != 2 || senders[0].Prefixlen != 32 || ipv4FromWord(senders[0].Address) != settings.Server ||
-		senders[1].Prefixlen != 24 || ipv4FromWord(senders[1].Address) != netip.MustParseAddr("46.102.130.0") {
+	if len(senders) != 2 || senders[0].Prefixlen != 64 || senders[0].Bridge != 0 || ipv4FromWord(senders[0].Address) != settings.Entries[0].Server ||
+		senders[1].Prefixlen != 32+24 || senders[1].Bridge != 0 || ipv4FromWord(senders[1].Address) != netip.MustParseAddr("46.102.130.0") {
 		t.Fatalf("senders = %#v", senders)
 	}
-	settings.Allow = []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")}
+	settings.Entries[0].Allow = []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")}
 	if _, err := bridgeSenders(settings); err == nil {
 		t.Fatal("an open allow range encoded")
 	}
-	if _, err := encodeBridgeConfig(BridgeSettings{Server: settings.Server}); err == nil {
+	if _, err := encodeBridgeConfigs(BridgeSettings{Entries: []BridgeEntry{{Server: settings.Entries[0].Server}}}); err == nil {
 		t.Fatal("a bridge without ports encoded")
+	}
+}
+
+func TestBridgeSettingsEncodingOfSeveralEntries(t *testing.T) {
+	t.Parallel()
+
+	settings := BridgeSettings{Entries: []BridgeEntry{
+		{
+			Server: netip.MustParseAddr("160.119.74.33"),
+			Ports:  config.PortRange{First: 9000, Last: 9999},
+			Allow:  []netip.Prefix{netip.MustParsePrefix("79.175.167.5/32"), netip.MustParsePrefix("46.102.130.95/32")},
+		},
+		{
+			Server: netip.MustParseAddr("178.160.229.46"),
+			Ports:  config.PortRange{First: 5000, Last: 5005},
+			Allow:  []netip.Prefix{netip.MustParsePrefix("79.175.167.5/32"), netip.MustParsePrefix("178.160.228.7/24")},
+		},
+	}}
+	configurations, err := encodeBridgeConfigs(settings)
+	if err != nil {
+		t.Fatalf("encodeBridgeConfigs: %v", err)
+	}
+	for index, entry := range settings.Entries {
+		configuration := configurations[index]
+		if ipv4FromWord(configuration.ServerIp) != entry.Server || configuration.PortFirst != entry.Ports.First || configuration.PortLast != entry.Ports.Last {
+			t.Fatalf("configuration %d = %#v", index, configuration)
+		}
+	}
+	for index := len(settings.Entries); index < MaxBridges; index++ {
+		if configurations[index] != (mupBridgeConfigV1{}) {
+			t.Fatalf("configuration %d = %#v, want an unused entry", index, configurations[index])
+		}
+	}
+
+	senders, err := bridgeSenders(settings)
+	if err != nil {
+		t.Fatalf("bridgeSenders: %v", err)
+	}
+	type sender struct {
+		prefixlen uint32
+		bridge    uint32
+		address   string
+	}
+	want := []sender{
+		{64, 0, "160.119.74.33"}, {64, 0, "79.175.167.5"}, {64, 0, "46.102.130.95"},
+		{64, 1, "178.160.229.46"}, {64, 1, "79.175.167.5"}, {56, 1, "178.160.228.0"},
+	}
+	if len(senders) != len(want) {
+		t.Fatalf("senders = %#v, want %d keys", senders, len(want))
+	}
+	for index, key := range senders {
+		got := sender{key.Prefixlen, key.Bridge, ipv4FromWord(key.Address).String()}
+		if got != want[index] {
+			t.Fatalf("sender %d = %+v, want %+v", index, got, want[index])
+		}
+	}
+}
+
+func TestBridgeSettingsRefuseAnEmptyOrLongList(t *testing.T) {
+	t.Parallel()
+
+	entry := BridgeEntry{Server: netip.MustParseAddr("160.119.74.33"), Ports: config.SinglePort(9000)}
+	tooMany := make([]BridgeEntry, MaxBridges+1)
+	for index := range tooMany {
+		tooMany[index] = entry
+		tooMany[index].Ports = config.SinglePort(uint16(9000 + index))
+	}
+	for name, settings := range map[string]BridgeSettings{"no entry": {}, "too many entries": {Entries: tooMany}} {
+		if _, err := encodeBridgeConfigs(settings); err == nil {
+			t.Fatalf("%s: encodeBridgeConfigs succeeded", name)
+		}
+		if _, err := bridgeSenders(settings); err == nil {
+			t.Fatalf("%s: bridgeSenders succeeded", name)
+		}
+	}
+	if _, err := encodeBridgeConfigs(BridgeSettings{Entries: tooMany[:MaxBridges]}); err != nil {
+		t.Fatalf("encodeBridgeConfigs of %d entries: %v", MaxBridges, err)
+	}
+}
+
+func TestDataplaneMaxBridgesMatchesTheConfiguration(t *testing.T) {
+	t.Parallel()
+
+	if MaxBridges != config.MaxBridges {
+		t.Fatalf("dataplane.MaxBridges = %d, config.MaxBridges = %d", MaxBridges, config.MaxBridges)
 	}
 }
 
