@@ -140,7 +140,7 @@ func (*Runtime) SetServerEgressGroup(EgressGroupEntry) error {
 	return ErrUnsupportedPlatform
 }
 
-func (*Runtime) DeleteServerEgressGroup(ClientKey) error {
+func (*Runtime) DeleteServerEgressGroup(ClientKey, uint16) error {
 	return ErrUnsupportedPlatform
 }
 

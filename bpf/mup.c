@@ -201,7 +201,7 @@ struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 4096);
 	MUP_PINNED;
-	__type(key, struct client_key_v1);
+	__type(key, struct down_group_key_v1);
 	__type(value, struct down_group_v1);
 } server_down_groups SEC(".maps");
 
@@ -1204,7 +1204,8 @@ static __always_inline int same_return_path(
 	       left->client_source_ip == right->client_source_ip &&
 	       left->server_local_ip == right->server_local_ip &&
 	       left->return_ip == right->return_ip &&
-	       left->ifindex == right->ifindex;
+	       left->ifindex == right->ifindex &&
+	       left->listen_port == right->listen_port;
 }
 
 /*
@@ -1246,7 +1247,6 @@ static __always_inline int get_or_create_server_route(
 	__u16 *target_port)
 {
 	struct server_route_value_v1 *existing;
-	struct server_route_value_v1 candidate = *observed;
 	struct server_reverse_value_v1 reverse = {};
 	__u64 now = bpf_ktime_get_ns();
 	__u16 allocated = 0;
@@ -1275,10 +1275,12 @@ static __always_inline int get_or_create_server_route(
 		return MUP_DROP_MAP_INVARIANT;
 	}
 
-	candidate.target_port = allocated;
-	candidate.last_seen_ns = now;
+	/* The reverse entry holds the new route, so the stack keeps one copy. */
+	reverse.route_value = *observed;
+	reverse.route_value.target_port = allocated;
+	reverse.route_value.last_seen_ns = now;
 	update_error = bpf_map_update_elem(&server_route_by_key, route_key,
-					   &candidate, BPF_NOEXIST);
+					   &reverse.route_value, BPF_NOEXIST);
 	if (update_error) {
 		bpf_map_push_elem(&free_target_ports, &allocated, BPF_ANY);
 		existing = bpf_map_lookup_elem(&server_route_by_key, route_key);
@@ -1290,7 +1292,6 @@ static __always_inline int get_or_create_server_route(
 	}
 
 	reverse.route_key = *route_key;
-	reverse.route_value = candidate;
 	update_error = bpf_map_update_elem(&server_route_by_port, &allocated,
 					   &reverse, BPF_NOEXIST);
 	if (update_error) {
@@ -1865,7 +1866,9 @@ static __always_inline int server_target_reply(
 {
 	struct registration_value_v1 *registration;
 	struct server_route_value_v1 *forward;
+	struct down_group_key_v1 down_key = {};
 	struct down_group_v1 *down;
+	__u16 listen_port = reverse->route_value.listen_port;
 	__u32 peer_token = 0;
 	__be32 pool_addr = 0;
 	__u64 now;
@@ -1890,17 +1893,25 @@ static __always_inline int server_target_reply(
 	    mup_set_peer_token(packet, reverse->route_key.peer_token))
 		return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
 	/*
-	 * A client with separate down paths lets the server pick the down path
-	 * of each reply. Other clients get the reply on the path of the latest
-	 * upstream packet.
+	 * A group with separate down paths lets the server pick the down path
+	 * of each reply. The route knows the listen port of its group, so each
+	 * group of a client gets its own down group. Other groups get the reply
+	 * on the path of the latest upstream packet.
 	 */
-	down = bpf_map_lookup_elem(&server_down_groups,
-				   &reverse->route_key.client);
-	if (down && down->path_mask &&
-	    down->listen_port == registration->listen_port)
-		return send_down_reply(skb, packet, reverse, down,
-				       registration->listen_port, partial,
-				       at_egress, !at_egress);
+	down_key.client = reverse->route_key.client;
+	down_key.listen_port = listen_port;
+	down = bpf_map_lookup_elem(&server_down_groups, &down_key);
+	if (down && down->path_mask)
+		return send_down_reply(skb, packet, reverse, down, listen_port,
+				       partial, at_egress, !at_egress);
+	/*
+	 * An ingress reflect path carries no reply reflection. Without a down
+	 * group the server has no path to the client. A direct reply from the
+	 * server address would be dropped by the client, and it would show a
+	 * direct flow from the server to the client.
+	 */
+	if (reverse->route_value.flags & MUP_FLAG_UP_REFLECT)
+		return count_and_drop(skb, MUP_DROP_NO_PATH);
 	if (reverse->route_value.flags & MUP_FLAG_RETURN_POOL) {
 		pool_addr = pick_reflector(reverse->route_value.return_ip,
 					   reverse->route_value.transport,
@@ -1921,14 +1932,14 @@ static __always_inline int server_target_reply(
 				packet, source_ip,
 				reverse->route_key.client.advertised_ip,
 				reverse->route_value.server_port,
-				registration->listen_port,
+				listen_port,
 				reverse->route_key.peer_token);
 		else
 			result = mup_rewrite_udp(
 				packet, source_ip,
 				reverse->route_key.client.advertised_ip,
 				reverse->route_value.server_port,
-				registration->listen_port);
+				listen_port);
 		if (result)
 			return count_and_drop(skb, MUP_DROP_CHECKSUM);
 	} else if (reverse->route_value.transport == MUP_TRANSPORT_ICMP) {
@@ -2104,6 +2115,7 @@ int mup_server_ingress(struct __sk_buff *skb)
 	observed.server_local_ip = packet.ipv4->destination;
 	observed.return_ip = path->return_ip;
 	observed.ifindex = skb->ifindex;
+	observed.listen_port = path->listen_port;
 	if (configuration->target_ip == configuration->source_ip)
 		reserved_port = configuration->target_port;
 	result = get_or_create_server_route(&route_key, &observed, reserved_port,

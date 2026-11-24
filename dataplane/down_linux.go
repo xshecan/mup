@@ -83,7 +83,8 @@ func (r *Runtime) DeleteServerEgressPath(client ClientKey, pathID uint16) error 
 	return nil
 }
 
-// SetServerEgressGroup writes the egress group of a client on a server.
+// SetServerEgressGroup writes the egress group of one listen port of a client
+// on a server.
 func (r *Runtime) SetServerEgressGroup(entry EgressGroupEntry) error {
 	key, value, err := encodeEgressGroupEntry(entry)
 	if err != nil {
@@ -95,15 +96,15 @@ func (r *Runtime) SetServerEgressGroup(entry EgressGroupEntry) error {
 		return errors.New("set server egress group: MUP dataplane is closed")
 	}
 	if err := r.objects.ServerDownGroups.Update(key, value, ebpf.UpdateAny); err != nil {
-		return fmt.Errorf("update egress group of %s: %w", entry.Client.AdvertisedIP, err)
+		return fmt.Errorf("update egress group of %s on listen port %d: %w", entry.Client.AdvertisedIP, entry.ListenPort, err)
 	}
 	return nil
 }
 
-// DeleteServerEgressGroup removes the egress group of a client on a server. Its
-// replies then follow the ingress paths again.
-func (r *Runtime) DeleteServerEgressGroup(client ClientKey) error {
-	key, err := encodeClientKey(client)
+// DeleteServerEgressGroup removes the egress group of one listen port of a
+// client on a server. Its replies then follow the ingress paths again.
+func (r *Runtime) DeleteServerEgressGroup(client ClientKey, listenPort uint16) error {
+	key, err := encodeEgressGroupKey(client, listenPort)
 	if err != nil {
 		return err
 	}
@@ -113,7 +114,7 @@ func (r *Runtime) DeleteServerEgressGroup(client ClientKey) error {
 		return errors.New("delete server egress group: MUP dataplane is closed")
 	}
 	if err := deleteEntry(r.objects.ServerDownGroups, key); err != nil {
-		return fmt.Errorf("delete egress group of %s: %w", client.AdvertisedIP, err)
+		return fmt.Errorf("delete egress group of %s on listen port %d: %w", client.AdvertisedIP, listenPort, err)
 	}
 	return nil
 }

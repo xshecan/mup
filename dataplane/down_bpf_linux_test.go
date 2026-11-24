@@ -4,6 +4,7 @@ package dataplane
 
 import (
 	"encoding/binary"
+	"math"
 	"net/netip"
 	"slices"
 	"testing"
@@ -35,10 +36,11 @@ func egressReplyCollection(t *testing.T, mode uint8, healthy uint8) *ebpf.Collec
 	routeValue := mupServerRouteValueV1{
 		TargetPort: 20000, ServerPort: 5000, Transport: uint8(protocol.TransportUDP),
 		ClientSourceIp: client.AdvertisedIp, ServerLocalIp: mustTestWord(t, ingressTarget), Ifindex: 1,
+		ListenPort: 51821,
 	}
 	put("server_route_by_key", routeKey, routeValue)
 	put("server_route_by_port", uint16(20000), mupServerReverseValueV1{RouteKey: routeKey, RouteValue: routeValue})
-	put("server_down_groups", client, mupDownGroupV1{ListenPort: 51821, Mode: mode, PathMask: 0b11, HealthyMask: healthy, IcmpMask: 0b10})
+	put("server_down_groups", mupDownGroupKeyV1{Client: client, ListenPort: 51821}, mupDownGroupV1{Mode: mode, PathMask: 0b11, HealthyMask: healthy, IcmpMask: 0b10})
 	put("server_down_paths", mupDownPathKeyV1{Client: client, PathId: 0}, mupDownPathV1{
 		ServerIp: mustTestWord(t, egressDirectServer), Ifindex: 1, ServerPort: 9200, Transport: uint8(protocol.TransportUDP),
 	})
@@ -134,17 +136,95 @@ func TestServerDropsAReplyWithoutAHealthyEgressPath(t *testing.T) {
 	}
 }
 
-// An egress group of another listen port does not apply, so the reply follows
-// the ingress path as before.
+// An egress group of another listen port of the client does not apply, so the
+// reply follows the ingress path as before.
 func TestServerFollowsTheIngressPathWithoutAEgressGroup(t *testing.T) {
 	collection := egressReplyCollection(t, 0, 0b11)
 	defer collection.Close()
 	client := mupClientKeyV1{AdvertisedIp: mustTestWord(t, ingressClient), InstanceNonce: 7}
-	if err := collection.Maps["server_down_groups"].Update(client, mupDownGroupV1{ListenPort: 51999, PathMask: 0b11, HealthyMask: 0b11}, ebpf.UpdateAny); err != nil {
+	if err := collection.Maps["server_down_groups"].Delete(mupDownGroupKeyV1{Client: client, ListenPort: 51821}); err != nil {
+		t.Fatalf("delete egress group: %v", err)
+	}
+	other := mupDownGroupKeyV1{Client: client, ListenPort: 51999}
+	if err := collection.Maps["server_down_groups"].Update(other, mupDownGroupV1{PathMask: 0b11, HealthyMask: 0b11}, ebpf.UpdateAny); err != nil {
 		t.Fatalf("update egress group: %v", err)
 	}
 	_, output := targetReply(t, collection)
 	assertUDPHeader(t, output, ingressTarget, ingressClient, 5000, 51821)
+}
+
+// putEgressRoute writes a route of the client with the token, the target port,
+// the listen port of its group, and the flags.
+func putEgressRoute(t *testing.T, collection *ebpf.Collection, client mupClientKeyV1, token uint32, targetPort, listenPort uint16, flags uint8) {
+	t.Helper()
+	routeKey := mupServerRouteKeyV1{Client: client, PeerToken: token}
+	routeValue := mupServerRouteValueV1{
+		TargetPort: targetPort, ServerPort: 5000, Transport: uint8(protocol.TransportUDP), Flags: flags,
+		ClientSourceIp: client.AdvertisedIp, ServerLocalIp: mustTestWord(t, ingressTarget), Ifindex: 1,
+		ListenPort: listenPort,
+	}
+	if err := collection.Maps["server_route_by_key"].Update(routeKey, routeValue, ebpf.UpdateAny); err != nil {
+		t.Fatalf("update forward route: %v", err)
+	}
+	reverse := mupServerReverseValueV1{RouteKey: routeKey, RouteValue: routeValue}
+	if err := collection.Maps["server_route_by_port"].Update(targetPort, reverse, ebpf.UpdateAny); err != nil {
+		t.Fatalf("update reverse route: %v", err)
+	}
+}
+
+// Two groups of one client keep their settings apart. The route of group A has
+// no egress group and follows its ingress path, and the route of group B has
+// an egress group. The listen port of the client registration does not matter.
+func TestServerKeepsTwoGroupsOfOneClientApart(t *testing.T) {
+	const listenA, listenB = 51821, 51822
+	collection := egressReplyCollection(t, 0, 0b11)
+	defer collection.Close()
+	client := mupClientKeyV1{AdvertisedIp: mustTestWord(t, ingressClient), InstanceNonce: 7}
+	if err := collection.Maps["server_down_groups"].Delete(mupDownGroupKeyV1{Client: client, ListenPort: listenA}); err != nil {
+		t.Fatalf("delete egress group of A: %v", err)
+	}
+	group := mupDownGroupV1{PathMask: 0b11, HealthyMask: 0b11, IcmpMask: 0b10}
+	if err := collection.Maps["server_down_groups"].Update(mupDownGroupKeyV1{Client: client, ListenPort: listenB}, group, ebpf.UpdateAny); err != nil {
+		t.Fatalf("update egress group of B: %v", err)
+	}
+	putEgressRoute(t, collection, client, 9, 20000, listenA, 0)
+	putEgressRoute(t, collection, client, 10, 20001, listenB, 0)
+
+	for _, registered := range []uint16{listenA, listenB} {
+		registration := mupRegistrationValueV1{ListenPort: registered, ExpiresAtNs: math.MaxUint64}
+		if err := collection.Maps["registration_by_key"].Update(client, registration, ebpf.UpdateAny); err != nil {
+			t.Fatalf("update registration: %v", err)
+		}
+		// Group A replies on its ingress path to its own listen port.
+		_, output := targetReply(t, collection)
+		assertUDPHeader(t, output, ingressTarget, ingressClient, 5000, listenA)
+		// Group B replies on its egress path to its own listen port.
+		reply := udpWireGuardFrame(t, ingressTarget, ingressClient, ingressTargetPort, 20001, 0)
+		result, output, err := collection.Programs["mup_server_egress"].Test(reply)
+		if err != nil {
+			t.Fatalf("registered %d: program test: %v", registered, err)
+		}
+		if result != tcActOK && result != tcActRedirect {
+			t.Fatalf("registered %d: return value = %d, want pass or redirect", registered, int32(result))
+		}
+		assertUDPHeader(t, output, egressDirectServer, ingressClient, 9200, listenB)
+	}
+}
+
+// A route of an ingress reflect path carries no reply reflection, so without an
+// egress group it has no path to the client.
+func TestServerDropsAReplyOfAnIngressReflectRouteWithoutAEgressGroup(t *testing.T) {
+	collection := egressReplyCollection(t, 0, 0b11)
+	defer collection.Close()
+	client := mupClientKeyV1{AdvertisedIp: mustTestWord(t, ingressClient), InstanceNonce: 7}
+	if err := collection.Maps["server_down_groups"].Delete(mupDownGroupKeyV1{Client: client, ListenPort: 51821}); err != nil {
+		t.Fatalf("delete egress group: %v", err)
+	}
+	putEgressRoute(t, collection, client, 9, 20000, 51821, protocol.ControlFlagIngressReflect)
+	result, _ := targetReply(t, collection)
+	if drops := dropCount(t, collection, protocol.DropNoPath); result != tcActShot || drops != 1 {
+		t.Fatalf("return value = %d, NO_PATH drops = %d, want a drop", int32(result), drops)
+	}
 }
 
 var (

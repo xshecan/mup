@@ -182,19 +182,27 @@ struct client_duplicate_key_v1 {
 };
 
 /*
- * down_group_v1 holds the down paths of one client on a server, keyed by the
- * client key. The server program picks a down path for each reply of the
- * listen port with mode, among the paths in path_mask & healthy_mask. The
- * paths in icmp_mask use ICMP. Go writes it from the DOWN_REGISTER frames and
- * the probe replies.
+ * down_group_key_v1 names the down group of one listen port of a client. All
+ * groups of a client share the client key, so the listen port tells them apart.
+ */
+struct down_group_key_v1 {
+	struct client_key_v1 client;
+	__be16 listen_port;
+	__u8 padding[6];
+};
+
+/*
+ * down_group_v1 holds the down paths of one group of a client on a server,
+ * keyed by the client key and the listen port. The server program picks a
+ * down path for each reply of the group with mode, among the paths in
+ * path_mask & healthy_mask. The paths in icmp_mask use ICMP. Go writes it from
+ * the DOWN_REGISTER frames and the probe replies.
  */
 struct down_group_v1 {
-	__be16 listen_port;
 	__u8 mode;
 	__u8 path_mask;
 	__u8 healthy_mask;
 	__u8 icmp_mask;
-	__u8 padding[2];
 };
 
 struct down_path_key_v1 {
@@ -292,6 +300,9 @@ struct registered_path_value_v1 {
 	__u8 flags;
 	__u8 prefix;
 	__be32 return_ip;
+	/* The listen port of the group whose REGISTER frame made the path. */
+	__be16 listen_port;
+	__u8 padding[6];
 };
 
 struct peer_endpoint_key_v1 {
@@ -324,6 +335,9 @@ struct server_route_value_v1 {
 	__be32 return_ip;
 	__u32 ifindex;
 	__u64 last_seen_ns;
+	/* The listen port of the group of the path that the route follows. */
+	__be16 listen_port;
+	__u8 padding[6];
 };
 
 struct server_reverse_value_v1 {
@@ -429,12 +443,12 @@ _Static_assert(sizeof(struct server_config_v1) == 16, "server_config_v1 ABI");
 _Static_assert(sizeof(struct server_ports_v1) == 4, "server_ports_v1 ABI");
 _Static_assert(sizeof(struct target_ingress_v1) == 12, "target_ingress_v1 ABI");
 _Static_assert(sizeof(struct registration_value_v1) == 16, "registration_value_v1 ABI");
-_Static_assert(sizeof(struct registered_path_value_v1) == 32, "registered_path_value_v1 ABI");
+_Static_assert(sizeof(struct registered_path_value_v1) == 40, "registered_path_value_v1 ABI");
 _Static_assert(sizeof(struct peer_endpoint_key_v1) == 12, "peer_endpoint_key_v1 ABI");
 _Static_assert(sizeof(struct peer_token_value_v1) == 16, "peer_token_value_v1 ABI");
 _Static_assert(sizeof(struct peer_endpoint_value_v1) == 24, "peer_endpoint_value_v1 ABI");
-_Static_assert(sizeof(struct server_route_value_v1) == 32, "server_route_value_v1 ABI");
-_Static_assert(sizeof(struct server_reverse_value_v1) == 56, "server_reverse_value_v1 ABI");
+_Static_assert(sizeof(struct server_route_value_v1) == 40, "server_route_value_v1 ABI");
+_Static_assert(sizeof(struct server_reverse_value_v1) == 64, "server_reverse_value_v1 ABI");
 _Static_assert(sizeof(struct path_config_v1) == 20, "path_config_v1 ABI");
 _Static_assert(sizeof(struct path_return_v1) == 8, "path_return_v1 ABI");
 _Static_assert(sizeof(struct up_reflect_v1) == 72, "up_reflect_v1 ABI");
@@ -445,7 +459,8 @@ _Static_assert(sizeof(struct duplicate_key_v1) == 48, "duplicate_key_v1 ABI");
 _Static_assert(sizeof(struct event_v1) == 32, "event_v1 ABI");
 _Static_assert(sizeof(struct client_down_path_v1) == 24, "client_down_path_v1 ABI");
 _Static_assert(sizeof(struct client_duplicate_key_v1) == 28, "client_duplicate_key_v1 ABI");
-_Static_assert(sizeof(struct down_group_v1) == 8, "down_group_v1 ABI");
+_Static_assert(sizeof(struct down_group_key_v1) == 24, "down_group_key_v1 ABI");
+_Static_assert(sizeof(struct down_group_v1) == 4, "down_group_v1 ABI");
 _Static_assert(sizeof(struct down_path_key_v1) == 24, "down_path_key_v1 ABI");
 _Static_assert(sizeof(struct down_path_v1) == 88, "down_path_v1 ABI");
 _Static_assert(sizeof(struct bridge_config_v1) == 8, "bridge_config_v1 ABI");

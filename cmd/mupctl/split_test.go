@@ -93,3 +93,45 @@ func TestClientsShowTheEgressPaths(t *testing.T) {
 		}
 	}
 }
+
+func TestClientsShowTheListenPortsAndEveryEgressGroup(t *testing.T) {
+	t.Parallel()
+
+	var out strings.Builder
+	printClients(&out, []api.RegisteredClient{{
+		AdvertisedIP: "192.0.2.10",
+		Nonce:        "8f3a0000000000aa",
+		LeaseSeconds: 24,
+		ListenPort:   51825,
+		Paths: []api.RegisteredPath{
+			{ID: 0, ListenPort: 51825, Transport: "udp", Local: "203.0.113.5"},
+			{ID: 1, ListenPort: 51820, Transport: "udp", Local: "203.0.113.5"},
+			{ID: 2, ListenPort: 51820, Transport: "udp", Local: "203.0.113.6"},
+		},
+		Egresses: []api.EgressGroup{
+			{ListenPort: 51820, Mode: "failover", Paths: []api.EgressPath{{ID: 0, Server: "203.0.113.5", Port: 9200, Transport: "udp", Healthy: true}}},
+			{ListenPort: 51825, Mode: "repeater", Paths: []api.EgressPath{{ID: 3, Server: "203.0.113.5", Port: 9300, Transport: "udp"}}},
+		},
+	}}, true)
+	for _, want := range []string{"51820,51825", "51820:1/1 healthy, failover; 51825:0/1 healthy, repeater", "51820:0:udp:203.0.113.5:9200; 51825:3:udp:203.0.113.5:9300"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("clients output misses %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestClientsFallBackToTheClientListenPort(t *testing.T) {
+	t.Parallel()
+
+	var out strings.Builder
+	printClients(&out, []api.RegisteredClient{{
+		AdvertisedIP: "192.0.2.10",
+		Nonce:        "8f3a0000000000aa",
+		LeaseSeconds: 24,
+		ListenPort:   51820,
+		Paths:        []api.RegisteredPath{{ID: 0, Transport: "udp", Local: "203.0.113.5"}},
+	}}, true)
+	if !strings.Contains(out.String(), "51820") {
+		t.Fatalf("clients output misses the listen port:\n%s", out.String())
+	}
+}

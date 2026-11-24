@@ -156,22 +156,28 @@ type Reflector struct {
 
 // RegisteredClient is one client registration on a server.
 type RegisteredClient struct {
-	AdvertisedIP string           `json:"advertised_ip"`
-	Nonce        string           `json:"nonce"`
+	AdvertisedIP string `json:"advertised_ip"`
+	Nonce        string `json:"nonce"`
+	// ReturnIP and ListenPort are the values of the latest REGISTER frame. A
+	// client with more than one group has the listen port of each path in Paths.
 	ReturnIP     string           `json:"return_ip,omitempty"`
 	ListenPort   uint16           `json:"listen_port"`
 	LeaseSeconds float64          `json:"lease_seconds"`
 	Paths        []RegisteredPath `json:"paths"`
 	Peers        int              `json:"peers"`
-	// Egress holds the egress paths of a client with separate egress paths.
-	Egress *EgressGroup `json:"egress,omitempty"`
+	// Egress is the egress group with the lowest listen port of a client with
+	// separate egress paths. Old readers use it. Egresses holds every egress
+	// group of the client, sorted by listen port.
+	Egress   *EgressGroup  `json:"egress,omitempty"`
+	Egresses []EgressGroup `json:"egresses,omitempty"`
 }
 
-// EgressGroup is the egress mode and the egress paths of a client, as a server
-// sees them.
+// EgressGroup is the egress mode and the egress paths of one group of a client
+// (one listen port), as a server sees them.
 type EgressGroup struct {
-	Mode  string       `json:"mode"`
-	Paths []EgressPath `json:"paths"`
+	ListenPort uint16       `json:"listen_port,omitempty"`
+	Mode       string       `json:"mode"`
+	Paths      []EgressPath `json:"paths"`
 }
 
 // EgressPath is one egress path of a client on a server. Members counts the
@@ -192,6 +198,7 @@ type EgressPath struct {
 
 type RegisteredPath struct {
 	ID           uint16  `json:"id"`
+	ListenPort   uint16  `json:"listen_port,omitempty"`
 	Source       string  `json:"source"`
 	Local        string  `json:"local"`
 	Transport    string  `json:"transport"`

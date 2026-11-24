@@ -35,7 +35,7 @@ func TestEncodeRegistrationSettings(t *testing.T) {
 		t.Fatalf("registration = %#v / %#v", key, value)
 	}
 	if pathValue.Client != key || pathValue.PathId != 1 ||
-		pathValue.ExpiresAtNs != 123456 || pathKey.ServerPort != 5000 ||
+		pathValue.ExpiresAtNs != 123456 || pathValue.ListenPort != 51820 || pathKey.ServerPort != 5000 ||
 		pathKey.Transport != uint8(protocol.TransportICMP) {
 		t.Fatalf("path = %#v / %#v", pathKey, pathValue)
 	}

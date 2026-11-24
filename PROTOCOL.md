@@ -70,7 +70,7 @@ A client can serve several WireGuard targets, with one group for each. A group j
 
 The groups share the advertised IP, the instance nonce, the eight path slots, and the pool of tokens. A token is unique in the client, so an egress token gives the peer and its group. The client never moves a peer to another group.
 
-The client configuration rejects one server address and port in two groups. The server keeps one listen port for each client key. Two groups on one server thus overwrite this value. The server keeps the return IP of each registered path.
+The client configuration rejects one server address and port in two groups. The server keeps the listen port and the return IP of each registered path. It copies the listen port to each route that arrives on the path, and a reply goes to the listen port of its route. Two groups of one client key can thus use one server.
 
 ## The peer token
 
@@ -270,15 +270,15 @@ The client program reads the healthy path mask from `path_state` for each packet
 
 The balancer hash is `h = token * 0x9e3779b1 ^ mask * 0x85ebca6b`, then `h ^= h >> 16`. The index of the path in the list of healthy paths is `h % count`. A peer thus stays on one path until the set of healthy paths in its group changes. A health change in another group does not move the peer.
 
-Without egress paths, the server does not select paths. It replies on the path of the latest ingress packet of each route. After a failover, the first ingress packet on the new path moves the egress traffic too. In repeater mode, the first copy to arrive sets the return path.
+Without egress paths, the server does not select paths. It replies on the path of the latest ingress packet of each route. After a failover, the first ingress packet on the new path moves the egress traffic too. In repeater mode, the first copy to arrive sets the return path. A route that arrived on an ingress path with `via` is the exception, because that path carries no replies. Without egress paths for its group, the server drops the reply and counts reason 15.
 
-For a group with egress paths, the server picks the egress path of each reply from the healthy egress paths of the client. The egress mode uses the rules of the client:
+The server keeps the egress paths of each group apart, by the client key and the listen port. For a group with egress paths, the server picks the egress path of each reply from the healthy egress paths of the listen port of its route. The egress mode uses the rules of the client:
 
 - Failover: The server uses the healthy egress path with the lowest ID.
 - Balancer: The server hashes the token and the mask with the formula above.
 - Repeater: The server sends the reply on every healthy egress path.
 
-In repeater mode, the client keeps the first copy of each message for 2 seconds and drops the other copies with reason 16. If the client has no healthy egress path on the server, the server drops the reply and counts reason 15.
+In repeater mode, the client keeps the first copy of each message for 2 seconds and drops the other copies with reason 16. If the group has no healthy egress path on the server, the server drops the reply and counts reason 15.
 
 ## Control plane
 
@@ -483,7 +483,7 @@ A program returns `TCX_NEXT` for traffic that it does not own. This traffic incl
 | 12 | `TARGET_PORT_POOL` | The server has no free target port. |
 | 13 | `MAP_INVARIANT` | A forward entry and its reverse entry disagree, or a map update failed. |
 | 14 | `ROUTE_MISS` | The server has no route for the target port, or the client has no peer for the token. |
-| 15 | `NO_PATH` | The group of the peer has no healthy path, or the client has no healthy egress path on the server. |
+| 15 | `NO_PATH` | The group of the peer has no healthy path, or the group has no healthy egress path on the server. |
 | 16 | `DUPLICATE` | The server already forwarded this repeater copy, or the client already passed this egress repeater copy. |
 | 17 | `FIB` | A repeater clone got no FIB result for its path. MUP skips the clone, not the packet. |
 | 18 | `NEIGHBOR` | A repeater clone failed to redirect. MUP skips the clone, not the packet. |

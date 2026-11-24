@@ -216,8 +216,8 @@ func egressBridgeCollection(t *testing.T, mode uint8, healthy uint8) *ebpf.Colle
 			t.Fatalf("update egress path %d: %v", id, err)
 		}
 	}
-	if err := collection.Maps["server_down_groups"].Update(client, mupDownGroupV1{
-		ListenPort: 51821, Mode: mode, PathMask: 0b11, HealthyMask: healthy, IcmpMask: 0b01,
+	if err := collection.Maps["server_down_groups"].Update(mupDownGroupKeyV1{Client: client, ListenPort: 51821}, mupDownGroupV1{
+		Mode: mode, PathMask: 0b11, HealthyMask: healthy, IcmpMask: 0b01,
 	}, ebpf.UpdateAny); err != nil {
 		t.Fatalf("update egress group: %v", err)
 	}

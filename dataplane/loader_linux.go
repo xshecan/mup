@@ -283,7 +283,7 @@ func (r *Runtime) ConfigureServer(settings ServerSettings) error {
 	// The egress paths of the previous run belong to no live registration. The
 	// clients send them again within a refresh, and until then the replies
 	// follow the ingress paths.
-	if err := clearMap[mupClientKeyV1, mupDownGroupV1](r.objects.ServerDownGroups); err != nil {
+	if err := clearMap[mupDownGroupKeyV1, mupDownGroupV1](r.objects.ServerDownGroups); err != nil {
 		return fmt.Errorf("clear egress groups: %w", err)
 	}
 	if err := clearMap[mupDownPathKeyV1, mupDownPathV1](r.objects.ServerDownPaths); err != nil {

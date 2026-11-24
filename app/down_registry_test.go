@@ -14,7 +14,7 @@ import (
 
 type fakeEgressPlane struct {
 	paths   map[egressKey]dataplane.EgressPathEntry
-	groups  map[dataplane.ClientKey]dataplane.EgressGroupEntry
+	groups  map[egressGroupKey]dataplane.EgressGroupEntry
 	members map[dataplane.PoolKey][]netip.Addr
 	pools   []dataplane.PoolKey
 }
@@ -22,7 +22,7 @@ type fakeEgressPlane struct {
 func newFakeEgressPlane() *fakeEgressPlane {
 	return &fakeEgressPlane{
 		paths:   map[egressKey]dataplane.EgressPathEntry{},
-		groups:  map[dataplane.ClientKey]dataplane.EgressGroupEntry{},
+		groups:  map[egressGroupKey]dataplane.EgressGroupEntry{},
 		members: map[dataplane.PoolKey][]netip.Addr{},
 	}
 }
@@ -38,12 +38,12 @@ func (f *fakeEgressPlane) DeleteServerEgressPath(client dataplane.ClientKey, id 
 }
 
 func (f *fakeEgressPlane) SetServerEgressGroup(entry dataplane.EgressGroupEntry) error {
-	f.groups[entry.Client] = entry
+	f.groups[egressGroupKey{client: entry.Client, listenPort: entry.ListenPort}] = entry
 	return nil
 }
 
-func (f *fakeEgressPlane) DeleteServerEgressGroup(client dataplane.ClientKey) error {
-	delete(f.groups, client)
+func (f *fakeEgressPlane) DeleteServerEgressGroup(client dataplane.ClientKey, listenPort uint16) error {
+	delete(f.groups, egressGroupKey{client: client, listenPort: listenPort})
 	return nil
 }
 
@@ -62,6 +62,7 @@ var (
 	egressPool    = netip.MustParseAddr("198.51.100.0")
 	egressMembers = []netip.Addr{netip.MustParseAddr("198.51.100.1"), netip.MustParseAddr("198.51.100.2"), netip.MustParseAddr("198.51.100.3")}
 	egressKeyOf   = dataplane.ClientKey{AdvertisedIP: egressClient, InstanceNonce: 7}
+	egressGroupOf = egressGroupKey{client: egressKeyOf, listenPort: 51820}
 )
 
 func newTestEgressRegistry(plane *fakeEgressPlane) *egressRegistry {
@@ -129,7 +130,7 @@ func TestEgressRegistryKeepsAEgressPathAndItsGroup(t *testing.T) {
 	if direct := plane.paths[egressKey{client: egressKeyOf, id: 2}]; direct.Pool || direct.ReturnIP.IsValid() || direct.ServerPort != 9300 {
 		t.Fatalf("direct entry = %#v", direct)
 	}
-	group := plane.groups[egressKeyOf]
+	group := plane.groups[egressGroupOf]
 	if group.ListenPort != 51820 || group.Mode != config.ModeRepeater || group.PathMask != 0b101 || group.HealthyMask != 0b101 {
 		t.Fatalf("group entry = %#v", group)
 	}
@@ -194,7 +195,7 @@ func TestEgressRegistryHealthFollowsTheProbeReplies(t *testing.T) {
 	if !slices.Equal(pool.Members, egressMembers[2:]) {
 		t.Fatalf("healthy members = %v, want %v", pool.Members, egressMembers[2:])
 	}
-	if group := plane.groups[egressKeyOf]; group.HealthyMask != 0b01 || group.PathMask != 0b11 {
+	if group := plane.groups[egressGroupOf]; group.HealthyMask != 0b01 || group.PathMask != 0b11 {
 		t.Fatalf("group = %#v, want only path 0 healthy", group)
 	}
 	// A direct path is healthy again with one reply, whatever the reply names.
@@ -202,7 +203,7 @@ func TestEgressRegistryHealthFollowsTheProbeReplies(t *testing.T) {
 		t.Fatal("confirm of the direct path failed")
 	}
 	registry.sync(later)
-	if group := plane.groups[egressKeyOf]; group.HealthyMask != 0b11 {
+	if group := plane.groups[egressGroupOf]; group.HealthyMask != 0b11 {
 		t.Fatalf("group = %#v, want both paths healthy", group)
 	}
 }
@@ -226,7 +227,7 @@ func TestEgressRegistryWithdrawsAndExpiresPaths(t *testing.T) {
 	if _, ok := plane.paths[egressKey{client: egressKeyOf, id: 1}]; ok {
 		t.Fatal("withdrawn path is still in the dataplane")
 	}
-	if group := plane.groups[egressKeyOf]; group.PathMask != 0b01 {
+	if group := plane.groups[egressGroupOf]; group.PathMask != 0b01 {
 		t.Fatalf("group = %#v after the withdrawal", group)
 	}
 	registry.sync(now.Add(registrationLeaseSeconds*time.Second + time.Second))
@@ -272,5 +273,133 @@ func TestEgressRegistryTargets(t *testing.T) {
 	}
 	if len(seen) != len(egressMembers) {
 		t.Fatalf("the ACKs used %d members, want each of the %d in turn", len(seen), len(egressMembers))
+	}
+}
+
+func egressFrameOf(port uint16, id uint16, mode config.Mode) protocol.ControlFrame {
+	frame := egressFrame(id, 9200+id, protocol.TransportUDP, mode)
+	frame.ListenPort = port
+	return frame
+}
+
+func TestEgressRegistryKeepsOneGroupForEachListenPort(t *testing.T) {
+	t.Parallel()
+
+	plane := newFakeEgressPlane()
+	registry := newTestEgressRegistry(plane)
+	now := time.Unix(1000, 0)
+	second := egressGroupKey{client: egressKeyOf, listenPort: 51825}
+	if err := registry.register(egressFrameOf(51820, 0, config.ModeFailover), egressClient, now); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := registry.register(egressFrameOf(51825, 3, config.ModeRepeater), egressClient, now); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if len(plane.groups) != 2 {
+		t.Fatalf("plane has %d groups, want 2", len(plane.groups))
+	}
+	if g := plane.groups[egressGroupOf]; g.PathMask != 0b1 || g.Mode != config.ModeFailover {
+		t.Fatalf("first group = %#v", g)
+	}
+	if g := plane.groups[second]; g.PathMask != 0b1000 || g.Mode != config.ModeRepeater {
+		t.Fatalf("second group = %#v", g)
+	}
+	// A frame of one group leaves the other group as it is.
+	if err := registry.register(egressFrameOf(51825, 4, config.ModeBalancer), egressClient, now); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if g := plane.groups[egressGroupOf]; g.PathMask != 0b1 || g.Mode != config.ModeFailover {
+		t.Fatalf("first group = %#v after a frame of the second group", g)
+	}
+	if g := plane.groups[second]; g.PathMask != 0b11000 || g.Mode != config.ModeBalancer {
+		t.Fatalf("second group = %#v after its own frame", g)
+	}
+}
+
+func TestEgressRegistryDeletesOnlyTheGroupThatLosesItsLastPath(t *testing.T) {
+	t.Parallel()
+
+	plane := newFakeEgressPlane()
+	registry := newTestEgressRegistry(plane)
+	now := time.Unix(1000, 0)
+	other := egressGroupKey{client: egressKeyOf, listenPort: 51825}
+	for _, frame := range []protocol.ControlFrame{egressFrameOf(51820, 0, config.ModeFailover), egressFrameOf(51825, 1, config.ModeFailover)} {
+		if err := registry.register(frame, egressClient, now); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+	}
+	withdraw := egressFrameOf(51825, 1, config.ModeFailover)
+	withdraw.LeaseSeconds = 0
+	if err := registry.register(withdraw, egressClient, now); err != nil {
+		t.Fatalf("withdraw: %v", err)
+	}
+	if _, ok := plane.groups[other]; ok {
+		t.Fatal("group of 51825 is still in the dataplane after its last path left")
+	}
+	if group := plane.groups[egressGroupOf]; group.PathMask != 0b1 {
+		t.Fatalf("group of 51820 = %#v, want it kept", group)
+	}
+	// The path of the other group renews, so only the first group expires.
+	later := now.Add(registrationLeaseSeconds*time.Second - time.Second)
+	if err := registry.register(egressFrameOf(51825, 2, config.ModeFailover), egressClient, later); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	registry.sync(now.Add(registrationLeaseSeconds*time.Second + time.Second))
+	if _, ok := plane.groups[egressGroupOf]; ok {
+		t.Fatal("group of 51820 is still in the dataplane after its path expired")
+	}
+	if group := plane.groups[other]; group.PathMask != 0b100 {
+		t.Fatalf("group of 51825 = %#v, want it kept", group)
+	}
+}
+
+func TestEgressRegistryMovesAPathToAnotherListenPort(t *testing.T) {
+	t.Parallel()
+
+	plane := newFakeEgressPlane()
+	registry := newTestEgressRegistry(plane)
+	now := time.Unix(1000, 0)
+	moved := egressGroupKey{client: egressKeyOf, listenPort: 51825}
+	for _, id := range []uint16{0, 1} {
+		if err := registry.register(egressFrameOf(51820, id, config.ModeFailover), egressClient, now); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+	}
+	if err := registry.register(egressFrameOf(51825, 1, config.ModeRepeater), egressClient, now); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if group := plane.groups[egressGroupOf]; group.PathMask != 0b01 {
+		t.Fatalf("old group = %#v, want it to lose the path", group)
+	}
+	if group := plane.groups[moved]; group.PathMask != 0b10 || group.Mode != config.ModeRepeater {
+		t.Fatalf("new group = %#v, want the moved path", group)
+	}
+	// The old group is deleted when the last path leaves it.
+	if err := registry.register(egressFrameOf(51825, 0, config.ModeRepeater), egressClient, now); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, ok := plane.groups[egressGroupOf]; ok {
+		t.Fatal("old group is still in the dataplane without a path")
+	}
+	if group := plane.groups[moved]; group.PathMask != 0b11 {
+		t.Fatalf("new group = %#v, want both paths", group)
+	}
+}
+
+func TestEgressRegistryShowsEveryGroupOfAClientSortedByListenPort(t *testing.T) {
+	t.Parallel()
+
+	registry := newTestEgressRegistry(newFakeEgressPlane())
+	now := time.Unix(1000, 0)
+	for _, frame := range []protocol.ControlFrame{egressFrameOf(51825, 2, config.ModeRepeater), egressFrameOf(51820, 0, config.ModeFailover)} {
+		if err := registry.register(frame, egressClient, now); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+	}
+	groups := registry.clients(now)[egressKeyOf]
+	if len(groups) != 2 || groups[0].ListenPort != 51820 || groups[1].ListenPort != 51825 ||
+		groups[0].Mode != "failover" || len(groups[0].Paths) != 1 || groups[0].Paths[0].ID != 0 ||
+		groups[1].Mode != "repeater" || len(groups[1].Paths) != 1 || groups[1].Paths[0].ID != 2 {
+		t.Fatalf("groups = %#v", groups)
 	}
 }

@@ -121,6 +121,7 @@ func (s *serverInspector) Clients() ([]api.RegisteredClient, error) {
 		}
 		clients[position].Paths = append(clients[position].Paths, api.RegisteredPath{
 			ID:           path.PathID,
+			ListenPort:   path.ListenPort,
 			Source:       path.Source.String(),
 			Local:        path.Local.String(),
 			Transport:    path.Transport.String(),
@@ -129,9 +130,10 @@ func (s *serverInspector) Clients() ([]api.RegisteredClient, error) {
 		})
 	}
 	if s.egresses != nil {
-		for client, egress := range s.egresses.registry.clients(time.Now()) {
-			if position, exists := index[client]; exists {
-				clients[position].Egress = &egress
+		for client, groups := range s.egresses.registry.clients(time.Now()) {
+			if position, exists := index[client]; exists && len(groups) > 0 {
+				clients[position].Egresses = groups
+				clients[position].Egress = &groups[0]
 			}
 		}
 	}

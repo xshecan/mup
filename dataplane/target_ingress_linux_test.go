@@ -51,7 +51,7 @@ func targetIngressCollection(t *testing.T) (*ebpf.Collection, mupClientKeyV1) {
 	put("registered_paths", mupRegisteredPathKeyV1{
 		SourceIp: client.AdvertisedIp, LocalIp: target, ServerPort: 5000,
 		Transport: uint8(protocol.TransportUDP),
-	}, mupRegisteredPathValueV1{Client: client, ExpiresAtNs: math.MaxUint64})
+	}, mupRegisteredPathValueV1{Client: client, ExpiresAtNs: math.MaxUint64, ListenPort: 51821})
 	return collection, client
 }
 
@@ -76,6 +76,47 @@ func TestServerIngressInjectsIntoTheTargetInterface(t *testing.T) {
 	assertUDPHeader(t, output, ingressClient, ingressTarget, 20000, ingressTargetPort)
 	if token := output[14+20+8+1 : 14+20+8+4]; token[0]|token[1]|token[2] != 0 {
 		t.Fatalf("WireGuard reserved bytes = %x, want zero", token)
+	}
+}
+
+// A route takes the listen port of the registered path that its packet used, so
+// the reply goes to the group of that path and not to the per-client port.
+func TestServerIngressStoresTheListenPortOfThePathInTheRoute(t *testing.T) {
+	collection, client := targetIngressCollection(t)
+	defer collection.Close()
+	if err := collection.Maps["free_target_ports"].Update(nil, uint16(20000), ebpf.UpdateAny); err != nil {
+		t.Fatalf("push a target port: %v", err)
+	}
+	const pathListenPort = 51822
+	pathKey := mupRegisteredPathKeyV1{
+		SourceIp: client.AdvertisedIp, LocalIp: mustTestWord(t, ingressTarget), ServerPort: 5000,
+		Transport: uint8(protocol.TransportUDP),
+	}
+	value := mupRegisteredPathValueV1{Client: client, ExpiresAtNs: math.MaxUint64, ListenPort: pathListenPort}
+	if err := collection.Maps["registered_paths"].Update(pathKey, value, ebpf.UpdateAny); err != nil {
+		t.Fatalf("update registered path: %v", err)
+	}
+	packet := udpWireGuardFrame(t, ingressClient, ingressTarget, pathListenPort, 5000, 9)
+	result, _, err := collection.Programs["mup_server_ingress"].Test(packet)
+	if err != nil {
+		t.Fatalf("program test: %v", err)
+	}
+	if result != tcActRedirect {
+		t.Fatalf("return value = %d, want the redirect %d", int32(result), tcActRedirect)
+	}
+	var route mupServerRouteValueV1
+	if err := collection.Maps["server_route_by_key"].Lookup(mupServerRouteKeyV1{Client: client, PeerToken: 9}, &route); err != nil {
+		t.Fatalf("look up the route: %v", err)
+	}
+	if route.ListenPort != pathListenPort {
+		t.Fatalf("route listen port = %d, want %d from the path, not 51821 from the registration", route.ListenPort, pathListenPort)
+	}
+	var reverse mupServerReverseValueV1
+	if err := collection.Maps["server_route_by_port"].Lookup(uint16(20000), &reverse); err != nil {
+		t.Fatalf("look up the reverse route: %v", err)
+	}
+	if reverse.RouteValue.ListenPort != pathListenPort {
+		t.Fatalf("reverse route listen port = %d, want %d", reverse.RouteValue.ListenPort, pathListenPort)
 	}
 }
 
@@ -132,6 +173,7 @@ func TestServerEgressCatchesTheTargetReply(t *testing.T) {
 	routeValue := mupServerRouteValueV1{
 		TargetPort: 20000, ServerPort: 5000, Transport: uint8(protocol.TransportUDP),
 		ClientSourceIp: client.AdvertisedIp, ServerLocalIp: mustTestWord(t, ingressTarget), Ifindex: 1,
+		ListenPort: 51821,
 	}
 	if err := collection.Maps["server_route_by_key"].Update(routeKey, routeValue, ebpf.UpdateAny); err != nil {
 		t.Fatalf("update forward route: %v", err)
@@ -178,6 +220,7 @@ func TestServerEgressWritesTheChecksumOfAPartialICMPReply(t *testing.T) {
 		routeValue := mupServerRouteValueV1{
 			TargetPort: 20000, ServerPort: 5000, Transport: uint8(protocol.TransportICMP),
 			ClientSourceIp: client.AdvertisedIp, ServerLocalIp: mustTestWord(t, ingressTarget), Ifindex: 1,
+			ListenPort: 51821,
 		}
 		if err := collection.Maps["server_route_by_key"].Update(routeKey, routeValue, ebpf.UpdateAny); err != nil {
 			t.Fatalf("update forward route: %v", err)

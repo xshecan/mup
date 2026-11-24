@@ -117,3 +117,39 @@ func TestServerInspectorShowsReturnPools(t *testing.T) {
 		t.Fatalf("Peers = %#v, %v", peers, err)
 	}
 }
+
+func TestServerInspectorShowsEveryEgressGroupOfAClient(t *testing.T) {
+	t.Parallel()
+
+	client := egressKeyOf
+	fake := fakeServerDataplane{
+		registrations: []dataplane.Registration{{Client: client, ListenPort: 51825, ExpiresIn: 24 * time.Second}},
+		paths: []dataplane.RegisteredPath{
+			{Client: client, PathID: 0, ListenPort: 51820, Transport: protocol.TransportUDP, Source: client.AdvertisedIP, Local: egressServer},
+			{Client: client, PathID: 3, ListenPort: 51825, Transport: protocol.TransportUDP, Source: client.AdvertisedIP, Local: egressServer},
+		},
+	}
+	registry := newTestEgressRegistry(newFakeEgressPlane())
+	now := time.Now()
+	for _, frame := range []protocol.ControlFrame{egressFrameOf(51825, 3, config.ModeRepeater), egressFrameOf(51820, 0, config.ModeFailover)} {
+		if err := registry.register(frame, egressClient, now); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+	}
+	inspector := newServerInspector(config.Server{Port: config.SinglePort(9000), Target: netip.MustParseAddrPort("127.0.0.1:51820")}, fake, time.Unix(0, 0), &egressService{registry: registry})
+
+	clients, err := inspector.Clients()
+	if err != nil || len(clients) != 1 {
+		t.Fatalf("Clients = %#v, %v", clients, err)
+	}
+	got := clients[0]
+	if len(got.Egresses) != 2 || got.Egresses[0].ListenPort != 51820 || got.Egresses[1].ListenPort != 51825 {
+		t.Fatalf("Egresses = %#v, want both groups sorted by listen port", got.Egresses)
+	}
+	if got.Egress == nil || got.Egress.ListenPort != 51820 {
+		t.Fatalf("Egress = %#v, want the group with the lowest listen port", got.Egress)
+	}
+	if got.Paths[0].ListenPort != 51820 || got.Paths[1].ListenPort != 51825 {
+		t.Fatalf("paths = %#v, want their listen ports", got.Paths)
+	}
+}

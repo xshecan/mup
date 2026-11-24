@@ -78,7 +78,7 @@ func TestEgressRegistryKeepsAEgressBridge(t *testing.T) {
 		t.Fatalf("entry = %#v", entry)
 	}
 	// The bridge can serve another server, so the path waits for a reply.
-	if group := plane.groups[egressKeyOf]; group.PathMask != 0b1 || group.HealthyMask != 0 {
+	if group := plane.groups[egressGroupOf]; group.PathMask != 0b1 || group.HealthyMask != 0 {
 		t.Fatalf("group = %#v, want the bridge unhealthy before its first reply", group)
 	}
 	targets := registry.probeTargets(start)
@@ -89,11 +89,11 @@ func TestEgressRegistryKeepsAEgressBridge(t *testing.T) {
 		t.Fatal("confirm of the bridge failed")
 	}
 	registry.sync(start.Add(time.Second))
-	if group := plane.groups[egressKeyOf]; group.HealthyMask != 0b1 {
+	if group := plane.groups[egressGroupOf]; group.HealthyMask != 0b1 {
 		t.Fatalf("group = %#v, want the bridge healthy after its reply", group)
 	}
 	views := registry.clients(start.Add(time.Second))
-	if paths := views[egressKeyOf].Paths; len(paths) != 1 || !paths[0].Bridge || !paths[0].Healthy {
+	if groups := views[egressKeyOf]; len(groups) != 1 || len(groups[0].Paths) != 1 || !groups[0].Paths[0].Bridge || !groups[0].Paths[0].Healthy {
 		t.Fatalf("API view = %#v", views[egressKeyOf])
 	}
 

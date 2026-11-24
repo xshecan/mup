@@ -89,8 +89,8 @@ type EgressPathEntry struct {
 	LocalIP    netip.Addr
 }
 
-// EgressGroupEntry is the egress group of one client on a server. ICMPMask has a
-// bit for each egress path that uses ICMP.
+// EgressGroupEntry is the egress group of one listen port of a client on a
+// server. ICMPMask has a bit for each egress path that uses ICMP.
 type EgressGroupEntry struct {
 	Client      ClientKey
 	ListenPort  uint16
@@ -170,16 +170,26 @@ func encodeEgressPathEntry(entry EgressPathEntry) (mupDownPathKeyV1, mupDownPath
 	return key, value, nil
 }
 
-func encodeEgressGroupEntry(entry EgressGroupEntry) (mupClientKeyV1, mupDownGroupV1, error) {
-	key, err := encodeClientKey(entry.Client)
+func encodeEgressGroupKey(client ClientKey, listenPort uint16) (mupDownGroupKeyV1, error) {
+	key, err := encodeClientKey(client)
+	if err != nil {
+		return mupDownGroupKeyV1{}, err
+	}
+	if listenPort == 0 {
+		return mupDownGroupKeyV1{}, errors.New("egress group listen port must be nonzero")
+	}
+	return mupDownGroupKeyV1{Client: key, ListenPort: listenPort}, nil
+}
+
+func encodeEgressGroupEntry(entry EgressGroupEntry) (mupDownGroupKeyV1, mupDownGroupV1, error) {
+	key, err := encodeEgressGroupKey(entry.Client, entry.ListenPort)
 	if err != nil {
 		return key, mupDownGroupV1{}, err
 	}
-	if entry.ListenPort == 0 || entry.Mode > config.ModeRepeater {
-		return key, mupDownGroupV1{}, errors.New("egress group needs a listen port and a valid mode")
+	if entry.Mode > config.ModeRepeater {
+		return key, mupDownGroupV1{}, errors.New("egress group needs a valid mode")
 	}
 	return key, mupDownGroupV1{
-		ListenPort:  entry.ListenPort,
 		Mode:        uint8(entry.Mode),
 		PathMask:    entry.PathMask,
 		HealthyMask: entry.HealthyMask & entry.PathMask,

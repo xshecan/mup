@@ -63,6 +63,7 @@ func TestDecodeServerRouteReadsTheReturnPath(t *testing.T) {
 			ServerLocalIp:  mustWord(t, netip.MustParseAddr("203.0.113.6")),
 			ReturnIp:       mustWord(t, netip.MustParseAddr("198.51.100.77")),
 			Ifindex:        4,
+			ListenPort:     51822,
 			LastSeenNs:     uint64(time.Second),
 		},
 	}
@@ -70,7 +71,7 @@ func TestDecodeServerRouteReadsTheReturnPath(t *testing.T) {
 	if route.Client.InstanceNonce != 0xabcdef || route.Token != 9 || route.TargetPort != 20001 {
 		t.Fatalf("route identity = %#v", route)
 	}
-	if route.Transport != protocol.TransportICMP || route.ReturnIP != netip.MustParseAddr("198.51.100.77") || route.Idle != 2*time.Second {
+	if route.Transport != protocol.TransportICMP || route.ReturnIP != netip.MustParseAddr("198.51.100.77") || route.Idle != 2*time.Second || route.ListenPort != 51822 {
 		t.Fatalf("route return path = %#v", route)
 	}
 }
@@ -100,10 +101,10 @@ func TestDecodeRegisteredPath(t *testing.T) {
 			ServerPort: 5000,
 			Transport:  uint8(protocol.TransportUDP),
 		},
-		mupRegisteredPathValueV1{Client: client, ExpiresAtNs: uint64(35 * time.Second), PathId: 1},
+		mupRegisteredPathValueV1{Client: client, ExpiresAtNs: uint64(35 * time.Second), PathId: 1, ListenPort: 51822},
 		uint64(30*time.Second),
 	)
-	if path.Local != netip.MustParseAddr("203.0.113.5") || path.PathID != 1 || path.ExpiresIn != 5*time.Second || path.Client.InstanceNonce != 3 {
+	if path.Local != netip.MustParseAddr("203.0.113.5") || path.PathID != 1 || path.ExpiresIn != 5*time.Second || path.Client.InstanceNonce != 3 || path.ListenPort != 51822 {
 		t.Fatalf("path = %#v", path)
 	}
 }

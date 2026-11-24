@@ -291,8 +291,8 @@ To reach several WireGuard targets from one client, do these steps:
 These rules apply to groups:
 
 - All servers of a group must forward to the same target, because a WireGuard handshake fails against another identity.
-- A server address and port can be in one group only. The server keeps one listen port for each client.
-- The client cannot detect one host with two addresses in two groups. Do not configure this.
+- A server address and port can be in one group only.
+- Two groups can use the same server host, through different ports or different addresses of it. The server keeps the listen port of each path, so each group gets its replies on its own paths. Both groups then reach the target of that server. This needs a server of v0.4.6 or later.
 - All groups share the 8 paths and the 4095 peers of a client.
 - If no path of a group is healthy, its peers have no path. MUP does not move them to another group, because that group leads to another target.
 

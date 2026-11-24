@@ -131,6 +131,7 @@ func encodeRegistrationSettings(settings RegistrationSettings) (
 		Flags:       pathFlags,
 		Prefix:      prefix,
 		ReturnIp:    returnIP,
+		ListenPort:  settings.ListenPort,
 	}
 	return key, value, pathKey, pathValue, nil
 }

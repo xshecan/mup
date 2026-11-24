@@ -63,14 +63,19 @@ type mupCsumScratch struct {
 	Bytes [512]uint8
 }
 
+type mupDownGroupKeyV1 struct {
+	_          structs.HostLayout
+	Client     mupClientKeyV1
+	ListenPort uint16
+	Padding    [6]uint8
+}
+
 type mupDownGroupV1 struct {
 	_           structs.HostLayout
-	ListenPort  uint16
 	Mode        uint8
 	PathMask    uint8
 	HealthyMask uint8
 	IcmpMask    uint8
-	Padding     [2]uint8
 }
 
 type mupDownPathKeyV1 struct {
@@ -197,6 +202,8 @@ type mupRegisteredPathValueV1 struct {
 	Flags       uint8
 	Prefix      uint8
 	ReturnIp    uint32
+	ListenPort  uint16
+	Padding     [6]uint8
 }
 
 type mupRegistrationValueV1 struct {
@@ -253,6 +260,8 @@ type mupServerRouteValueV1 struct {
 	ReturnIp       uint32
 	Ifindex        uint32
 	LastSeenNs     uint64
+	ListenPort     uint16
+	Padding        [6]uint8
 }
 
 type mupTargetIngressV1 struct {

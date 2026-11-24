@@ -30,7 +30,7 @@ type egressPlane interface {
 	SetServerEgressPath(dataplane.EgressPathEntry) error
 	DeleteServerEgressPath(dataplane.ClientKey, uint16) error
 	SetServerEgressGroup(dataplane.EgressGroupEntry) error
-	DeleteServerEgressGroup(dataplane.ClientKey) error
+	DeleteServerEgressGroup(client dataplane.ClientKey, listenPort uint16) error
 	ObservePool(base netip.Addr, prefix uint8, transport protocol.TransportID) error
 	PoolMembers(dataplane.PoolKey) []netip.Addr
 }
@@ -101,10 +101,15 @@ func (p *serverEgressPath) destination() netip.Addr {
 	return p.key.client.AdvertisedIP
 }
 
-type serverEgressGroup struct {
+// egressGroupKey names one group of a client: its listen port.
+type egressGroupKey struct {
+	client     dataplane.ClientKey
 	listenPort uint16
-	mode       config.Mode
-	written    *dataplane.EgressGroupEntry
+}
+
+type serverEgressGroup struct {
+	mode    config.Mode
+	written *dataplane.EgressGroupEntry
 }
 
 // egressTarget is one way to send a control frame on an egress path. Member is the
@@ -135,7 +140,7 @@ type egressRegistry struct {
 	route  bridgeRouter
 	logger *log.Logger
 	paths  map[egressKey]*serverEgressPath
-	groups map[dataplane.ClientKey]*serverEgressGroup
+	groups map[egressGroupKey]*serverEgressGroup
 }
 
 func newEgressRegistry(ports config.PortRange, plane egressPlane, locate egressLocator, logger *log.Logger) *egressRegistry {
@@ -147,7 +152,7 @@ func newEgressRegistry(ports config.PortRange, plane egressPlane, locate egressL
 		route:  routeToBridge,
 		logger: logger,
 		paths:  make(map[egressKey]*serverEgressPath),
-		groups: make(map[dataplane.ClientKey]*serverEgressGroup),
+		groups: make(map[egressGroupKey]*serverEgressGroup),
 	}
 }
 
@@ -222,14 +227,16 @@ func (r *egressRegistry) register(frame protocol.ControlFrame, source netip.Addr
 		}
 		r.paths[key] = path
 	}
+	// A path that changes its listen port moves to the new group, and the sync
+	// below also visits the old group.
 	path.listenPort = frame.ListenPort
 	path.expires = now.Add(r.lease)
-	group := r.groups[client]
+	groupKey := egressGroupKey{client: client, listenPort: frame.ListenPort}
+	group := r.groups[groupKey]
 	if group == nil {
 		group = &serverEgressGroup{}
-		r.groups[client] = group
+		r.groups[groupKey] = group
 	}
-	group.listenPort = frame.ListenPort
 	group.mode = config.Mode(frame.EgressMode)
 	r.syncClientLocked(client, now)
 	return nil
@@ -371,15 +378,22 @@ func (r *egressRegistry) ackTargets(client dataplane.ClientKey, now time.Time) [
 func (r *egressRegistry) sync(now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for client := range r.groups {
-		r.syncClientLocked(client, now)
+	seen := make(map[dataplane.ClientKey]bool, len(r.groups))
+	for key := range r.groups {
+		if seen[key.client] {
+			continue
+		}
+		seen[key.client] = true
+		r.syncClientLocked(key.client, now)
 	}
 }
 
-// syncClientLocked writes the paths and the group of one client. A failed
+// syncClientLocked writes the paths and the groups of one client. Each listen
+// port has its own group with only the paths of that port. A failed
 // write leaves the old entry, and the next sync tries again.
 func (r *egressRegistry) syncClientLocked(client dataplane.ClientKey, now time.Time) {
-	var pathMask, healthyMask, icmpMask uint8
+	type masks struct{ path, healthy, icmp uint8 }
+	byPort := make(map[uint16]*masks)
 	for key, path := range r.paths {
 		if key.client != client {
 			continue
@@ -421,42 +435,49 @@ func (r *egressRegistry) syncClientLocked(client dataplane.ClientKey, now time.T
 			}
 			path.written = &entry
 		}
-		pathMask |= 1 << key.id
+		group := byPort[path.listenPort]
+		if group == nil {
+			group = &masks{}
+			byPort[path.listenPort] = group
+		}
+		group.path |= 1 << key.id
 		if path.transport == protocol.TransportICMP {
-			icmpMask |= 1 << key.id
+			group.icmp |= 1 << key.id
 		}
 		if len(healthy) > 0 {
-			healthyMask |= 1 << key.id
+			group.healthy |= 1 << key.id
 		}
 	}
-	group := r.groups[client]
-	if group == nil {
-		return
-	}
-	if pathMask == 0 {
-		if err := r.plane.DeleteServerEgressGroup(client); err != nil {
-			r.logger.Printf("mup egress group of %s: %v", client.AdvertisedIP, err)
-			return
+	for key, group := range r.groups {
+		if key.client != client {
+			continue
 		}
-		delete(r.groups, client)
-		return
+		mask := byPort[key.listenPort]
+		if mask == nil || mask.path == 0 {
+			if err := r.plane.DeleteServerEgressGroup(client, key.listenPort); err != nil {
+				r.logger.Printf("mup egress group %d of %s: %v", key.listenPort, client.AdvertisedIP, err)
+				continue
+			}
+			delete(r.groups, key)
+			continue
+		}
+		entry := dataplane.EgressGroupEntry{
+			Client:      client,
+			ListenPort:  key.listenPort,
+			Mode:        group.mode,
+			PathMask:    mask.path,
+			HealthyMask: mask.healthy,
+			ICMPMask:    mask.icmp,
+		}
+		if group.written != nil && *group.written == entry {
+			continue
+		}
+		if err := r.plane.SetServerEgressGroup(entry); err != nil {
+			r.logger.Printf("mup egress group %d of %s: %v", key.listenPort, client.AdvertisedIP, err)
+			continue
+		}
+		group.written = &entry
 	}
-	entry := dataplane.EgressGroupEntry{
-		Client:      client,
-		ListenPort:  group.listenPort,
-		Mode:        group.mode,
-		PathMask:    pathMask,
-		HealthyMask: healthyMask,
-		ICMPMask:    icmpMask,
-	}
-	if group.written != nil && *group.written == entry {
-		return
-	}
-	if err := r.plane.SetServerEgressGroup(entry); err != nil {
-		r.logger.Printf("mup egress group of %s: %v", client.AdvertisedIP, err)
-		return
-	}
-	group.written = &entry
 }
 
 func sameEgressEntry(a, b dataplane.EgressPathEntry) bool {
@@ -468,15 +489,16 @@ func sameEgressEntry(a, b dataplane.EgressPathEntry) bool {
 		a.Bridge == b.Bridge && a.LocalIP == b.LocalIP
 }
 
-// clients returns the egress paths of each client for mupctl, keyed by client.
-func (r *egressRegistry) clients(now time.Time) map[dataplane.ClientKey]api.EgressGroup {
+// clients returns the egress groups of each client for mupctl, keyed by client
+// and sorted by listen port.
+func (r *egressRegistry) clients(now time.Time) map[dataplane.ClientKey][]api.EgressGroup {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	result := make(map[dataplane.ClientKey]api.EgressGroup, len(r.groups))
-	for client, group := range r.groups {
-		view := api.EgressGroup{Mode: group.mode.String()}
+	result := make(map[dataplane.ClientKey][]api.EgressGroup)
+	for groupKey, group := range r.groups {
+		view := api.EgressGroup{ListenPort: groupKey.listenPort, Mode: group.mode.String()}
 		for key, path := range r.paths {
-			if key.client != client || now.After(path.expires) {
+			if key.client != groupKey.client || path.listenPort != groupKey.listenPort || now.After(path.expires) {
 				continue
 			}
 			healthy := r.healthyLocked(path, now)
@@ -500,7 +522,10 @@ func (r *egressRegistry) clients(now time.Time) map[dataplane.ClientKey]api.Egre
 			view.Paths = append(view.Paths, egress)
 		}
 		sort.Slice(view.Paths, func(i, j int) bool { return view.Paths[i].ID < view.Paths[j].ID })
-		result[client] = view
+		result[groupKey.client] = append(result[groupKey.client], view)
+	}
+	for _, views := range result {
+		sort.Slice(views, func(i, j int) bool { return views[i].ListenPort < views[j].ListenPort })
 	}
 	return result
 }

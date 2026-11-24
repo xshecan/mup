@@ -30,6 +30,8 @@ type ServerRoute struct {
 	ReturnIP   netip.Addr
 	ReturnPool bool
 	Ifindex    int
+	// ListenPort is the listen port of the client group that the route follows.
+	ListenPort uint16
 	Idle       time.Duration
 }
 
@@ -52,6 +54,8 @@ type RegisteredPath struct {
 	ServerPort uint16
 	Transport  protocol.TransportID
 	PathID     uint16
+	// ListenPort is the listen port of the client group that made the path.
+	ListenPort uint16
 	ExpiresIn  time.Duration
 	// ReturnIP is the return IP, or the pool base when ReturnPrefix is
 	// nonzero.
@@ -106,6 +110,7 @@ func decodeServerRoute(reverse mupServerReverseValueV1, nowNS uint64) ServerRout
 		ClientSource: ipv4FromWord(value.ClientSourceIp),
 		ServerLocal:  ipv4FromWord(value.ServerLocalIp),
 		Ifindex:      int(value.Ifindex),
+		ListenPort:   value.ListenPort,
 		Idle:         sinceNS(value.LastSeenNs, nowNS),
 	}
 	route.ReturnIP, route.ReturnPool = decodeReturn(value.Flags, value.ReturnIp)
@@ -143,6 +148,7 @@ func decodeRegisteredPath(key mupRegisteredPathKeyV1, value mupRegisteredPathVal
 		ServerPort: key.ServerPort,
 		Transport:  protocol.TransportID(key.Transport),
 		PathID:     value.PathId,
+		ListenPort: value.ListenPort,
 		ExpiresIn:  untilNS(value.ExpiresAtNs, nowNS),
 	}
 	var pool bool

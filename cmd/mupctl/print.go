@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -292,7 +293,7 @@ func printClients(w io.Writer, clients []api.RegisteredClient, wide bool) {
 	}
 	split := false
 	for _, client := range clients {
-		split = split || client.Egress != nil
+		split = split || client.Egress != nil || len(client.Egresses) > 0
 	}
 	table := newTable(w)
 	header := []string{"CLIENT", "NONCE", "PATHS", "PEERS", "RETURN IP", "LEASE"}
@@ -324,16 +325,16 @@ func printClients(w io.Writer, clients []api.RegisteredClient, wide bool) {
 			lease,
 		}
 		if split {
-			cells = append(cells, egressSummary(client.Egress))
+			cells = append(cells, egressSummary(clientEgresses(client)))
 		}
 		if wide {
 			list := make([]string, 0, len(client.Paths))
 			for _, path := range client.Paths {
 				list = append(list, fmt.Sprintf("%d:%s:%s", path.ID, path.Transport, path.Local))
 			}
-			cells = append(cells, strconv.Itoa(int(client.ListenPort)), orDash(strings.Join(list, ",")))
+			cells = append(cells, listenPorts(client), orDash(strings.Join(list, ",")))
 			if split {
-				cells = append(cells, egressList(client.Egress))
+				cells = append(cells, egressList(clientEgresses(client)))
 			}
 		}
 		row(table, cells...)
@@ -341,39 +342,87 @@ func printClients(w io.Writer, clients []api.RegisteredClient, wide bool) {
 	_ = table.Flush()
 }
 
-// egressSummary shows the healthy egress paths of a client and its egress
-// mode.
-func egressSummary(egress *api.EgressGroup) string {
-	if egress == nil {
-		return "-"
+// clientEgresses returns every egress group of a client. An older server sends
+// only Egress.
+func clientEgresses(client api.RegisteredClient) []api.EgressGroup {
+	if len(client.Egresses) > 0 {
+		return client.Egresses
 	}
-	healthy := 0
-	for _, path := range egress.Paths {
-		if path.Healthy {
-			healthy++
+	if client.Egress != nil {
+		return []api.EgressGroup{*client.Egress}
+	}
+	return nil
+}
+
+// listenPorts shows the distinct listen ports of the paths of a client. An older
+// server sends none, and the listen port of the client stands in.
+func listenPorts(client api.RegisteredClient) string {
+	seen := make(map[uint16]bool)
+	var ports []int
+	for _, path := range client.Paths {
+		if path.ListenPort != 0 && !seen[path.ListenPort] {
+			seen[path.ListenPort] = true
+			ports = append(ports, int(path.ListenPort))
 		}
 	}
-	return fmt.Sprintf("%d/%d healthy, %s", healthy, len(egress.Paths), egress.Mode)
+	if len(ports) == 0 {
+		return strconv.Itoa(int(client.ListenPort))
+	}
+	sort.Ints(ports)
+	text := make([]string, len(ports))
+	for i, port := range ports {
+		text[i] = strconv.Itoa(port)
+	}
+	return strings.Join(text, ",")
+}
+
+// joinGroups shows the text of one group as it is, and the text of each group
+// of a client with more than one prefixed by its listen port.
+func joinGroups(groups []api.EgressGroup, text func(api.EgressGroup) string) string {
+	if len(groups) == 0 {
+		return "-"
+	}
+	if len(groups) == 1 {
+		return text(groups[0])
+	}
+	list := make([]string, 0, len(groups))
+	for _, group := range groups {
+		list = append(list, fmt.Sprintf("%d:%s", group.ListenPort, text(group)))
+	}
+	return strings.Join(list, "; ")
+}
+
+// egressSummary shows the healthy egress paths of each group of a client and
+// its egress mode.
+func egressSummary(groups []api.EgressGroup) string {
+	return joinGroups(groups, func(group api.EgressGroup) string {
+		healthy := 0
+		for _, path := range group.Paths {
+			if path.Healthy {
+				healthy++
+			}
+		}
+		return fmt.Sprintf("%d/%d healthy, %s", healthy, len(group.Paths), group.Mode)
+	})
 }
 
 // egressList shows each egress path as ID:TRANSPORT:SERVER:PORT, with the
 // healthy members of a path that reflects.
-func egressList(egress *api.EgressGroup) string {
-	if egress == nil {
-		return "-"
-	}
-	list := make([]string, 0, len(egress.Paths))
-	for _, path := range egress.Paths {
-		text := fmt.Sprintf("%d:%s:%s:%d", path.ID, path.Transport, path.Server, path.Port)
-		if path.Bridge {
-			text = fmt.Sprintf("%d:%s:bridge %s:%d", path.ID, path.Transport, path.Server, path.Port)
+func egressList(groups []api.EgressGroup) string {
+	return joinGroups(groups, func(group api.EgressGroup) string {
+		list := make([]string, 0, len(group.Paths))
+		for _, path := range group.Paths {
+			text := fmt.Sprintf("%d:%s:%s:%d", path.ID, path.Transport, path.Server, path.Port)
+			if path.Bridge {
+				text = fmt.Sprintf("%d:%s:bridge %s:%d", path.ID, path.Transport, path.Server, path.Port)
+			}
+			if path.ReturnIP != "" {
+				text += fmt.Sprintf(" via %s (%d/%d)", path.ReturnIP, path.HealthyMembers, path.Members)
+			}
+			list = append(list, text)
 		}
-		if path.ReturnIP != "" {
-			text += fmt.Sprintf(" via %s (%d/%d)", path.ReturnIP, path.HealthyMembers, path.Members)
-		}
-		list = append(list, text)
-	}
-	return orDash(strings.Join(list, ","))
+		return orDash(strings.Join(list, ","))
+	})
 }
 
 // printDrops lists the nonzero counters, or every counter in wide output.
