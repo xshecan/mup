@@ -3,3 +3,5 @@
 
 /mup
 /mupctl
+/cmd/mup/mup
+/cmd/mupctl/mupctl
