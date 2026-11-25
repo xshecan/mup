@@ -37,14 +37,14 @@ type qualityTopology struct {
 	clientPort, serverPort                         string
 }
 
-// TestPrivilegedLossLimitMovesTheData runs one group with separate directions and
-// a loss limit of 5 percent on both. Two ingress routes go to the server ports 5000
+// TestPrivilegedToleranceMovesTheData runs one group with separate directions and
+// a loss tolerance of 5 percent on both. Two ingress routes go to the server ports 5000
 // and 5001, and two egress routes to the ports 5002 and 5003. The switch drops
 // one data packet in four on the first ingress route, and the client must degrade
 // that path and move the data to the second. Then the switch drops the same share
 // on the first egress route, and the server must degrade that path and reply on
 // the second. A control frame is never dropped, so the degraded paths stay healthy.
-func TestPrivilegedLossLimitMovesTheData(t *testing.T) {
+func TestPrivilegedToleranceMovesTheData(t *testing.T) {
 	requirePrivilegedLinux(t)
 	binaryPath := buildDaemon(t)
 
@@ -120,11 +120,11 @@ func TestPrivilegedLossLimitMovesTheData(t *testing.T) {
     - port: 51820
       ingress:
         mode: failover
-        max_loss: 5%%
+        tolerance: 5%%
         routes: ["%[3]s:5000/udp", "%[3]s:5001/udp"]
       egress:
         mode: failover
-        max_loss: 5%%
+        tolerance: 5%%
         routes: ["%[3]s:5002/udp", "%[3]s:5003/udp"]
 `, topology.clientAddress, clientSocket, topology.serverAddress)
 	if err := os.WriteFile(configuration, []byte(content), 0o600); err != nil {
@@ -156,7 +156,7 @@ func TestPrivilegedLossLimitMovesTheData(t *testing.T) {
 	})
 
 	// Phase 1: no loss. The first route of each direction carries the data, nothing
-	// is degraded, and both sides show the loss limit of the group.
+	// is degraded, and both sides show the loss tolerance of the group.
 	problem := qualityRun(t, peerSource, peerDestination, topology.peerNS, 14*time.Second, 11*time.Second, func() string {
 		if problem := qualityCheckPath(clientAPI, 5000, true, false, true); problem != "" {
 			return problem
@@ -184,15 +184,15 @@ func TestPrivilegedLossLimitMovesTheData(t *testing.T) {
 		if err != nil {
 			return err.Error()
 		}
-		if group.MaxLossPercent != 5 {
-			return fmt.Sprintf("client group MaxLossPercent = %v, want 5", group.MaxLossPercent)
+		if group.TolerancePercent != 5 {
+			return fmt.Sprintf("client group TolerancePercent = %v, want 5", group.TolerancePercent)
 		}
 		_, egress, err := qualityServerEgress(serverAPI, 5002)
 		if err != nil {
 			return err.Error()
 		}
-		if egress.MaxLossPercent != 5 {
-			return fmt.Sprintf("server egress group MaxLossPercent = %v, want 5", egress.MaxLossPercent)
+		if egress.TolerancePercent != 5 {
+			return fmt.Sprintf("server egress group TolerancePercent = %v, want 5", egress.TolerancePercent)
 		}
 		return ""
 	})
@@ -535,8 +535,8 @@ func qualityClientText(client *api.DaemonClient) string {
 		return text + fmt.Sprintf("\nclient groups: <%v>", err)
 	}
 	for _, group := range status.Client.Groups {
-		text += fmt.Sprintf("\n  client group %d: mode=%s max_loss=%v prefer=%q egress_mode=%s egress_max_loss=%v egress_prefer=%q",
-			group.ListenPort, group.Mode, group.MaxLossPercent, group.Prefer, group.EgressMode, group.EgressMaxLossPercent, group.EgressPrefer)
+		text += fmt.Sprintf("\n  client group %d: mode=%s tolerance=%v prefer=%q egress_mode=%s egress_tolerance=%v egress_prefer=%q",
+			group.ListenPort, group.Mode, group.TolerancePercent, group.Prefer, group.EgressMode, group.EgressTolerancePercent, group.EgressPrefer)
 	}
 	return text
 }
@@ -551,8 +551,8 @@ func qualityServerText(server *api.DaemonClient) string {
 	text := "server egress paths:"
 	for _, registered := range clients {
 		for _, group := range registered.Egresses {
-			text += fmt.Sprintf("\n  egress group %d (%s): mode=%s max_loss=%v prefer=%q",
-				group.ListenPort, registered.AdvertisedIP, group.Mode, group.MaxLossPercent, group.Prefer)
+			text += fmt.Sprintf("\n  egress group %d (%s): mode=%s tolerance=%v prefer=%q",
+				group.ListenPort, registered.AdvertisedIP, group.Mode, group.TolerancePercent, group.Prefer)
 			for _, path := range group.Paths {
 				text += fmt.Sprintf("\n    [%d %s:%d/%s healthy=%v active=%v degraded=%v reason=%q %s]",
 					path.ID, path.Server, path.Port, path.Transport, path.Healthy, path.Active, path.Degraded, path.Reason, measurementText(path.Measurement))

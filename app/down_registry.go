@@ -89,7 +89,7 @@ type serverEgressPath struct {
 	// measure holds the loss, the probes and the rate of the path.
 	measure *egressMeasure
 	// gate and memberGates are the loss gates of the path and of its members
-	// in a group with a loss limit.
+	// in a group with a loss tolerance.
 	gate        measure.LossGate
 	memberGates map[netip.Addr]*measure.LossGate
 	// degradedMembers holds the members that the gates degraded in the
@@ -192,7 +192,7 @@ func (g *serverEgressGroup) activeMask() uint8 {
 	return g.dataMask
 }
 
-// policy is the loss limit and the path choice of the group.
+// policy is the loss tolerance and the path choice of the group.
 func (g *serverEgressGroup) policy() dataPolicy {
 	return egressPolicy(g.settings, g.mode)
 }
@@ -749,11 +749,11 @@ func (r *egressRegistry) syncClientLocked(client dataplane.ClientKey, now time.T
 }
 
 // evaluateGatesLocked runs the loss gates of a path and of its members, and
-// reports whether the path is degraded. Without a loss limit nothing is
+// reports whether the path is degraded. Without a loss tolerance nothing is
 // degraded. The evidence of the path is the loss of its data, or else the
 // loss of its probes, and the evidence of a member is the loss of its probes.
 func (r *egressRegistry) evaluateGatesLocked(path *serverEgressPath, policy dataPolicy, now time.Time) bool {
-	limit := policy.maxLoss.Percent()
+	limit := policy.tolerance.Percent()
 	if limit == 0 {
 		path.gate = measure.LossGate{}
 		clear(path.memberGates)
@@ -816,10 +816,10 @@ func (r *egressRegistry) clients(now time.Time) map[dataplane.ClientKey][]api.Eg
 	for groupKey, group := range r.groups {
 		policy := group.policy()
 		view := api.EgressGroup{
-			ListenPort:     groupKey.listenPort,
-			Mode:           group.mode.String(),
-			MaxLossPercent: policy.maxLoss.Percent(),
-			Prefer:         policy.prefer(),
+			ListenPort:       groupKey.listenPort,
+			Mode:             group.mode.String(),
+			TolerancePercent: policy.tolerance.Percent(),
+			Prefer:           policy.prefer(),
 		}
 		active := group.activeMask()
 		for key, path := range r.paths {

@@ -27,7 +27,7 @@ type ingressMeasure struct {
 	rate    measure.Rate
 	members map[netip.Addr]*measure.Probes
 	// gate and memberGates hold the loss gates of the path and of its
-	// members in a group with a loss limit.
+	// members in a group with a loss tolerance.
 	gate        measure.LossGate
 	memberGates map[netip.Addr]*measure.LossGate
 }
@@ -270,7 +270,7 @@ func (c *clientController) egressMeasurementLocked(slot int, now time.Time) api.
 }
 
 // Members lists each member of each ingress reflect path. A member is healthy
-// while it answers, and degraded while its probe loss is above the loss limit
+// while it answers, and degraded while its probe loss is above the loss tolerance
 // of its group. A degraded member leaves the list of the dataplane, unless
 // every healthy member of the path is degraded.
 func (c *clientController) Members() (api.MemberList, error) {

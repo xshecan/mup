@@ -43,7 +43,7 @@ func TestLossGateSteps(t *testing.T) {
 		{"hold even at zero loss", 5, []gateStep{
 			{0, fp(50), nil, true}, {1, fp(0), nil, true}, {29.9, fp(0), nil, true}, {30, fp(0), nil, false},
 		}},
-		{"recovery at half the limit", 5, []gateStep{
+		{"recovery at half the tolerance", 5, []gateStep{
 			{0, fp(50), nil, true}, {30, fp(2.5), nil, false},
 		}},
 		{"no recovery above half", 5, []gateStep{

@@ -14,7 +14,7 @@ This document describes version 1 of the MUP protocol as the code implements it.
 8. [Control plane](#control-plane)
 9. [Path health](#path-health)
 10. [Path measurement](#path-measurement)
-11. [Loss limit and latency choice](#loss-limit-and-latency-choice)
+11. [Loss tolerance and latency choice](#loss-tolerance-and-latency-choice)
 12. [Bandwidth limit](#bandwidth-limit)
 13. [Dataplane state](#dataplane-state)
 14. [Lifetimes and cleanup](#lifetimes-and-cleanup)
@@ -398,7 +398,7 @@ The control frame is 48 bytes long, and all integers are big-endian.
 | 24 | 4 | return IP | The return IP or the pool base of the path, or zero. In a PROBE_REPLY, the reflector that reached the client. |
 | 28 | 8 | instance nonce | The nonzero random number of the client process. |
 | 36 | 4 | sequence | A counter that goes up by one with each REGISTER on the path. A EGRESS_REGISTER does not use it. A MEASURE uses its own counter for each ingress path, and its MEASURE_REPLY copies it. With flag bit 7, it holds the range: the first value at offsets 36 and 37, and the last value at offsets 38 and 39. In an EGRESS_LIMIT, the rate in kilobits per second. |
-| 40 | 4 | lease seconds or count code | In a REGISTER or a REGISTER_ACK, 30. In an EGRESS_REGISTER, bits 0 to 7 hold the lease, 30. Bit 8 is prefer latency, with 1 for latency and 0 for order. Bits 16 to 31 hold the loss limit in tenths of a percent, from 0 for none to 1000. A whole field of zero withdraws an egress path. A server before v0.5.4 tests the field only against zero, so it ignores the new bits. In a PROBE or a PROBE_REPLY of an egress path, the count code of the path, or zero. In a MEASURE or a MEASURE_REPLY, the count code of the packets that the client sent on the ingress path. In an EGRESS_LIMIT, the flags. Bit 0 means per-member, and the other bits are zero. |
+| 40 | 4 | lease seconds or count code | In a REGISTER or a REGISTER_ACK, 30. In an EGRESS_REGISTER, bits 0 to 7 hold the lease, 30. Bit 8 is prefer latency, with 1 for latency and 0 for order. Bits 16 to 31 hold the loss tolerance in tenths of a percent, from 0 for none to 1000. A whole field of zero withdraws an egress path. A server before v0.5.4 tests the field only against zero, so it ignores the new bits. In a PROBE or a PROBE_REPLY of an egress path, the count code of the path, or zero. In a MEASURE or a MEASURE_REPLY, the count code of the packets that the client sent on the ingress path. In an EGRESS_LIMIT, the flags. Bit 0 means per-member, and the other bits are zero. |
 | 44 | 4 | egress server | In a EGRESS_REGISTER, the server address of the egress path, or the bridge address with flag bit 4. A REGISTER does not use it. In a MEASURE_REPLY, it holds the count code of the packets that the server received on the ingress path. In a MEASURE, it is zero. With flag bit 7, it holds the range: the first value at offsets 44 and 45, and the last value at offsets 46 and 47. In an EGRESS_LIMIT, zero. Zero otherwise. |
 
 Some payloads are exactly 48 bytes long and start with the magic, version 1, and length 48. The TCX programs pass such a payload to the kernel as a control frame.
@@ -506,9 +506,9 @@ The change keeps every existing map layout and frame layout. It changes no path 
 - An older decoder refuses each type above 7. It drops the frame without a reply.
 - A bridge passes every 48-byte control frame, so it needs no change.
 
-## Loss limit and latency choice
+## Loss tolerance and latency choice
 
-The client and the server act on the loss and RTT values of [Path measurement](#path-measurement). Each group direction has two keys. `max_loss` is the loss limit, and `prefer` selects the latency choice of the failover mode. Without the keys, every decision works as in v0.5.3.
+The client and the server act on the loss and RTT values of [Path measurement](#path-measurement). Each group direction has two keys. `tolerance` is the loss tolerance, and `prefer` selects the latency choice of the failover mode. Without the keys, every decision works as in v0.5.3.
 
 ### Usable paths and data sets
 
@@ -518,16 +518,16 @@ The data set is the usable set in every case. With failover and `prefer: latency
 
 ### Loss gate
 
-The loss gate decides whether one path is degraded. Each path has its own gate, and each pool member has one too. On each evaluation, the gate reads the loss limit, the evidence, and the time. Its output is the degraded state and a reason.
+The loss gate decides whether one path is degraded. Each path has its own gate, and each pool member has one too. On each evaluation, the gate reads the loss tolerance, the evidence, and the time. Its output is the degraded state and a reason.
 
 For a path with a data loss value, the evidence is the data loss over the 10 second window. Otherwise, the evidence is the probe loss.
 
-- A path that is not degraded becomes degraded with evidence above the limit.
-- For a degraded path, recovery needs two conditions. Its time in the degraded state is at least the hold. Its evidence is at most half the limit.
+- A path that is not degraded becomes degraded with evidence above the tolerance.
+- For a degraded path, recovery needs two conditions. Its time in the degraded state is at least the hold. Its evidence is at most half the tolerance.
 - A path without evidence keeps its state.
 - The hold is the minimum time that a path stays degraded. Each degradation gets a strike number. A degradation within 10 minutes after the last recovery adds one to the number. Otherwise the number starts again at one.
 - The hold is 30 seconds at strike one. It doubles with each strike, up to 10 minutes.
-- A limit of zero means no limit. The gate then never degrades a path, and a degraded path recovers at once.
+- A tolerance of zero means none. The gate then never degrades a path, and a degraded path recovers at once.
 - The reason names the evidence. For example, `loss 12.5% above 5%` or `probe loss 12.5% above 5%`.
 
 ### Pool members

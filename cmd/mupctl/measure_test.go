@@ -217,9 +217,9 @@ func TestModeTextShowsTheSettings(t *testing.T) {
 		loss         float64
 		want         string
 	}{
-		{"failover", "latency", 5, "failover (latency, loss 5%)"},
+		{"failover", "latency", 5, "failover (latency, tolerance 5%)"},
 		{"failover", "latency", 0, "failover (latency)"},
-		{"balancer", "", 2.5, "balancer (loss 2.5%)"},
+		{"balancer", "", 2.5, "balancer (tolerance 2.5%)"},
 		{"failover", "order", 0, "failover"},
 		{"repeater", "", 0, "repeater"},
 		{"", "", 0, ""},
@@ -235,10 +235,10 @@ func TestGroupsShowTheSettingsNextToTheMode(t *testing.T) {
 
 	var out strings.Builder
 	printGroups(&out, []api.Group{
-		{ListenPort: 51820, Mode: "failover", Prefer: "latency", MaxLossPercent: 5, EgressMode: "balancer", EgressMaxLossPercent: 2.5, Paths: 2, HealthyPaths: 2, EgressPaths: 1, HealthyEgressPaths: 1},
+		{ListenPort: 51820, Mode: "failover", Prefer: "latency", TolerancePercent: 5, EgressMode: "balancer", EgressTolerancePercent: 2.5, Paths: 2, HealthyPaths: 2, EgressPaths: 1, HealthyEgressPaths: 1},
 		{ListenPort: 51821, Mode: "repeater", Paths: 1, HealthyPaths: 1},
 	})
-	for _, want := range []string{"failover (latency, loss 5%)", "balancer (loss 2.5%)", "51821   repeater "} {
+	for _, want := range []string{"failover (latency, tolerance 5%)", "balancer (tolerance 2.5%)", "51821   repeater "} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("groups output misses %q:\n%s", want, out.String())
 		}
@@ -275,7 +275,7 @@ func TestEgressSummaryAndListShowTheSettings(t *testing.T) {
 	t.Parallel()
 
 	clients := []api.RegisteredClient{{AdvertisedIP: "192.0.2.10", Nonce: "8f3a0000000000aa",
-		Egress: &api.EgressGroup{Mode: "failover", Prefer: "latency", MaxLossPercent: 5, Paths: []api.EgressPath{
+		Egress: &api.EgressGroup{Mode: "failover", Prefer: "latency", TolerancePercent: 5, Paths: []api.EgressPath{
 			{ID: 0, Server: "203.0.113.5", Port: 9200, Transport: "udp", Healthy: true, Active: true,
 				Measurement: api.Measurement{LossPercent: percent(0.3), RTTAvgSeconds: 0.0152}},
 			{ID: 1, Server: "203.0.113.5", Port: 9300, Transport: "udp", Healthy: true, Degraded: true, Reason: "loss 12.5% above 5%",
@@ -285,7 +285,7 @@ func TestEgressSummaryAndListShowTheSettings(t *testing.T) {
 	var out strings.Builder
 	printClients(&out, clients, true)
 	for _, want := range []string{
-		"3/3 healthy, failover (latency, loss 5%)",
+		"3/3 healthy, failover (latency, tolerance 5%)",
 		"*0:udp:203.0.113.5:9200 loss 0.3% rtt 15.2ms",
 		"1:udp:203.0.113.5:9300 degraded loss 12.5% rtt 20ms",
 		"2:udp:203.0.113.5:9400",

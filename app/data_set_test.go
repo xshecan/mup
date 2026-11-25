@@ -128,14 +128,14 @@ func TestPoliciesFollowTheConfiguration(t *testing.T) {
 	t.Parallel()
 
 	group := config.Group{
-		Mode: config.ModeFailover, MaxLoss: 50, Prefer: config.PreferLatency,
-		EgressMode: config.ModeBalancer, EgressMaxLoss: 5, EgressPrefer: config.PreferLatency,
+		Mode: config.ModeFailover, Tolerance: 50, Prefer: config.PreferLatency,
+		EgressMode: config.ModeBalancer, EgressTolerance: 5, EgressPrefer: config.PreferLatency,
 	}
-	if got := ingressPolicy(group); got != (dataPolicy{maxLoss: 50, latency: true}) || !got.active() || got.prefer() != "latency" {
+	if got := ingressPolicy(group); got != (dataPolicy{tolerance: 50, latency: true}) || !got.active() || got.prefer() != "latency" {
 		t.Fatalf("ingressPolicy = %#v", got)
 	}
 	// The latency choice counts only in the failover mode.
-	if got := egressSettings(group); got != (protocol.EgressSettings{MaxLossTenths: 5}) {
+	if got := egressSettings(group); got != (protocol.EgressSettings{ToleranceTenths: 5}) {
 		t.Fatalf("egressSettings = %#v", got)
 	}
 	if got := egressPolicy(protocol.EgressSettings{PreferLatency: true}, config.ModeRepeater); got.latency || got.active() {

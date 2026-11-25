@@ -167,7 +167,7 @@ func printGroups(w io.Writer, groups []api.Group) {
 	for _, group := range groups {
 		cells := []string{
 			strconv.Itoa(int(group.ListenPort)),
-			modeText(group.Mode, group.Prefer, group.MaxLossPercent),
+			modeText(group.Mode, group.Prefer, group.TolerancePercent),
 			fmt.Sprintf("%d/%d healthy", group.HealthyPaths, group.Paths),
 		}
 		if split {
@@ -175,7 +175,7 @@ func printGroups(w io.Writer, groups []api.Group) {
 			if group.EgressMode != "" {
 				egressPaths = fmt.Sprintf("%d/%d healthy", group.HealthyEgressPaths, group.EgressPaths)
 			}
-			cells = append(cells, orDash(modeText(group.EgressMode, group.EgressPrefer, group.EgressMaxLossPercent)), egressPaths)
+			cells = append(cells, orDash(modeText(group.EgressMode, group.EgressPrefer, group.EgressTolerancePercent)), egressPaths)
 		}
 		row(table, append(cells, strconv.Itoa(group.Peers))...)
 	}
@@ -183,8 +183,8 @@ func printGroups(w io.Writer, groups []api.Group) {
 }
 
 // modeText shows a mode with its settings in brackets: "failover (latency,
-// loss 5%)". A mode without settings shows alone, and an empty mode stays empty.
-func modeText(mode, prefer string, maxLoss float64) string {
+// tolerance 5%)". A mode without settings shows alone, and an empty mode stays empty.
+func modeText(mode, prefer string, tolerance float64) string {
 	if mode == "" {
 		return ""
 	}
@@ -192,8 +192,8 @@ func modeText(mode, prefer string, maxLoss float64) string {
 	if prefer == "latency" {
 		settings = append(settings, prefer)
 	}
-	if maxLoss > 0 {
-		settings = append(settings, "loss "+strconv.FormatFloat(maxLoss, 'f', -1, 64)+"%")
+	if tolerance > 0 {
+		settings = append(settings, "tolerance "+strconv.FormatFloat(tolerance, 'f', -1, 64)+"%")
 	}
 	if len(settings) == 0 {
 		return mode
@@ -465,7 +465,7 @@ func egressSummary(groups []api.EgressGroup) string {
 				healthy++
 			}
 		}
-		return fmt.Sprintf("%d/%d healthy, %s", healthy, len(group.Paths), modeText(group.Mode, group.Prefer, group.MaxLossPercent))
+		return fmt.Sprintf("%d/%d healthy, %s", healthy, len(group.Paths), modeText(group.Mode, group.Prefer, group.TolerancePercent))
 	})
 }
 

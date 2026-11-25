@@ -28,7 +28,7 @@ type LossGate struct {
 	reason        string
 }
 
-// Evaluate takes the loss limit in percent (zero for none), the data loss of
+// Evaluate takes the loss tolerance in percent (zero for none), the data loss of
 // the short window and the probe loss (nil when unknown), and returns whether
 // the path is degraded now. The data loss is the evidence when it is known,
 // else the probe loss is.

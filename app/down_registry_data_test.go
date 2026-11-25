@@ -149,7 +149,7 @@ func (d *egressDriver) egressPath(t *testing.T, id uint16) egressView {
 	}
 	for _, path := range groups[0].Paths {
 		if path.ID == id {
-			return egressView{group: groups[0].MaxLossPercent, prefer: groups[0].Prefer, active: path.Active, degraded: path.Degraded, healthy: path.Healthy, reason: path.Reason}
+			return egressView{group: groups[0].TolerancePercent, prefer: groups[0].Prefer, active: path.Active, degraded: path.Degraded, healthy: path.Healthy, reason: path.Reason}
 		}
 	}
 	t.Fatalf("egress path %d is missing", id)
@@ -172,7 +172,7 @@ func settingsFrame(id, port uint16, mode config.Mode, settings protocol.EgressSe
 func TestTheServerMovesTheRepliesOffALossyEgressPath(t *testing.T) {
 	t.Parallel()
 
-	settings := protocol.EgressSettings{MaxLossTenths: 50}
+	settings := protocol.EgressSettings{ToleranceTenths: 50}
 	driver := newEgressDriver(settingsFrame(0, 9300, config.ModeFailover, settings), settingsFrame(1, 9301, config.ModeFailover, settings))
 	driver.run(t, 2)
 	if mask := driver.healthyMask(); mask != 0b11 {
@@ -203,7 +203,7 @@ func TestTheServerMovesTheRepliesOffALossyEgressPath(t *testing.T) {
 func TestTheServerKeepsAllLossyEgressPaths(t *testing.T) {
 	t.Parallel()
 
-	settings := protocol.EgressSettings{MaxLossTenths: 50}
+	settings := protocol.EgressSettings{ToleranceTenths: 50}
 	driver := newEgressDriver(settingsFrame(0, 9300, config.ModeBalancer, settings), settingsFrame(1, 9301, config.ModeBalancer, settings))
 	driver.loss[0], driver.loss[1] = 0.2, 0.2
 	driver.run(t, 10)
@@ -257,7 +257,7 @@ func TestADegradedEgressMemberLeavesThePath(t *testing.T) {
 	t.Parallel()
 
 	pool := poolFrame(0, 9200)
-	pool.LeaseSeconds = protocol.PackEgressLease(registrationLeaseSeconds, protocol.EgressSettings{MaxLossTenths: 50})
+	pool.LeaseSeconds = protocol.PackEgressLease(registrationLeaseSeconds, protocol.EgressSettings{ToleranceTenths: 50})
 	driver := newEgressDriver(pool)
 	driver.silent[egressMembers[1]] = true
 	driver.run(t, 10)
@@ -283,7 +283,7 @@ func TestADegradedEgressMemberLeavesThePath(t *testing.T) {
 func TestAnOldStyleEgressRegisterGivesNoSettings(t *testing.T) {
 	t.Parallel()
 
-	settings := protocol.EgressSettings{MaxLossTenths: 50, PreferLatency: true}
+	settings := protocol.EgressSettings{ToleranceTenths: 50, PreferLatency: true}
 	driver := newEgressDriver(settingsFrame(0, 9300, config.ModeFailover, settings), settingsFrame(1, 9301, config.ModeFailover, settings))
 	driver.run(t, 1)
 	if view := driver.egressPath(t, 0); view.group != 5 || view.prefer != "latency" {
@@ -341,7 +341,7 @@ func TestWithoutSettingsTheEgressMasksAreTheHealth(t *testing.T) {
 func TestTheActiveEgressPathsFollowTheMode(t *testing.T) {
 	t.Parallel()
 
-	settings := protocol.EgressSettings{MaxLossTenths: 50}
+	settings := protocol.EgressSettings{ToleranceTenths: 50}
 	active := func(t *testing.T, driver *egressDriver) [2]bool {
 		t.Helper()
 		return [2]bool{driver.egressPath(t, 0).active, driver.egressPath(t, 1).active}

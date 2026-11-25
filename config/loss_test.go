@@ -6,40 +6,40 @@ import (
 	"testing"
 )
 
-func TestParseLossLimit(t *testing.T) {
+func TestParseTolerance(t *testing.T) {
 	t.Parallel()
 
-	valid := map[string]LossLimit{
+	valid := map[string]Tolerance{
 		"5": 50, "5%": 50, " 5 % ": 50, "0.5%": 5, "0.5": 5, "100": 1000, "100%": 1000, "0.1": 1, "12.3": 123,
 	}
 	for raw, want := range valid {
-		got, err := ParseLossLimit(raw)
+		got, err := ParseTolerance(raw)
 		if err != nil || got != want {
-			t.Errorf("ParseLossLimit(%q) = %d, %v, want %d", raw, got, err, want)
+			t.Errorf("ParseTolerance(%q) = %d, %v, want %d", raw, got, err, want)
 		}
 	}
 	rangeError := "use a percent from 0.1 to 100, such as 5 or 5%"
 	for _, raw := range []string{"0", "0%", "101", "-1", "abc", "5%%", "", "0.05", "NaN", "Inf"} {
-		_, err := ParseLossLimit(raw)
+		_, err := ParseTolerance(raw)
 		if err == nil || !strings.Contains(err.Error(), rangeError) {
-			t.Errorf("ParseLossLimit(%q) error = %v", raw, err)
+			t.Errorf("ParseTolerance(%q) error = %v", raw, err)
 		}
 	}
-	if _, err := ParseLossLimit("0.25"); err == nil || !strings.Contains(err.Error(), "use at most one digit after the point") {
-		t.Errorf("ParseLossLimit(0.25) error = %v", err)
+	if _, err := ParseTolerance("0.25"); err == nil || !strings.Contains(err.Error(), "use at most one digit after the point") {
+		t.Errorf("ParseTolerance(0.25) error = %v", err)
 	}
 }
 
-func TestLossLimitString(t *testing.T) {
+func TestToleranceString(t *testing.T) {
 	t.Parallel()
 
 	for _, raw := range []string{"5%", "0.5%", "100%", "0.1%", "12.3%"} {
-		limit, err := ParseLossLimit(raw)
+		limit, err := ParseTolerance(raw)
 		if err != nil || limit.String() != raw {
 			t.Errorf("round trip %q = %q, %v", raw, limit.String(), err)
 		}
 	}
-	if LossLimit(0).String() != "" || LossLimit(0).Percent() != 0 || LossLimit(55).Percent() != 5.5 {
+	if Tolerance(0).String() != "" || Tolerance(0).Percent() != 0 || Tolerance(55).Percent() != 5.5 {
 		t.Errorf("zero or percent wrong")
 	}
 }
@@ -62,14 +62,14 @@ func TestParsePrefer(t *testing.T) {
 func TestLoadLossAndPreferForms(t *testing.T) {
 	t.Parallel()
 
-	for yamlValue, want := range map[string]LossLimit{"5": 50, "5%": 50, "0.5%": 5, "0.5": 5, `"5%"`: 50} {
+	for yamlValue, want := range map[string]Tolerance{"5": 50, "5%": 50, "0.5%": 5, "0.5": 5, `"5%"`: 50} {
 		app, err := Load(writeFile(t, `
 client:
   advertise: 192.0.2.10
   servers:
     - port: 51820
       mode: failover
-      max_loss: `+yamlValue+`
+      tolerance: `+yamlValue+`
       prefer: latency
       routes:
         - 203.0.113.5:9000/udp
@@ -78,8 +78,8 @@ client:
 			t.Fatalf("Load %s: %v", yamlValue, err)
 		}
 		group := app.Client.Groups[0]
-		if group.MaxLoss != want || group.Prefer != PreferLatency || group.EgressMaxLoss != 0 {
-			t.Errorf("max_loss %s: group = %#v", yamlValue, group)
+		if group.Tolerance != want || group.Prefer != PreferLatency || group.EgressTolerance != 0 {
+			t.Errorf("tolerance %s: group = %#v", yamlValue, group)
 		}
 	}
 }
@@ -94,13 +94,13 @@ client:
     - port: 51825
       ingress:
         mode: failover
-        max_loss: 5%
+        tolerance: 5%
         prefer: latency
         routes:
           - 203.0.113.5:9000/udp
       egress:
         mode: failover
-        max_loss: 0.5
+        tolerance: 0.5
         routes:
           - 203.0.113.5:9200/udp
 `))
@@ -108,7 +108,7 @@ client:
 		t.Fatalf("Load: %v", err)
 	}
 	group := app.Client.Groups[0]
-	if group.MaxLoss != 50 || group.Prefer != PreferLatency || group.EgressMaxLoss != 5 || group.EgressPrefer != PreferOrder {
+	if group.Tolerance != 50 || group.Prefer != PreferLatency || group.EgressTolerance != 5 || group.EgressPrefer != PreferOrder {
 		t.Fatalf("group = %#v", group)
 	}
 }
@@ -135,21 +135,21 @@ client:
 	cases := map[string]struct{ config, want string }{
 		"ingress balancer latency": {split("balancer\n        prefer: latency", "failover"), "prefer latency needs the failover mode, not balancer"},
 		"egress balancer latency":  {split("failover", "balancer\n        prefer: latency"), "egress prefer latency needs the failover mode, not balancer"},
-		"group level max_loss": {`
+		"group level tolerance": {`
 client:
   advertise: 192.0.2.10
   servers:
     - port: 51825
-      max_loss: 5
+      tolerance: 5
       ingress:
         routes:
           - 203.0.113.5:9000/udp
       egress:
         routes:
           - 203.0.113.5:9200/udp
-`, "use mode, max_loss, prefer and routes, or ingress and egress, not both"},
+`, "use mode, tolerance, prefer and routes, or ingress and egress, not both"},
 		"unknown prefer": {split("failover\n        prefer: fast", "failover"), `invalid prefer "fast": use latency or order`},
-		"zero max_loss":  {split("failover\n        max_loss: 0", "failover"), "invalid max_loss"},
+		"zero tolerance": {split("failover\n        tolerance: 0", "failover"), "invalid tolerance"},
 		"plain balancer": {`
 client:
   advertise: 192.0.2.10
@@ -179,9 +179,9 @@ func TestGroupValidateLossAndPrefer(t *testing.T) {
 	}{
 		"prefer":        {func(g *Group) { g.Prefer = 2 }, "server 51820: invalid prefer 2"},
 		"egress prefer": {func(g *Group) { g.EgressPrefer = 2 }, "server 51820: invalid egress prefer 2"},
-		"max loss":      {func(g *Group) { g.MaxLoss = 1001 }, "server 51820: invalid max_loss 1001"},
-		"egress loss":   {func(g *Group) { g.EgressMaxLoss = 1001 }, "server 51820: invalid egress max_loss 1001"},
-		"no egress":     {func(g *Group) { g.EgressMaxLoss = 5 }, "server 51820: the egress settings need a group with ingress and egress"},
+		"max loss":      {func(g *Group) { g.Tolerance = 1001 }, "server 51820: invalid tolerance 1001"},
+		"egress loss":   {func(g *Group) { g.EgressTolerance = 1001 }, "server 51820: invalid egress tolerance 1001"},
+		"no egress":     {func(g *Group) { g.EgressTolerance = 5 }, "server 51820: the egress settings need a group with ingress and egress"},
 	}
 	for name, tc := range cases {
 		group := base

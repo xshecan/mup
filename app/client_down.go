@@ -119,7 +119,7 @@ func (r *ackRouter) post(pathID uint16, frame []byte) {
 type egressSet struct {
 	mu   sync.Mutex
 	mode config.Mode
-	// settings are the loss limit and the path choice of the egress paths,
+	// settings are the loss tolerance and the path choice of the egress paths,
 	// which the frames carry in their lease field.
 	settings  protocol.EgressSettings
 	paths     map[uint16]config.Path

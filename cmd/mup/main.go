@@ -21,15 +21,15 @@ const usage = `usage:
   mup --config FILE
   mup server -p PORT[-LAST] -r TARGET_IP:PORT [--target-ingress] [--control-socket PATH]
   mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP] [ROUTE_OPTIONS]" [-u ...] -s CLIENT_IP
-             [-r RETURN_IP] [--mode failover|balancer|repeater] [--max-loss PERCENT] [--prefer latency|order]
+             [-r RETURN_IP] [--mode failover|balancer|repeater] [--tolerance PERCENT] [--prefer latency|order]
              [--control-socket PATH]
   mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [ROUTE_OPTIONS]" [--ingress ...]
              --egress "SERVER_IP:PORT/udp|icmp [via RETURN_IP] [ROUTE_OPTIONS] [bridge BRIDGE_IP]" [--egress ...] -s CLIENT_IP
              [--ingress-bridge "BRIDGE_IP[%IFACE]:PORT[-LAST]/udp|icmp [ROUTE_OPTIONS]"] [--ingress-bridge ...]
              [--egress-bridge "BRIDGE_IP:PORT/udp|icmp [via RETURN_IP] [ROUTE_OPTIONS]"] [--egress-bridge ...]
              [--ingress-mode MODE] [--egress-mode MODE]
-             [--ingress-max-loss PERCENT] [--ingress-prefer latency|order]
-             [--egress-max-loss PERCENT] [--egress-prefer latency|order] [--control-socket PATH]
+             [--ingress-tolerance PERCENT] [--ingress-prefer latency|order]
+             [--egress-tolerance PERCENT] [--egress-prefer latency|order] [--control-socket PATH]
   mup bridge -s SERVER_IP -p PORT[-LAST] [-a CIDR] [-a ...] [--control-socket PATH]
 
   ROUTE_OPTIONS, in this order: [src FIRST-LAST] [bw RATE [per-member]]
@@ -146,7 +146,7 @@ func parseClientArgs(args []string) (*config.Client, error) {
 	var rawPaths, rawIngress, rawEgress, rawIngressBridges, rawEgressBridges stringList
 	var port int
 	var advertisedText, returnIPText, modeName, ingressModeName, egressModeName, controlSocket string
-	var maxLossText, preferName, ingressMaxLossText, ingressPreferName, egressMaxLossText, egressPreferName string
+	var toleranceText, preferName, ingressToleranceText, ingressPreferName, egressToleranceText, egressPreferName string
 	fs.IntVar(&port, "p", 0, "local WireGuard UDP listen port")
 	fs.Var(&rawPaths, "u", "server path as IPv4:PORT/udp or /icmp, where PORT can be a range FIRST-LAST, with an optional via, src, and bw RATE")
 	fs.Var(&rawIngress, "ingress", "ingress path as IPv4:PORT/udp or /icmp, for the ingress only")
@@ -155,11 +155,11 @@ func parseClientArgs(args []string) (*config.Client, error) {
 	fs.Var(&rawEgressBridges, "egress-bridge", "egress path through a MUP bridge, as BRIDGE_IP:PORT/udp or /icmp")
 	fs.StringVar(&ingressModeName, "ingress-mode", "failover", "ingress mode: failover, balancer, or repeater")
 	fs.StringVar(&egressModeName, "egress-mode", "failover", "egress mode: failover, balancer, or repeater")
-	fs.StringVar(&ingressMaxLossText, "ingress-max-loss", "", "ingress loss limit in percent, such as 5 or 5%, or empty for none")
-	fs.StringVar(&egressMaxLossText, "egress-max-loss", "", "egress loss limit in percent, such as 5 or 5%, or empty for none")
+	fs.StringVar(&ingressToleranceText, "ingress-tolerance", "", "ingress loss tolerance in percent, such as 5 or 5%, or empty for none")
+	fs.StringVar(&egressToleranceText, "egress-tolerance", "", "egress loss tolerance in percent, such as 5 or 5%, or empty for none")
 	fs.StringVar(&ingressPreferName, "ingress-prefer", "", "ingress failover preference: latency or order (the default)")
 	fs.StringVar(&egressPreferName, "egress-prefer", "", "egress failover preference: latency or order (the default)")
-	fs.StringVar(&maxLossText, "max-loss", "", "loss limit in percent, such as 5 or 5%, or empty for none")
+	fs.StringVar(&toleranceText, "tolerance", "", "loss tolerance in percent, such as 5 or 5%, or empty for none")
 	fs.StringVar(&preferName, "prefer", "", "failover preference: latency or order (the default)")
 	fs.StringVar(&advertisedText, "s", "", "advertised client IPv4")
 	fs.StringVar(&returnIPText, "r", "", "return IPv4 of each -u path without its own via")
@@ -189,12 +189,12 @@ func parseClientArgs(args []string) (*config.Client, error) {
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	split := splitArgs{ingress: rawIngress, egress: rawEgress, ingressBridges: rawIngressBridges, egressBridges: rawEgressBridges, ingressMode: ingressModeName, egressMode: egressModeName,
-		ingressMaxLoss: ingressMaxLossText, ingressPrefer: ingressPreferName, egressMaxLoss: egressMaxLossText, egressPrefer: egressPreferName}
-	splitSettings := set["ingress-mode"] || set["egress-mode"] || set["ingress-max-loss"] || set["ingress-prefer"] ||
-		set["egress-max-loss"] || set["egress-prefer"] || set["up-mode"] || set["down-mode"]
+		ingressTolerance: ingressToleranceText, ingressPrefer: ingressPreferName, egressTolerance: egressToleranceText, egressPrefer: egressPreferName}
+	splitSettings := set["ingress-mode"] || set["egress-mode"] || set["ingress-tolerance"] || set["ingress-prefer"] ||
+		set["egress-tolerance"] || set["egress-prefer"] || set["up-mode"] || set["down-mode"]
 	if split.any() || splitSettings {
-		if len(rawPaths) > 0 || set["mode"] || set["max-loss"] || set["prefer"] || set["r"] {
-			return nil, errors.New("use -u, -r, --mode, --max-loss, and --prefer, or --ingress, --egress, the bridges, --ingress-mode, --egress-mode, --ingress-max-loss, --ingress-prefer, --egress-max-loss, and --egress-prefer, not both")
+		if len(rawPaths) > 0 || set["mode"] || set["tolerance"] || set["prefer"] || set["r"] {
+			return nil, errors.New("use -u, -r, --mode, --tolerance, and --prefer, or --ingress, --egress, the bridges, --ingress-mode, --egress-mode, --ingress-tolerance, --ingress-prefer, --egress-tolerance, and --egress-prefer, not both")
 		}
 		return parseSplitClientArgs(listenPort, advertised, controlSocket, split)
 	}
@@ -202,7 +202,7 @@ func parseClientArgs(args []string) (*config.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--mode: %w", err)
 	}
-	maxLoss, prefer, err := parseLossAndPrefer("--max-loss", maxLossText, "--prefer", preferName)
+	tolerance, prefer, err := parseLossAndPrefer("--tolerance", toleranceText, "--prefer", preferName)
 	if err != nil {
 		return nil, err
 	}
@@ -220,7 +220,7 @@ func parseClientArgs(args []string) (*config.Client, error) {
 	client := &config.Client{
 		AdvertisedIP:  advertised,
 		ControlSocket: controlSocket,
-		Groups:        []config.Group{{ListenPort: listenPort, Mode: mode, Paths: paths, MaxLoss: maxLoss, Prefer: prefer}},
+		Groups:        []config.Group{{ListenPort: listenPort, Mode: mode, Paths: paths, Tolerance: tolerance, Prefer: prefer}},
 	}
 	if err := client.Validate(); err != nil {
 		return nil, err
@@ -232,17 +232,17 @@ func parseClientArgs(args []string) (*config.Client, error) {
 type splitArgs struct {
 	ingress, egress, ingressBridges, egressBridges []string
 	ingressMode, egressMode                        string
-	ingressMaxLoss, ingressPrefer                  string
-	egressMaxLoss, egressPrefer                    string
+	ingressTolerance, ingressPrefer                string
+	egressTolerance, egressPrefer                  string
 }
 
-// parseLossAndPrefer reads the loss limit and the preference of one direction.
-// An empty text means no limit and the order preference.
-func parseLossAndPrefer(lossFlag, lossText, preferFlag, preferText string) (config.LossLimit, config.Prefer, error) {
-	var maxLoss config.LossLimit
+// parseLossAndPrefer reads the loss tolerance and the preference of one direction.
+// An empty text means no tolerance and the order preference.
+func parseLossAndPrefer(lossFlag, lossText, preferFlag, preferText string) (config.Tolerance, config.Prefer, error) {
+	var tolerance config.Tolerance
 	if lossText != "" {
 		var err error
-		maxLoss, err = config.ParseLossLimit(lossText)
+		tolerance, err = config.ParseTolerance(lossText)
 		if err != nil {
 			return 0, 0, fmt.Errorf("%s: %w", lossFlag, err)
 		}
@@ -255,7 +255,7 @@ func parseLossAndPrefer(lossFlag, lossText, preferFlag, preferText string) (conf
 			return 0, 0, fmt.Errorf("%s: %w", preferFlag, err)
 		}
 	}
-	return maxLoss, prefer, nil
+	return tolerance, prefer, nil
 }
 
 func (s splitArgs) any() bool {
@@ -276,17 +276,17 @@ func parseSplitClientArgs(listenPort uint16, advertised netip.Addr, controlSocke
 	if err != nil {
 		return nil, fmt.Errorf("--egress-mode: %w", err)
 	}
-	ingressMaxLoss, ingressPrefer, err := parseLossAndPrefer("--ingress-max-loss", split.ingressMaxLoss, "--ingress-prefer", split.ingressPrefer)
+	ingressTolerance, ingressPrefer, err := parseLossAndPrefer("--ingress-tolerance", split.ingressTolerance, "--ingress-prefer", split.ingressPrefer)
 	if err != nil {
 		return nil, err
 	}
-	egressMaxLoss, egressPrefer, err := parseLossAndPrefer("--egress-max-loss", split.egressMaxLoss, "--egress-prefer", split.egressPrefer)
+	egressTolerance, egressPrefer, err := parseLossAndPrefer("--egress-tolerance", split.egressTolerance, "--egress-prefer", split.egressPrefer)
 	if err != nil {
 		return nil, err
 	}
 	group := config.Group{
 		ListenPort: listenPort, Mode: ingressMode, EgressMode: egressMode,
-		MaxLoss: ingressMaxLoss, Prefer: ingressPrefer, EgressMaxLoss: egressMaxLoss, EgressPrefer: egressPrefer,
+		Tolerance: ingressTolerance, Prefer: ingressPrefer, EgressTolerance: egressTolerance, EgressPrefer: egressPrefer,
 	}
 	for _, part := range []struct {
 		flagName string

@@ -61,10 +61,10 @@ func newDataFixture(t *testing.T, groups ...config.Group) *dataFixture {
 	return fixture
 }
 
-func lossGroup(t *testing.T, mode config.Mode, limit config.LossLimit, prefer config.Prefer) config.Group {
+func lossGroup(t *testing.T, mode config.Mode, limit config.Tolerance, prefer config.Prefer) config.Group {
 	t.Helper()
 	group := testGroup(t, 51820, mode, "198.51.100.1:9000/udp", "198.51.100.2:9100/udp")
-	group.MaxLoss, group.Prefer = limit, prefer
+	group.Tolerance, group.Prefer = limit, prefer
 	return group
 }
 
@@ -294,7 +294,7 @@ func TestWithoutSettingsThePathStateIsTheHealth(t *testing.T) {
 	check("round after the miss")
 	for _, path := range []int{0, 1, 2} {
 		if got := fixture.path(t, "", path); got.Degraded {
-			t.Fatalf("path %d = %#v, want no degradation without a loss limit", path, got)
+			t.Fatalf("path %d = %#v, want no degradation without a loss tolerance", path, got)
 		}
 	}
 }
@@ -304,7 +304,7 @@ func TestADegradedMemberLeavesThePublishedList(t *testing.T) {
 
 	group := testGroup(t, 51820, config.ModeFailover, "198.51.100.1:9000/icmp via 203.0.113.0/30")
 	group.EgressPaths = append(group.EgressPaths, mustParsePath(t, "198.51.100.1:9300/udp"))
-	group.MaxLoss = 50
+	group.Tolerance = 50
 	fixture := newDataFixture(t, group)
 	good, lossy := netip.MustParseAddr("203.0.113.1"), netip.MustParseAddr("203.0.113.2")
 	if err := fixture.registrations[0].writeMembers([]netip.Addr{good, lossy}); err != nil {
@@ -398,21 +398,21 @@ func TestTheEgressRegisterCarriesTheEgressSettings(t *testing.T) {
 
 	group := testGroup(t, 51820, config.ModeFailover, "198.51.100.1:9000/udp")
 	group.EgressPaths = append(group.EgressPaths, mustParsePath(t, "198.51.100.1:9300/udp"))
-	group.EgressMaxLoss, group.EgressPrefer = 25, config.PreferLatency
+	group.EgressTolerance, group.EgressPrefer = 25, config.PreferLatency
 	fixture := newDataFixture(t, group)
 	frames := decodeFrames(t, fixture.registrations[0].egressFrames(1))
 	if len(frames) != 1 {
 		t.Fatalf("EGRESS_REGISTER frames = %#v", frames)
 	}
 	seconds, settings := protocol.UnpackEgressLease(frames[0].LeaseSeconds)
-	if seconds != registrationLeaseSeconds || settings != (protocol.EgressSettings{MaxLossTenths: 25, PreferLatency: true}) {
+	if seconds != registrationLeaseSeconds || settings != (protocol.EgressSettings{ToleranceTenths: 25, PreferLatency: true}) {
 		t.Fatalf("lease = %d, %#v", seconds, settings)
 	}
 	status, err := fixture.controller.Status()
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	if got := status.Client.Groups[0]; got.EgressMaxLossPercent != 2.5 || got.EgressPrefer != "latency" || got.MaxLossPercent != 0 || got.Prefer != "" {
+	if got := status.Client.Groups[0]; got.EgressTolerancePercent != 2.5 || got.EgressPrefer != "latency" || got.TolerancePercent != 0 || got.Prefer != "" {
 		t.Fatalf("group = %#v", got)
 	}
 	// Without settings the lease stays 30, as an older client sends it.

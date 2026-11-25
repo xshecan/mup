@@ -142,7 +142,7 @@ func (p *clientPath) runtimePath() config.Path {
 type pathGroup struct {
 	settings dataplane.GroupSettings
 	egresses *egressSet
-	// policy is the loss limit and the path choice of the ingress paths.
+	// policy is the loss tolerance and the path choice of the ingress paths.
 	// chooser picks the path of a group that prefers latency, and chosen is
 	// its latest pick. dataMask holds the ingress paths of the group that
 	// carry data.
@@ -238,10 +238,10 @@ type clientController struct {
 	// the other way.
 	reflectMu      sync.Mutex
 	reflectHealthy [config.MaxPaths][]netip.Addr
-	// reflectDegraded holds the members whose loss is above the limit of
+	// reflectDegraded holds the members whose loss is above the tolerance of
 	// their group. reflectMu guards it too.
 	reflectDegraded [config.MaxPaths][]netip.Addr
-	// policies reports whether a group has a loss limit or a latency choice
+	// policies reports whether a group has a loss tolerance or a latency choice
 	// for its ingress paths. Without one, the path state is the health as
 	// before. pathMask and pathGeneration are the latest path state that
 	// the dataplane has, and lastMeasure is the time of the latest MEASURE
@@ -628,7 +628,7 @@ func (c *clientController) publishHealthLocked() error {
 }
 
 // writePathStateLocked writes the paths that carry data to the dataplane.
-// Without a loss limit or a latency choice in any group, these are the healthy
+// Without a loss tolerance or a latency choice in any group, these are the healthy
 // paths with the generation of the health, as before. Otherwise they are the
 // union of the data sets of the groups, and the generation bumps only when
 // the mask changes. The state goes out when it changed, or always with force.
@@ -1175,15 +1175,15 @@ func (c *clientController) groupsLocked(paths []api.Path, routes []dataplane.Cli
 	groups := make([]api.Group, 0, len(c.groups))
 	for _, group := range c.groups {
 		converted := api.Group{
-			ListenPort:     group.settings.ListenPort,
-			Mode:           group.settings.Mode.String(),
-			MaxLossPercent: group.policy.maxLoss.Percent(),
-			Prefer:         group.policy.prefer(),
+			ListenPort:       group.settings.ListenPort,
+			Mode:             group.settings.Mode.String(),
+			TolerancePercent: group.policy.tolerance.Percent(),
+			Prefer:           group.policy.prefer(),
 		}
 		if group.egresses != nil {
 			converted.EgressMode = group.settings.EgressMode.String()
 			settings := group.egresses.settingsOf()
-			converted.EgressMaxLossPercent = config.LossLimit(settings.MaxLossTenths).Percent()
+			converted.EgressTolerancePercent = config.Tolerance(settings.ToleranceTenths).Percent()
 			if settings.PreferLatency {
 				converted.EgressPrefer = config.PreferLatency.String()
 			}
@@ -1363,7 +1363,7 @@ func (c *clientController) pathLocked(slot int, inUse [config.MaxPaths]bool) api
 // inUseSlotsLocked mirrors the path choice of the client program in each group.
 // Failover uses the path of the data set with the lowest priority in the
 // dataplane, which is the chosen path of a latency choice. The other
-// modes use every path of the data set. Without a loss limit or a latency
+// modes use every path of the data set. Without a loss tolerance or a latency
 // choice, the data set is the healthy paths.
 func (c *clientController) inUseSlotsLocked() [config.MaxPaths]bool {
 	var inUse [config.MaxPaths]bool

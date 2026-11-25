@@ -11,7 +11,7 @@ import (
 )
 
 // evaluateDataLocked runs the loss gates of the ingress paths and of the
-// members of the ingress reflect paths in the groups with a loss limit, on a
+// members of the ingress reflect paths in the groups with a loss tolerance, on a
 // MEASURE round. It then updates the data set of each group and writes the
 // path state and the member lists that changed.
 func (c *clientController) evaluateDataLocked(now time.Time) error {
@@ -20,7 +20,7 @@ func (c *clientController) evaluateDataLocked(now time.Time) error {
 		if current == nil {
 			continue
 		}
-		limit := current.group.policy.maxLoss.Percent()
+		limit := current.group.policy.tolerance.Percent()
 		if limit == 0 {
 			continue
 		}
@@ -91,7 +91,7 @@ func (c *clientController) dataMasksLocked(tick bool) {
 			health, _ := c.health.Path(slot)
 			candidate := dataCandidate{id: slot, priority: int(current.priority), healthy: health.Healthy}
 			if m := c.ingressMeasures[slot]; m != nil {
-				candidate.degraded = group.policy.maxLoss != 0 && m.gate.Degraded()
+				candidate.degraded = group.policy.tolerance != 0 && m.gate.Degraded()
 				candidate.rtt = choiceRTT(&m.probes, c.lastMeasure)
 			}
 			candidates = append(candidates, candidate)

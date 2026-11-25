@@ -10,11 +10,11 @@ import (
 	"github.com/xshecan/mup/protocol"
 )
 
-// dataPolicy is the loss limit and the path choice of one group direction.
+// dataPolicy is the loss tolerance and the path choice of one group direction.
 // The zero value keeps the paths as their health and their mode pick them.
 type dataPolicy struct {
-	// maxLoss is the loss limit, or zero for none.
-	maxLoss config.LossLimit
+	// tolerance is the loss tolerance, or zero for none.
+	tolerance config.Tolerance
 	// latency picks the path with the lowest round trip time. Only the
 	// failover mode has it.
 	latency bool
@@ -22,7 +22,7 @@ type dataPolicy struct {
 
 // active reports whether the policy changes anything.
 func (p dataPolicy) active() bool {
-	return p.maxLoss != 0 || p.latency
+	return p.tolerance != 0 || p.latency
 }
 
 // prefer is the name of the path choice for the API, or empty for the order.
@@ -36,15 +36,15 @@ func (p dataPolicy) prefer() string {
 // ingressPolicy is the policy of the ingress paths of a group. A group without
 // separate directions has its settings next to its mode.
 func ingressPolicy(group config.Group) dataPolicy {
-	return dataPolicy{maxLoss: group.MaxLoss, latency: group.Prefer == config.PreferLatency && group.Mode == config.ModeFailover}
+	return dataPolicy{tolerance: group.Tolerance, latency: group.Prefer == config.PreferLatency && group.Mode == config.ModeFailover}
 }
 
 // egressSettings are the settings of the egress paths of a group, as the
 // EGRESS_REGISTER frames carry them to the servers.
 func egressSettings(group config.Group) protocol.EgressSettings {
 	return protocol.EgressSettings{
-		MaxLossTenths: uint16(group.EgressMaxLoss),
-		PreferLatency: group.EgressPrefer == config.PreferLatency && group.EgressMode == config.ModeFailover,
+		ToleranceTenths: uint16(group.EgressTolerance),
+		PreferLatency:   group.EgressPrefer == config.PreferLatency && group.EgressMode == config.ModeFailover,
 	}
 }
 
@@ -52,8 +52,8 @@ func egressSettings(group config.Group) protocol.EgressSettings {
 // latency choice counts only in the failover mode.
 func egressPolicy(settings protocol.EgressSettings, mode config.Mode) dataPolicy {
 	return dataPolicy{
-		maxLoss: config.LossLimit(settings.MaxLossTenths),
-		latency: settings.PreferLatency && mode == config.ModeFailover,
+		tolerance: config.Tolerance(settings.ToleranceTenths),
+		latency:   settings.PreferLatency && mode == config.ModeFailover,
 	}
 }
 

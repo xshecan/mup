@@ -16,12 +16,12 @@ func TestPackEgressLease(t *testing.T) {
 	}{
 		"no settings":     {30, EgressSettings{}, 30},
 		"prefer latency":  {30, EgressSettings{PreferLatency: true}, 0x0000011e},
-		"loss 5%":         {30, EgressSettings{MaxLossTenths: 50}, 0x0032001e},
-		"loss 0.1%":       {30, EgressSettings{MaxLossTenths: 1}, 0x0001001e},
-		"loss 100%":       {30, EgressSettings{MaxLossTenths: 1000}, 0x03e8001e},
-		"both":            {30, EgressSettings{MaxLossTenths: 125, PreferLatency: true}, 0x007d011e},
-		"limit too large": {30, EgressSettings{MaxLossTenths: 1001}, 30},
-		"withdraw":        {0, EgressSettings{MaxLossTenths: 50, PreferLatency: true}, 0},
+		"tolerance 5%":    {30, EgressSettings{ToleranceTenths: 50}, 0x0032001e},
+		"tolerance 0.1%":  {30, EgressSettings{ToleranceTenths: 1}, 0x0001001e},
+		"tolerance 100%":  {30, EgressSettings{ToleranceTenths: 1000}, 0x03e8001e},
+		"both":            {30, EgressSettings{ToleranceTenths: 125, PreferLatency: true}, 0x007d011e},
+		"limit too large": {30, EgressSettings{ToleranceTenths: 1001}, 30},
+		"withdraw":        {0, EgressSettings{ToleranceTenths: 50, PreferLatency: true}, 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := PackEgressLease(tt.seconds, tt.settings); got != tt.want {
@@ -41,9 +41,9 @@ func TestUnpackEgressLease(t *testing.T) {
 	}{
 		"old frame":       {30, 30, EgressSettings{}},
 		"withdraw":        {0, 0, EgressSettings{}},
-		"both":            {0x007d011e, 30, EgressSettings{MaxLossTenths: 125, PreferLatency: true}},
+		"both":            {0x007d011e, 30, EgressSettings{ToleranceTenths: 125, PreferLatency: true}},
 		"limit too large": {0x03e9001e, 30, EgressSettings{}},
-		"unknown bits":    {0x0032fe1e, 30, EgressSettings{MaxLossTenths: 50}},
+		"unknown bits":    {0x0032fe1e, 30, EgressSettings{ToleranceTenths: 50}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			seconds, settings := UnpackEgressLease(tt.field)
@@ -52,7 +52,7 @@ func TestUnpackEgressLease(t *testing.T) {
 			}
 		})
 	}
-	for _, settings := range []EgressSettings{{}, {PreferLatency: true}, {MaxLossTenths: 1}, {MaxLossTenths: 1000, PreferLatency: true}} {
+	for _, settings := range []EgressSettings{{}, {PreferLatency: true}, {ToleranceTenths: 1}, {ToleranceTenths: 1000, PreferLatency: true}} {
 		seconds, got := UnpackEgressLease(PackEgressLease(30, settings))
 		if seconds != 30 || got != settings {
 			t.Fatalf("round trip of %+v = %d, %+v", settings, seconds, got)
