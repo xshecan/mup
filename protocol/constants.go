@@ -42,6 +42,14 @@ const (
 	// server sends replies to the client. The client sends it on its ingress
 	// paths, and each server that owns the address of the egress path keeps it.
 	ControlEgressRegister
+	// ControlMeasure measures an ingress path. The client sends it on each
+	// ingress path with the count code of the data packets that it sent on
+	// the path. A server that does not know the type drops it.
+	ControlMeasure
+	// ControlMeasureReply answers a MEASURE. It is a copy of the MEASURE with
+	// the count code of the data packets that the server received on the
+	// path, and the server sends it like a REGISTER_ACK.
+	ControlMeasureReply
 )
 
 type ControlStatus uint16

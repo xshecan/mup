@@ -54,6 +54,8 @@ type udpControlSockets struct {
 	// frames that arrive for egress paths.
 	router  *ackRouter
 	onProbe atomic.Pointer[func(egressProbe)]
+	// onMeasure takes the MEASURE_REPLY frames.
+	onMeasure atomic.Pointer[func(egressProbe)]
 
 	mu      sync.Mutex
 	sockets map[netip.AddrPort]*udpControlSocket
@@ -146,6 +148,18 @@ func (s *udpControlSocket) read() {
 		}
 		if frame.Type == protocol.ControlProbe {
 			s.respondToProbe(frame, source.Addr().Unmap())
+			continue
+		}
+		if frame.Type == protocol.ControlMeasureReply {
+			if handle := s.owner.onMeasure.Load(); handle != nil {
+				(*handle)(egressProbe{
+					frame:     frame,
+					source:    source.Addr().Unmap(),
+					transport: protocol.TransportUDP,
+					port:      source.Port(),
+					received:  time.Now(),
+				})
+			}
 			continue
 		}
 		if frame.Type == protocol.ControlRegisterACK {

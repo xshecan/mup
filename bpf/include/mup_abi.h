@@ -251,6 +251,41 @@ struct down_path_key_v1 {
 };
 
 /*
+ * path_counter_v1 counts the data packets of one path in one direction. bytes
+ * is the sum of their IPv4 total lengths at the count point. The client keeps
+ * one counter for each ingress path slot, at index 0 to 7 of
+ * client_path_counters, and one for each egress path slot, at index
+ * MUP_PATH_COUNTER_EGRESS_BASE plus the slot.
+ */
+struct path_counter_v1 {
+	__u64 packets;
+	__u64 bytes;
+};
+
+#define MUP_PATH_COUNTER_EGRESS_BASE 8
+#define MUP_PATH_COUNTERS 16
+
+enum mup_path_counter_direction {
+	MUP_PATH_COUNTER_INGRESS = 0,
+	MUP_PATH_COUNTER_EGRESS = 1,
+};
+
+/*
+ * path_counter_key_v1 names the counter of one path of a client on a server.
+ * An ingress counter holds the packets that the server received on the
+ * ingress path path_id, and an egress counter the packets that it sent on the
+ * egress path path_id. It has the layout of down_path_key_v1, with the
+ * direction in the place of its padding, so the server builds both keys in
+ * the same scratch value. Go creates and deletes the counters, and the
+ * program only adds to a counter that exists.
+ */
+struct path_counter_key_v1 {
+	struct client_key_v1 client;
+	__u32 path_id;
+	__u32 direction;
+};
+
+/*
  * down_path_v1 is one down path of a client on a server. A direct path sends
  * from server_ip. A path with MUP_FLAG_RETURN_IP returns through return_ip. A
  * path with MUP_FLAG_RETURN_POOL returns through the first count members,
@@ -544,6 +579,14 @@ _Static_assert(sizeof(struct down_group_key_v1) == 24, "down_group_key_v1 ABI");
 _Static_assert(sizeof(struct down_group_v1) == 4, "down_group_v1 ABI");
 _Static_assert(sizeof(struct down_path_key_v1) == 24, "down_path_key_v1 ABI");
 _Static_assert(sizeof(struct down_path_v1) == 92, "down_path_v1 ABI");
+_Static_assert(sizeof(struct path_counter_v1) == 16, "path_counter_v1 ABI");
+_Static_assert(sizeof(struct path_counter_key_v1) == 24, "path_counter_key_v1 ABI");
+_Static_assert(sizeof(struct path_counter_key_v1) == sizeof(struct down_path_key_v1) &&
+		       __builtin_offsetof(struct path_counter_key_v1, path_id) ==
+			       __builtin_offsetof(struct down_path_key_v1, path_id) &&
+		       __builtin_offsetof(struct path_counter_key_v1, direction) ==
+			       __builtin_offsetof(struct down_path_key_v1, padding),
+	       "path_counter_key_v1 has the layout of down_path_key_v1");
 _Static_assert(sizeof(struct path_src_v1) == 4, "path_src_v1 ABI");
 _Static_assert(sizeof(struct bridge_config_v1) == 8, "bridge_config_v1 ABI");
 _Static_assert(sizeof(struct bridge_allow_key_v1) == 12, "bridge_allow_key_v1 ABI");

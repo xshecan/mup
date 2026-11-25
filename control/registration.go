@@ -15,6 +15,8 @@ var (
 	ErrRegistrationPort      = errors.New("registration port does not match server port")
 	ErrRegistrationTransport = errors.New("outer transport does not match registration transport")
 	ErrRegistrationPath      = errors.New("invalid registration path")
+	ErrMeasureType           = errors.New("control frame is not MEASURE")
+	ErrMeasureUnknown        = errors.New("MEASURE is not on a registered path of its client")
 )
 
 type ClientKey struct {
@@ -162,10 +164,52 @@ func (r *Registry) Expire(now time.Time) []ClientKey {
 	return expired
 }
 
+// Measure checks a MEASURE with the rules of a REGISTER, and it accepts the
+// frame only on a live path that its client registered with the same path ID
+// and the same kind. It creates and refreshes nothing.
+func (r *Registry) Measure(now time.Time, request RegistrationRequest) (ClientKey, error) {
+	if request.Frame.Type != protocol.ControlMeasure {
+		return ClientKey{}, ErrMeasureType
+	}
+	if err := r.validatePath(request); err != nil {
+		return ClientKey{}, err
+	}
+	key := ClientKey{AdvertisedIP: request.Frame.AdvertisedIP, InstanceNonce: request.Frame.InstanceNonce}
+	ingressReflect := request.Frame.Flags&protocol.ControlFlagIngressReflect != 0
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	entry, exists := r.paths[request.Path]
+	if !exists || !now.Before(entry.expiresAt) || entry.client != key ||
+		entry.pathID != request.Frame.PathID || entry.ingressReflect != ingressReflect {
+		return ClientKey{}, ErrMeasureUnknown
+	}
+	return key, nil
+}
+
+// PathIDs returns the path IDs of the live paths of each client as a mask,
+// with bit n for path ID n.
+func (r *Registry) PathIDs(now time.Time) map[ClientKey]uint8 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ids := make(map[ClientKey]uint8, len(r.clients))
+	for _, entry := range r.paths {
+		if now.Before(entry.expiresAt) && entry.pathID <= protocol.MaxPathID {
+			ids[entry.client] |= 1 << entry.pathID
+		}
+	}
+	return ids
+}
+
 func (r *Registry) validate(request RegistrationRequest) error {
 	if request.Frame.Type != protocol.ControlRegister {
 		return ErrRegistrationType
 	}
+	return r.validatePath(request)
+}
+
+// validatePath checks the source, the port, the transport and the path ID of
+// a REGISTER or a MEASURE.
+func (r *Registry) validatePath(request RegistrationRequest) error {
 	// An ingress reflect REGISTER arrives from the via host, so its source is the
 	// via, not the advertised IP. The server keys the path by the via source.
 	if request.Frame.Flags&protocol.ControlFlagIngressReflect == 0 && request.Path.Source != request.Frame.AdvertisedIP {

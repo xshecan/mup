@@ -31,6 +31,7 @@ type clientAPI interface {
 	RemoveEgressPath(id int) error
 	SetEgressMode(raw string, listenPort uint16) error
 	Peers() (api.PeerList, error)
+	Members() (api.MemberList, error)
 }
 
 type serverAPI interface {
@@ -38,6 +39,7 @@ type serverAPI interface {
 	Peers() (api.PeerList, error)
 	Clients() ([]api.RegisteredClient, error)
 	Reflectors() (api.ReflectorList, error)
+	Members() (api.MemberList, error)
 }
 
 type bridgeAPI interface {
@@ -112,6 +114,7 @@ func (h apiHandler) mux() http.Handler {
 	mux.HandleFunc("GET /v1/peers", handler.peers)
 	mux.HandleFunc("GET /v1/clients", handler.clients)
 	mux.HandleFunc("GET /v1/reflectors", handler.reflectors)
+	mux.HandleFunc("GET /v1/members", handler.members)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, notFound("unknown API path"))
 	})
@@ -232,6 +235,21 @@ func (h apiHandler) reflectors(w http.ResponseWriter, _ *http.Request) {
 	}
 	value, err := h.server.Reflectors()
 	writeResult(w, http.StatusOK, value, err)
+}
+
+// members lists the pool members of the ingress paths of a client, or of the
+// egress paths of the clients of a server.
+func (h apiHandler) members(w http.ResponseWriter, _ *http.Request) {
+	switch {
+	case h.client != nil:
+		value, err := h.client.Members()
+		writeResult(w, http.StatusOK, value, err)
+	case h.server != nil:
+		value, err := h.server.Members()
+		writeResult(w, http.StatusOK, value, err)
+	default:
+		writeError(w, conflict("the daemon runs as a bridge, and a bridge has no paths"))
+	}
 }
 
 func (h apiHandler) requireClient(w http.ResponseWriter, resource string) bool {

@@ -119,6 +119,13 @@ func (c *DaemonClient) Reflectors(ctx context.Context) (ReflectorList, error) {
 	return reflectors, err
 }
 
+// Members returns the pool members of the paths with their measured quality.
+func (c *DaemonClient) Members(ctx context.Context) (MemberList, error) {
+	var members MemberList
+	err := c.do(ctx, http.MethodGet, "/v1/members", nil, &members)
+	return members, err
+}
+
 func (c *DaemonClient) do(ctx context.Context, method, path string, request, response any) error {
 	var body io.Reader
 	if request != nil {

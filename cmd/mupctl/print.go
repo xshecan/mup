@@ -197,9 +197,9 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 	// when the group sends on it, and standby when it waits. SEEN is the age of
 	// the latest answer of the server: the ACK of an ingress path, or the probe
 	// of an egress path.
-	header := []string{"ID", "GROUP", "SERVER", "TRANSPORT", "VIA", "INTERFACE", "STATE", "SEEN", "RTT"}
+	header := []string{"ID", "GROUP", "SERVER", "TRANSPORT", "VIA", "INTERFACE", "STATE", "SEEN", "RTT", "LOSS"}
 	if split {
-		header = []string{"ID", "PATH", "GROUP", "SERVER", "TRANSPORT", "VIA", "INTERFACE", "STATE", "SEEN", "RTT"}
+		header = []string{"ID", "PATH", "GROUP", "SERVER", "TRANSPORT", "VIA", "INTERFACE", "STATE", "SEEN", "RTT", "LOSS"}
 	}
 	if bridged {
 		// A bridge path shows the bridge address in the SERVER column. KIND
@@ -209,8 +209,12 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 		header = slices.Insert(header, 2, "KIND")
 	}
 	if wide {
-		// SRC is the source range of the data packets of a path.
-		header = append(header, "SRC", "PORTS", "PRIORITY", "MISSES")
+		// AVG RTT and JITTER come from the probes of the last 60 seconds.
+		// DATA LOSS is the data loss of the last 10 and 60 seconds, and
+		// PROBE LOSS is the loss of the control probes. RATE is what this end
+		// sent or received in the last 10 seconds. SRC is the source range of
+		// the data packets of a path.
+		header = append(header, "AVG RTT", "JITTER", "DATA LOSS", "PROBE LOSS", "RATE", "SRC", "PORTS", "PRIORITY", "MISSES")
 	}
 	row(table, header...)
 	for _, path := range paths {
@@ -245,13 +249,20 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 			pathStateText(path),
 			seen,
 			formatRTT(path.RTTSeconds),
+			lossText(path.Measurement),
 		)
 		if wide {
 			ports := "-"
 			if path.LastPort > path.FirstPort {
 				ports = fmt.Sprintf("%d-%d", path.FirstPort, path.LastPort)
 			}
-			cells = append(cells, srcText(path.SrcFirst, path.SrcLast), ports, strconv.Itoa(int(path.Priority)), strconv.Itoa(path.Misses))
+			cells = append(cells,
+				formatRTT(path.RTTAvgSeconds),
+				formatRTT(path.RTTJitterSeconds),
+				dataLossText(path.Measurement),
+				formatLoss(path.ProbeLossPercent),
+				formatRate(path.RateBitsPerSecond),
+				srcText(path.SrcFirst, path.SrcLast), ports, strconv.Itoa(int(path.Priority)), strconv.Itoa(path.Misses))
 		}
 		row(table, cells...)
 	}
@@ -458,6 +469,12 @@ func egressList(groups []api.EgressGroup) string {
 				}
 				text += fmt.Sprintf(" %s %s (%d/%d)", via, path.ReturnIP, path.HealthyMembers, path.Members)
 			}
+			if loss := lossText(path.Measurement); loss != "-" {
+				text += " loss " + loss
+			}
+			if path.RTTAvgSeconds > 0 {
+				text += " rtt " + formatRTT(path.RTTAvgSeconds)
+			}
 			list = append(list, text+srcSuffix(path.SrcFirst, path.SrcLast))
 		}
 		return orDash(strings.Join(list, ","))
@@ -557,6 +574,93 @@ func formatRTT(seconds float64) string {
 		return "-"
 	}
 	return time.Duration(seconds * float64(time.Second)).Round(100 * time.Microsecond).String()
+}
+
+// formatLoss shows a loss percentage with one decimal, or "-" when mup has no
+// value.
+func formatLoss(percent *float64) string {
+	if percent == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%.1f%%", *percent)
+}
+
+// lossText shows the data loss of the last 10 seconds, or the probe loss when
+// there is no data loss, or "-".
+func lossText(m api.Measurement) string {
+	if m.LossPercent != nil {
+		return formatLoss(m.LossPercent)
+	}
+	return formatLoss(m.ProbeLossPercent)
+}
+
+// dataLossText shows the data loss of the last 10 and 60 seconds as 10s/60s. A
+// missing side shows "-", and no side at all shows a single "-".
+func dataLossText(m api.Measurement) string {
+	if m.LossPercent == nil && m.LossLongPercent == nil {
+		return "-"
+	}
+	return formatLoss(m.LossPercent) + "/" + formatLoss(m.LossLongPercent)
+}
+
+// formatRate shows bits per second in the largest unit that keeps the number
+// below 1000, or "-" for no traffic.
+func formatRate(bitsPerSecond float64) string {
+	if bitsPerSecond <= 0 {
+		return "-"
+	}
+	units := []struct {
+		name     string
+		decimals int
+	}{{"bit", 0}, {"kbit", 0}, {"Mbit", 1}, {"Gbit", 1}}
+	value := bitsPerSecond
+	for i, unit := range units {
+		text := strconv.FormatFloat(value, 'f', unit.decimals, 64)
+		if rounded, _ := strconv.ParseFloat(text, 64); rounded < 1000 || i == len(units)-1 {
+			return text + unit.name
+		}
+		value /= 1000
+	}
+	return "-"
+}
+
+// printMembers lists the pool members of the paths. A server also names the
+// client of each member.
+func printMembers(w io.Writer, members []api.Member) {
+	if len(members) == 0 {
+		_, _ = fmt.Fprintln(w, "No members found.")
+		return
+	}
+	withClient := false
+	for _, member := range members {
+		withClient = withClient || member.Client != ""
+	}
+	header := []string{"PATH", "GROUP", "MEMBER", "STATE", "RTT", "JITTER", "LOSS"}
+	if withClient {
+		header = slices.Insert(header, 0, "CLIENT")
+	}
+	table := newTable(w)
+	row(table, header...)
+	for _, member := range members {
+		group := "-"
+		if member.ListenPort != 0 {
+			group = strconv.Itoa(int(member.ListenPort))
+		}
+		cells := []string{
+			fmt.Sprintf("%s %d", member.Direction, member.PathID),
+			group,
+			member.Address,
+			healthText(member.Healthy),
+			formatRTT(member.RTTAvgSeconds),
+			formatRTT(member.RTTJitterSeconds),
+			formatLoss(member.ProbeLossPercent),
+		}
+		if withClient {
+			cells = slices.Insert(cells, 0, orDash(member.Client))
+		}
+		row(table, cells...)
+	}
+	_ = table.Flush()
 }
 
 func healthText(healthy bool) string {

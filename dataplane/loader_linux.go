@@ -291,6 +291,11 @@ func (r *Runtime) ConfigureServer(settings ServerSettings) error {
 	if err := clearMap[mupDownPathKeyV1, mupDownPathV1](r.objects.ServerDownPaths); err != nil {
 		return fmt.Errorf("clear egress paths: %w", err)
 	}
+	// The path counters of the previous run belong to no live path either.
+	// Go creates them again when the paths register.
+	if err := clearMap[mupPathCounterKeyV1, []mupPathCounterV1](r.objects.ServerPathCounters); err != nil {
+		return fmt.Errorf("clear server path counters: %w", err)
+	}
 	if settings.Target.Addr() == settings.SourceIP {
 		return r.releaseLocalTargetPort(settings.Target.Port())
 	}

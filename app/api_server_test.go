@@ -81,7 +81,15 @@ func (f *fakeClientAPI) Peers() (api.PeerList, error) {
 	return api.PeerList{Peers: []api.Peer{{Token: 1}}}, nil
 }
 
+func (f *fakeClientAPI) Members() (api.MemberList, error) {
+	return api.MemberList{Members: []api.Member{{Direction: "ingress", PathID: 2, Address: "203.0.113.1", Healthy: true}}}, nil
+}
+
 type fakeServerAPI struct{}
+
+func (fakeServerAPI) Members() (api.MemberList, error) {
+	return api.MemberList{Members: []api.Member{{Client: "192.0.2.10", Direction: "egress", PathID: 1, Address: "198.51.100.1"}}}, nil
+}
 
 func (fakeServerAPI) Status() (api.Status, error) {
 	return api.Status{Role: api.RoleServer, Server: &api.ServerStatus{Port: 5000}}, nil
@@ -273,5 +281,25 @@ func TestDropResetWorksForEveryRole(t *testing.T) {
 	}
 	if _, err := client.Paths(ctx); err != nil {
 		t.Fatalf("Paths after a failed reset: %v", err)
+	}
+}
+
+func TestMembersAPIOnEachRole(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	client := newTestDaemonClient(t, newAPIHandler(&fakeClientAPI{}, nil))
+	members, err := client.Members(ctx)
+	if err != nil || len(members.Members) != 1 || members.Members[0].Direction != "ingress" || members.Members[0].PathID != 2 {
+		t.Fatalf("client Members = %#v, %v", members, err)
+	}
+	server := newTestDaemonClient(t, newAPIHandler(nil, fakeServerAPI{}))
+	members, err = server.Members(ctx)
+	if err != nil || len(members.Members) != 1 || members.Members[0].Client != "192.0.2.10" || members.Members[0].Direction != "egress" {
+		t.Fatalf("server Members = %#v, %v", members, err)
+	}
+	bridge := newTestDaemonClient(t, newBridgeAPIHandler(fakeServerAPI{}))
+	if _, err := bridge.Members(ctx); responseStatus(err) != http.StatusConflict {
+		t.Fatalf("bridge Members error = %v, want status 409", err)
 	}
 }

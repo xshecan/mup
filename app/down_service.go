@@ -106,8 +106,11 @@ func (d *egressService) probe(now time.Time) {
 	if d.sender == nil {
 		return
 	}
-	for _, target := range d.registry.probeTargets(now) {
-		sequence := d.sequence.Add(1)
+	for _, send := range d.registry.probeRound(now, func() uint32 { return d.sequence.Add(1) }) {
+		target, sequence := send.target, send.sequence
+		// The lease field of an egress probe carries the count of the data
+		// packets that the server sent on the path. An older client ignores
+		// it.
 		frame := protocol.ControlFrame{
 			Type:          protocol.ControlProbe,
 			Transport:     target.transport,
@@ -118,6 +121,7 @@ func (d *egressService) probe(now time.Time) {
 			ServerPort:    target.port,
 			InstanceNonce: target.client.InstanceNonce,
 			AdvertisedIP:  target.client.AdvertisedIP,
+			LeaseSeconds:  send.count,
 		}
 		// The client sees a bridge via path from the bridge address, so the
 		// probe names its member. The client names it again in the reply, and

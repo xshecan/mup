@@ -250,6 +250,7 @@ type recordingSink struct {
 	confirmed  []netip.Addr
 	// noReflector makes every pool report that it has no healthy member.
 	noReflector bool
+	fakeServerCounters
 }
 
 type recordedPool struct {
@@ -299,13 +300,13 @@ func TestAcceptRegistrationUsesTheReceivingPort(t *testing.T) {
 	sink := &recordingSink{}
 
 	targets := newReflectorTargets()
-	if _, err := acceptRegistration(frame, protocol.TransportUDP, 5000, client, local, registry, sink, targets, nil); !errors.Is(err, control.ErrRegistrationPort) {
+	if _, err := acceptRegistration(frame, protocol.TransportUDP, 5000, client, local, registry, sink, targets, nil, nil); !errors.Is(err, control.ErrRegistrationPort) {
 		t.Fatalf("acceptRegistration on another port error = %v, want %v", err, control.ErrRegistrationPort)
 	}
 	if len(sink.registered) != 0 {
 		t.Fatalf("rejected frame reached the dataplane: %#v", sink.registered)
 	}
-	if _, err := acceptRegistration(frame, protocol.TransportUDP, 5001, client, local, registry, sink, targets, nil); err != nil {
+	if _, err := acceptRegistration(frame, protocol.TransportUDP, 5001, client, local, registry, sink, targets, nil, nil); err != nil {
 		t.Fatalf("acceptRegistration on the named port: %v", err)
 	}
 	if len(sink.registered) != 1 || sink.registered[0].Path.ServerPort != 5001 {
@@ -341,7 +342,7 @@ func TestAcceptRegistrationReportsAPoolWithoutReflector(t *testing.T) {
 	} {
 		registry := control.NewRegistry(9000, 9999, 30*time.Second)
 		sink := &recordingSink{noReflector: test.noReflector}
-		ack, err := acceptRegistration(frame, protocol.TransportUDP, 9002, client, local, registry, sink, newReflectorTargets(), nil)
+		ack, err := acceptRegistration(frame, protocol.TransportUDP, 9002, client, local, registry, sink, newReflectorTargets(), nil, nil)
 		if err != nil {
 			t.Fatalf("acceptRegistration: %v", err)
 		}
@@ -378,7 +379,7 @@ func TestAcceptRegistrationPassesTheSourceRangeAndSendsAnACKWithoutIt(t *testing
 		}
 		registry := control.NewRegistry(5000, 5001, 30*time.Second)
 		sink := &recordingSink{}
-		ack, err := acceptRegistration(frame, transport, 5001, client, local, registry, sink, newReflectorTargets(), nil)
+		ack, err := acceptRegistration(frame, transport, 5001, client, local, registry, sink, newReflectorTargets(), nil, nil)
 		if err != nil {
 			t.Fatalf("%s: acceptRegistration: %v", transport, err)
 		}

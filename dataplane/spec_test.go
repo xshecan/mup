@@ -58,6 +58,8 @@ func TestMupCollectionSpec(t *testing.T) {
 		"bridge_addresses":         {ebpf.Hash, 64},
 		"bridge_allow":             {ebpf.LPMTrie, 64 * MaxBridges},
 		"bridge_counters":          {ebpf.PerCPUArray, 4},
+		"client_path_counters":     {ebpf.PerCPUArray, 16},
+		"server_path_counters":     {ebpf.PerCPUHash, 8192},
 	}
 	for name, want := range wantMaps {
 		m := spec.Maps[name]

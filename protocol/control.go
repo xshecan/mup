@@ -60,6 +60,12 @@ type ControlFrame struct {
 	// offsets 36 to 39, the bytes of the sequence, so Sequence must be zero.
 	SrcFirst uint16
 	SrcLast  uint16
+	// PeerCount is the count code of the data packets that the server received
+	// on the path, at offset 44. Only a MEASURE_REPLY carries it. In a PROBE
+	// and a PROBE_REPLY of an egress path, in a MEASURE and in a
+	// MEASURE_REPLY, LeaseSeconds holds the count code of the sender instead
+	// of a lease, and zero there means no count.
+	PeerCount uint32
 }
 
 func EncodeControlFrame(dst []byte, frame ControlFrame) error {
@@ -97,6 +103,9 @@ func EncodeControlFrame(dst []byte, frame ControlFrame) error {
 		server := frame.EgressServer.As4()
 		copy(dst[44:48], server[:])
 	}
+	if frame.Type == ControlMeasureReply {
+		binary.BigEndian.PutUint32(dst[44:48], frame.PeerCount)
+	}
 	if frame.Flags&ControlFlagSourceRange != 0 {
 		offset := 44
 		if frame.Type == ControlEgressRegister {
@@ -122,9 +131,13 @@ func DecodeControlFrame(src []byte) (ControlFrame, error) {
 		return ControlFrame{}, ErrControlLength
 	}
 	ranged := src[7]&ControlFlagSourceRange != 0
-	if ControlType(src[5]) != ControlEgressRegister &&
-		(src[18] != 0 || (!ranged || ControlType(src[5]) != ControlRegister) &&
-			(src[44] != 0 || src[45] != 0 || src[46] != 0 || src[47] != 0)) {
+	frameType := ControlType(src[5])
+	// The bytes from offset 44 hold the egress server of a EGRESS_REGISTER,
+	// the source range of a REGISTER, and the peer count of a MEASURE_REPLY.
+	tail := frameType == ControlEgressRegister || frameType == ControlMeasureReply ||
+		ranged && frameType == ControlRegister
+	if frameType != ControlEgressRegister && src[18] != 0 ||
+		!tail && (src[44] != 0 || src[45] != 0 || src[46] != 0 || src[47] != 0) {
 		return ControlFrame{}, ErrControlReserved
 	}
 	frame := ControlFrame{
@@ -149,6 +162,9 @@ func DecodeControlFrame(src []byte) (ControlFrame, error) {
 		frame.ReturnPrefix = src[19]
 	} else if src[19] != 0 {
 		return ControlFrame{}, ErrControlReserved
+	}
+	if frame.Type == ControlMeasureReply {
+		frame.PeerCount = binary.BigEndian.Uint32(src[44:48])
 	}
 	if frame.Type == ControlEgressRegister {
 		frame.EgressMode = src[18]
@@ -188,7 +204,7 @@ func RandomInstanceNonce() (uint64, error) {
 }
 
 func validateControlFrame(frame ControlFrame) error {
-	if frame.Type < ControlRegister || frame.Type > ControlEgressRegister {
+	if frame.Type < ControlRegister || frame.Type > ControlMeasureReply {
 		return ErrControlType
 	}
 	if frame.Transport != TransportUDP && frame.Transport != TransportICMP {
@@ -214,8 +230,17 @@ func validateControlFrame(frame ControlFrame) error {
 		(frame.Flags&ControlFlagBridge == 0 || frame.Flags&(ControlFlagReturnIP|ControlFlagReturnPool) == 0) {
 		return ErrControlFlags
 	}
+	// A MEASURE and its reply have no flag, or the flags of a REGISTER of
+	// one member of an ingress reflect path.
+	measure := frame.Type == ControlMeasure || frame.Type == ControlMeasureReply
+	if measure && frame.Flags != 0 && frame.Flags != ControlFlagIngressReflect|ControlFlagReturnIP {
+		return ErrControlFlags
+	}
+	if frame.PeerCount != 0 && frame.Type != ControlMeasureReply {
+		return ErrControlReserved
+	}
 	if frame.Flags&ControlFlagIngressReflect != 0 {
-		if frame.Type != ControlRegister && frame.Type != ControlRegisterACK {
+		if frame.Type != ControlRegister && frame.Type != ControlRegisterACK && !measure {
 			return ErrControlFlags
 		}
 		if frame.Flags&(ControlFlagReturnIP|ControlFlagReturnPool) == 0 {

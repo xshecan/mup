@@ -235,6 +235,35 @@ struct {
 } server_down_paths SEC(".maps");
 
 /*
+ * client_path_counters counts the data packets of the client paths. Index 0 to
+ * 7 holds the packets that the client sent on each ingress path slot, and
+ * index MUP_PATH_COUNTER_EGRESS_BASE plus a slot the packets that it accepted
+ * from that egress path slot. The counters only grow, and Go reads their
+ * differences, so a start of the daemon need not zero them.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, MUP_PATH_COUNTERS);
+	MUP_PINNED;
+	__type(key, __u32);
+	__type(value, struct path_counter_v1);
+} client_path_counters SEC(".maps");
+
+/*
+ * server_path_counters counts the data packets of each path of each client on
+ * the server, in each direction. Go creates a counter when a path registers
+ * and deletes it when the path goes away. The program adds only to a counter
+ * that exists, so a packet never creates one.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+	__uint(max_entries, 8192);
+	MUP_PINNED;
+	__type(key, struct path_counter_key_v1);
+	__type(value, struct path_counter_v1);
+} server_path_counters SEC(".maps");
+
+/*
  * bridge_config holds the entries of the bridge. The port of a packet picks
  * the entry, and an entry with a zero server_ip is unused.
  */
@@ -329,11 +358,16 @@ struct {
 /*
  * send_scratch holds the large values of a send that would not fit on the
  * stack of a function that a program calls: the FIB lookup of a clone, and
- * the key of a down path. It holds no state, so it is not pinned.
+ * the key of a down path. The key of a path counter has the same layout, so
+ * it shares the place of the down path key. It holds no state, so it is not
+ * pinned.
  */
 struct send_scratch_layout {
 	struct bpf_fib_lookup fib;
-	struct down_path_key_v1 key;
+	union {
+		struct down_path_key_v1 key;
+		struct path_counter_key_v1 counter_key;
+	};
 };
 
 /* bpf2go cannot describe the unions of bpf_fib_lookup, so the map holds words. */
@@ -409,6 +443,66 @@ static __always_inline int count_and_drop(struct __sk_buff *skb, __u32 reason)
 	count_reason(reason);
 	emit_drop_event(skb, reason);
 	return TC_ACT_SHOT;
+}
+
+/*
+ * mup_count_client_path adds one data packet of bytes bytes to the client path
+ * counter at index. The verifier checks this global function once, so a count
+ * point adds no branch to the program that calls it.
+ */
+__attribute__((noinline)) int mup_count_client_path(__u32 index, __u32 bytes)
+{
+	struct path_counter_v1 *counter;
+
+	if (index >= MUP_PATH_COUNTERS)
+		return 0;
+	counter = bpf_map_lookup_elem(&client_path_counters, &index);
+	if (!counter)
+		return 0;
+	counter->packets += 1;
+	counter->bytes += bytes;
+	return 0;
+}
+
+/*
+ * mup_count_server_path adds one data packet of bytes bytes to the counter of
+ * one path of a client on the server, if Go created that counter. The key goes
+ * into send_scratch, so the count takes no stack for it. A caller in a send
+ * has no more use for the down path key there. The verifier checks this
+ * global function once, so a count point adds no branch to the large server
+ * programs.
+ */
+__attribute__((noinline)) int mup_count_server_path(__u32 advertised_ip,
+						    __u64 instance_nonce,
+						    __u32 path_id,
+						    __u32 direction,
+						    __u32 bytes)
+{
+	struct send_scratch_layout *scratch;
+	struct path_counter_v1 *counter;
+	__u32 scratch_key = 0;
+
+	scratch = bpf_map_lookup_elem(&send_scratch, &scratch_key);
+	if (!scratch)
+		return 0;
+	scratch->counter_key.client.advertised_ip = advertised_ip;
+	scratch->counter_key.client.padding = 0;
+	scratch->counter_key.client.instance_nonce = instance_nonce;
+	scratch->counter_key.path_id = path_id;
+	scratch->counter_key.direction = direction;
+	counter = bpf_map_lookup_elem(&server_path_counters,
+				      &scratch->counter_key);
+	if (!counter)
+		return 0;
+	counter->packets += 1;
+	counter->bytes += bytes;
+	return 0;
+}
+
+/* The IPv4 total length of a parsed packet. */
+static __always_inline __u32 mup_packet_length(const struct mup_packet *packet)
+{
+	return mup_read_be16((const __u8 *)&packet->ipv4->total_length);
 }
 
 static __always_inline int get_or_create_client_route(
@@ -766,6 +860,8 @@ static __always_inline int is_client_downstream_source(
  * path, or from any address in its return pool. Its port must match the down
  * path as mup_src_match says, and tag is its path tag. The match records the
  * time, at most once a second, so mupctl can show which down paths carry data.
+ * It also counts the packet on the egress path counter of the slot. The
+ * caller passes no control frame here.
  */
 static __always_inline int is_client_down_source(
 	const struct mup_packet *packet, __u32 down_mask, __u32 tag)
@@ -802,6 +898,8 @@ static __always_inline int is_client_down_source(
 
 			if (now - down->last_seen_ns > MUP_DOWN_SEEN_STEP_NS)
 				down->last_seen_ns = now;
+			mup_count_client_path(MUP_PATH_COUNTER_EGRESS_BASE + index,
+					      mup_packet_length(packet));
 			return 1;
 		}
 	}
@@ -1310,6 +1408,12 @@ __attribute__((noinline)) int mup_burst_clone(struct __sk_buff *skb, __u32 index
 		count_reason(result == -2 ? MUP_DROP_TRANSPORT : MUP_DROP_CHECKSUM);
 		return MUP_BURST_FAILED;
 	}
+	/*
+	 * The rewrite succeeded, so the copy counts on its path. A copy that the
+	 * FIB or the neighbor then refuses counts too, so the measurement shows
+	 * it as loss of the path.
+	 */
+	mup_count_client_path(index, mup_packet_length(&packet));
 	result = prepare_clone_l2(skb, &packet, path.ifindex);
 	if (result != MUP_DROP_NONE) {
 		count_reason(result);
@@ -1391,6 +1495,7 @@ static __always_inline int burst_client_packet(
 		return count_and_drop(skb, MUP_DROP_TRANSPORT);
 	if (result)
 		return count_and_drop(skb, MUP_DROP_CHECKSUM);
+	mup_count_client_path(final_key, mup_packet_length(packet));
 	return redirect_packet(path.ifindex);
 }
 
@@ -1592,13 +1697,18 @@ int mup_client_ingress(struct __sk_buff *skb)
 		reverse = bpf_map_lookup_elem(&client_endpoint_by_token, &peer_token);
 		if (!reverse)
 			return count_and_drop(skb, MUP_DROP_ROUTE_MISS);
-		/* The group of the peer decides which sources can answer it. */
+		/*
+		 * The group of the peer decides which sources can answer it. A
+		 * group with egress paths gets every reply on them, so the egress
+		 * paths come first, and a reply from a source that an ingress
+		 * path shares still counts on its egress path.
+		 */
 		group = bpf_map_lookup_elem(&path_groups,
 					    &reverse->endpoint.listen_port);
 		if (!group)
 			return count_and_drop(skb, MUP_DROP_DOWNSTREAM_SOURCE);
-		if (!is_client_downstream_source(&packet, group->path_mask, tag) &&
-		    !is_client_down_source(&packet, group->down_mask, tag))
+		if (!is_client_down_source(&packet, group->down_mask, tag) &&
+		    !is_client_downstream_source(&packet, group->path_mask, tag))
 			return count_and_drop(skb, MUP_DROP_DOWNSTREAM_SOURCE);
 		if (group->flags & MUP_GROUP_FLAG_DEDUP) {
 			result = check_client_duplicate(&packet, peer_token);
@@ -1679,12 +1789,16 @@ int mup_client_ingress(struct __sk_buff *skb)
 		return count_and_drop(skb, MUP_DROP_TRANSPORT);
 	if (result)
 		return count_and_drop(skb, MUP_DROP_CHECKSUM);
+	/* The wrapper of a bridge adds MUP_BRIDGE_OVERHEAD to the length. */
+	__u32 sent_length = mup_packet_length(&packet);
 	if (reflect_bridge) {
 		int wrap = mup_bridge_wrap(skb, reflect_source, reflect_bridge,
 					   reflect_port, selected_path.ifindex);
 		if (wrap != MUP_DROP_NONE)
 			return count_and_drop(skb, wrap);
+		sent_length += MUP_BRIDGE_OVERHEAD;
 	}
+	mup_count_client_path(selected_index, sent_length);
 
 	return redirect_packet(selected_path.ifindex);
 }
@@ -1970,6 +2084,14 @@ static __always_inline int down_send_core(struct __sk_buff *skb,
 			return count_and_drop(skb, MUP_DROP_BRIDGE_PACKET);
 		}
 	}
+	/*
+	 * The rewrite and the wrap succeeded, so the copy counts on its egress
+	 * path, with the outer length of a bridge path. A copy that the FIB or
+	 * the neighbor then refuses counts too, so the measurement shows it as
+	 * loss of the path.
+	 */
+	mup_count_server_path(advertised_ip, instance_nonce, (meta >> 16) & 7,
+			      MUP_PATH_COUNTER_EGRESS, mup_packet_length(packet));
 
 	if (clone) {
 		int sent = MUP_BURST_SENT;
@@ -2414,6 +2536,16 @@ int mup_server_ingress(struct __sk_buff *skb)
 		    !(path->flags & MUP_FLAG_UP_REFLECT))
 			return MUP_TCX_NEXT;
 	}
+	/*
+	 * The packet is data of the registered path, so it counts on that path
+	 * before any later drop. A tagged key and each member of an ingress
+	 * reflect pool have their own entry, with the path ID of the path, so
+	 * they all count on the one path. The path ID is a plain number, like
+	 * the listen port.
+	 */
+	mup_count_server_path(path->client.advertised_ip,
+			      path->client.instance_nonce, path->path_id,
+			      MUP_PATH_COUNTER_INGRESS, mup_packet_length(&packet));
 
 	now = bpf_ktime_get_ns();
 	if (path->expires_at_ns < now)

@@ -33,6 +33,20 @@ type fakeClientDataplane struct {
 	reflect    map[int][]netip.Addr
 	// egresses holds the egress path slots that are set.
 	egresses map[int]dataplane.EgressPathSettings
+	// ingressCounts and egressCounts are the path counters, and noCounters
+	// makes the read fail.
+	ingressCounts [config.MaxPaths]dataplane.PathCounter
+	egressCounts  [dataplane.MaxEgressPaths]dataplane.PathCounter
+	noCounters    bool
+}
+
+func (f *fakeClientDataplane) ClientPathCounters() ([config.MaxPaths]dataplane.PathCounter, [dataplane.MaxEgressPaths]dataplane.PathCounter, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.noCounters {
+		return f.ingressCounts, f.egressCounts, errors.New("no counters")
+	}
+	return f.ingressCounts, f.egressCounts, nil
 }
 
 func (f *fakeClientDataplane) record(entry string) {

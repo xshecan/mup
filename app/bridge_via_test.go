@@ -121,7 +121,7 @@ func TestTheEgressProbeReplyNamesTheReturnIPOfTheProbe(t *testing.T) {
 		port:      9700,
 	}
 	replyOf := func(probe egressProbe) protocol.ControlFrame {
-		packet, err := egressProbeReplyFrame(registration, probe, path)
+		packet, err := egressProbeReplyFrame(registration, probe, path, 0)
 		if err != nil {
 			t.Fatalf("egressProbeReplyFrame: %v", err)
 		}
@@ -418,7 +418,7 @@ func TestTheProbeOfABridgeViaTargetNamesItsMember(t *testing.T) {
 	// reply, so confirm marks the member.
 	registration := pathRegistration{advertisedIP: egressClient, listenPort: 51820, nonce: 7}
 	path := config.Path{Server: viaBridge, ServerPort: 12000, Transport: protocol.TransportUDP, ReturnIP: viaMember, Bridge: true, BridgeVia: true}
-	packet, err := egressProbeReplyFrame(registration, egressProbe{frame: viaProbe, source: viaBridge, transport: protocol.TransportUDP, port: 12000}, path)
+	packet, err := egressProbeReplyFrame(registration, egressProbe{frame: viaProbe, source: viaBridge, transport: protocol.TransportUDP, port: 12000}, path, 0)
 	if err != nil {
 		t.Fatalf("egressProbeReplyFrame: %v", err)
 	}

@@ -11,7 +11,10 @@ package dataplane
 // reconciles the target ports of the lost routes. v0.5.1 grew the egress path
 // entries and the bridge maps, and gave the registered paths a source range
 // in their padding. The client writes every slot of client_path_src and
-// client_down_src at each start, like path_config.
+// client_down_src at each start, like path_config. v0.5.3 added the path
+// counters: client_path_counters only grows and the measurement uses its
+// differences, and Go creates the entries of server_path_counters again when
+// the paths register.
 //
 // A pinned map that is not in this list must keep its layout, or the daemon
 // does not start over its old pin. TestChangedPinsAreRebuilt checks this
@@ -21,4 +24,5 @@ var rebuiltPins = []string{
 	"bridge_config", "bridge_addresses", "bridge_allow", "bridge_counters",
 	"registered_paths", "server_route_by_key", "server_route_by_port",
 	"client_path_src", "client_down_src",
+	"client_path_counters", "server_path_counters",
 }

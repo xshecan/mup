@@ -45,6 +45,13 @@ type linuxClientControls struct {
 	rawOpen bool
 	// turns holds the next member turn of each ingress reflect path.
 	turns map[uint16]uint
+	// measure takes the MEASURE_REPLY frames. A client without egress paths
+	// opens measureICMP on first use, so its ICMP paths can send a MEASURE
+	// and receive the reply.
+	measure      func(egressProbe)
+	measureNonce uint64
+	measureICMP  *net.IPConn
+	measureDone  chan struct{}
 }
 
 func newClientPathOpener() clientControls {
@@ -148,7 +155,8 @@ func readEgressICMP(connection *net.IPConn, nonce uint64, router *ackRouter, han
 				port:      echo.identifier,
 				received:  received,
 			})
-		case frame.Type == protocol.ControlProbe && frame.Flags&protocol.ControlFlagEgressPath != 0:
+		case frame.Type == protocol.ControlMeasureReply,
+			frame.Type == protocol.ControlProbe && frame.Flags&protocol.ControlFlagEgressPath != 0:
 			handle(egressProbe{
 				frame:     frame,
 				source:    ipAddress(source.IP),
@@ -185,10 +193,14 @@ func (c *linuxClientControls) sendIngress(registration pathRegistration, frame [
 	}
 	c.mu.Lock()
 	connection := c.icmp
-	c.mu.Unlock()
 	if connection == nil {
-		return errors.New("the ICMP socket of the egress paths is closed")
+		var err error
+		if connection, err = c.measureICMPLocked(registration.advertisedIP); err != nil {
+			c.mu.Unlock()
+			return err
+		}
 	}
+	c.mu.Unlock()
 	echo := marshalICMPEcho(icmpEchoRequest, registration.path.ServerPort, 0, frame)
 	var oob []byte
 	if ifindex > 0 {
@@ -196,6 +208,97 @@ func (c *linuxClientControls) sendIngress(registration pathRegistration, frame [
 	}
 	_, _, err := connection.WriteMsgIP(echo, oob, &net.IPAddr{IP: net.IP(registration.path.Server.AsSlice())})
 	return err
+}
+
+// sendIngressMember sends a control frame of an ingress reflect path through
+// one member, like the REGISTER of that member. A bridge path wraps the
+// reflected packet for the bridge.
+func (c *linuxClientControls) sendIngressMember(registration pathRegistration, member netip.Addr, frame []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.bindRawLocked(registration); err != nil {
+		return err
+	}
+	if registration.path.BridgeReflect() {
+		packet := bridgeReflectedPacket(registration, member, frame, 0)
+		return unix.Sendto(c.raw, packet, 0, &unix.SockaddrInet4{Addr: registration.path.ProxyBridge.As4()})
+	}
+	packet, destination := reflectedControlPacket(registration, member, frame, 0)
+	return unix.Sendto(c.raw, packet, 0, &unix.SockaddrInet4{Addr: destination.As4()})
+}
+
+// listenMeasure passes the MEASURE_REPLY frames of the UDP sockets, and of
+// the ICMP socket that measureICMPLocked opens, to handle.
+func (c *linuxClientControls) listenMeasure(listen egressListen, handle func(egressProbe)) (func(), error) {
+	c.sockets.onMeasure.Store(&handle)
+	c.mu.Lock()
+	c.measure, c.measureNonce = handle, listen.nonce
+	c.mu.Unlock()
+	return func() {
+		c.sockets.onMeasure.Store(nil)
+		c.mu.Lock()
+		connection, done := c.measureICMP, c.measureDone
+		c.measure, c.measureICMP, c.measureDone = nil, nil, nil
+		c.mu.Unlock()
+		if connection != nil {
+			_ = connection.Close()
+			<-done
+		}
+	}, nil
+}
+
+// measureICMPLocked returns the ICMP socket of a client without egress paths,
+// and opens it on first use. It reads the Echo Replies of the client and
+// passes each MEASURE_REPLY to the measure handler.
+func (c *linuxClientControls) measureICMPLocked(advertisedIP netip.Addr) (*net.IPConn, error) {
+	if c.measureICMP != nil {
+		return c.measureICMP, nil
+	}
+	if c.measure == nil {
+		return nil, errors.New("the ICMP control socket of the client is closed")
+	}
+	connection, err := net.ListenIP("ip4:icmp", &net.IPAddr{IP: net.IP(advertisedIP.AsSlice())})
+	if err != nil {
+		return nil, fmt.Errorf("open the ICMP measure socket: %w", err)
+	}
+	done := make(chan struct{})
+	c.measureICMP, c.measureDone = connection, done
+	go func(handle func(egressProbe), nonce uint64) {
+		defer close(done)
+		readMeasureICMP(connection, nonce, handle)
+	}(c.measure, c.measureNonce)
+	return connection, nil
+}
+
+// readMeasureICMP reads the Echo Replies to the client and passes each
+// MEASURE_REPLY to handle.
+func readMeasureICMP(connection *net.IPConn, nonce uint64, handle func(egressProbe)) {
+	buffer := make([]byte, icmpControlBufferLength)
+	for {
+		count, _, _, source, err := connection.ReadMsgIP(buffer, nil)
+		if errors.Is(err, net.ErrClosed) {
+			return
+		}
+		if err != nil {
+			time.Sleep(udpReadErrorPause)
+			continue
+		}
+		echo, err := parseICMPEcho(stripIPv4Header(buffer[:count]))
+		if err != nil || echo.echoType != icmpEchoReply || len(echo.payload) != protocol.ControlFrameLength {
+			continue
+		}
+		frame, err := protocol.DecodeControlFrame(echo.payload)
+		if err != nil || frame.InstanceNonce != nonce || frame.Type != protocol.ControlMeasureReply {
+			continue
+		}
+		handle(egressProbe{
+			frame:     frame,
+			source:    ipAddress(source.IP),
+			transport: protocol.TransportICMP,
+			port:      echo.identifier,
+			received:  time.Now(),
+		})
+	}
 }
 
 // sendIngressViaBridge sends a control frame on an ingress path that reflects through a
@@ -440,15 +543,16 @@ func serveServerControls(
 ) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	counters := newIngressCounters(sink)
 	results := make(chan error, 3)
 	go func() {
-		results <- serveServerUDPControl(ctx, server, registry, sink, targets, egresses)
+		results <- serveServerUDPControl(ctx, server, registry, sink, targets, egresses, counters)
 	}()
 	go func() {
-		results <- serveServerICMPControl(ctx, server, registry, sink, targets, egresses)
+		results <- serveServerICMPControl(ctx, server, registry, sink, targets, egresses, counters)
 	}()
 	go func() {
-		results <- expireRegistry(ctx, registry)
+		results <- expireRegistry(ctx, registry, counters)
 	}()
 	select {
 	case <-ctx.Done():
@@ -461,9 +565,10 @@ func serveServerControls(
 	}
 }
 
-// expireRegistry forgets expired registrations. The dataplane sweeper expires
-// the matching BPF entries by their own deadlines.
-func expireRegistry(ctx context.Context, registry *control.Registry) error {
+// expireRegistry forgets expired registrations, and the ingress counters of
+// the path IDs without a live path. The dataplane sweeper expires the
+// matching BPF entries by their own deadlines.
+func expireRegistry(ctx context.Context, registry *control.Registry, counters *ingressCounters) error {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -472,6 +577,7 @@ func expireRegistry(ctx context.Context, registry *control.Registry) error {
 			return ctx.Err()
 		case now := <-ticker.C:
 			registry.Expire(now)
+			counters.prune(registry, now)
 		}
 	}
 }
@@ -483,6 +589,7 @@ func serveServerUDPControl(
 	sink registrationSink,
 	targets *reflectorTargets,
 	egresses *egressService,
+	counters *ingressCounters,
 ) error {
 	connections := make([]*net.UDPConn, 0, server.Port.Len())
 	defer func() {
@@ -503,7 +610,7 @@ func serveServerUDPControl(
 	results := make(chan error, len(connections))
 	for _, connection := range connections {
 		go func() {
-			results <- serveServerUDPConnection(ctx, connection, registry, sink, targets, egresses)
+			results <- serveServerUDPConnection(ctx, connection, registry, sink, targets, egresses, counters)
 		}()
 	}
 	return <-results
@@ -516,6 +623,7 @@ func serveServerUDPConnection(
 	sink registrationSink,
 	targets *reflectorTargets,
 	egresses *egressService,
+	counters *ingressCounters,
 ) error {
 	serverPort := uint16(connection.LocalAddr().(*net.UDPAddr).Port)
 	buffer := make([]byte, udpControlBufferLength)
@@ -558,6 +666,15 @@ func serveServerUDPConnection(
 		if localErr != nil {
 			continue
 		}
+		// A MEASURE gets its reply like a REGISTER gets its ACK.
+		if frame.Type == protocol.ControlMeasure {
+			reply, err := acceptMeasure(frame, protocol.TransportUDP, serverPort, ipAddress(source.IP), local, registry, sink, time.Now())
+			if err == nil {
+				_, _, _ = connection.WriteMsgUDP(reply, replySource(local), source)
+				egresses.ack(frame, reply)
+			}
+			continue
+		}
 		ack, err := acceptRegistration(
 			buffer[:count],
 			protocol.TransportUDP,
@@ -568,6 +685,7 @@ func serveServerUDPConnection(
 			sink,
 			targets,
 			egresses,
+			counters,
 		)
 		if err == nil {
 			_, _, _ = connection.WriteMsgUDP(ack, replySource(local), source)
@@ -583,6 +701,7 @@ func serveServerICMPControl(
 	sink registrationSink,
 	targets *reflectorTargets,
 	egresses *egressService,
+	counters *ingressCounters,
 ) error {
 	connection, err := net.ListenIP("ip4:icmp", &net.IPAddr{IP: net.IPv4zero})
 	if err != nil {
@@ -627,6 +746,15 @@ func serveServerICMPControl(
 		if localErr != nil {
 			continue
 		}
+		if frame.Type == protocol.ControlMeasure {
+			reply, err := acceptMeasure(frame, protocol.TransportICMP, echo.identifier, ipAddress(source.IP), local, registry, sink, time.Now())
+			if err == nil {
+				packet := marshalICMPEcho(icmpEchoReply, echo.identifier, echo.sequence, reply)
+				_, _, _ = connection.WriteMsgIP(packet, replySource(local), source)
+				egresses.ack(frame, reply)
+			}
+			continue
+		}
 		ack, err := acceptRegistration(
 			echo.payload,
 			protocol.TransportICMP,
@@ -637,6 +765,7 @@ func serveServerICMPControl(
 			sink,
 			targets,
 			egresses,
+			counters,
 		)
 		if err == nil {
 			reply := marshalICMPEcho(icmpEchoReply, echo.identifier, echo.sequence, ack)
@@ -655,6 +784,7 @@ func acceptRegistration(
 	sink registrationSink,
 	targets *reflectorTargets,
 	egresses *egressService,
+	counters *ingressCounters,
 ) ([]byte, error) {
 	frame, err := protocol.DecodeControlFrame(packet)
 	if err != nil {
@@ -718,6 +848,7 @@ func acceptRegistration(
 	if err := sink.RegisterPath(settings); err != nil {
 		return nil, err
 	}
+	counters.ensure(dataplane.ClientKey{AdvertisedIP: frame.AdvertisedIP, InstanceNonce: frame.InstanceNonce}, frame.PathID)
 	status := protocol.ControlStatusOK
 	if !ingressReflect && frame.Flags&protocol.ControlFlagReturnPool != 0 {
 		if err := sink.ObservePool(frame.ReturnIP, frame.ReturnPrefix, transport); err != nil {

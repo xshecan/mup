@@ -169,6 +169,12 @@ const (
 // member. The outer packet carries the advertised source, so it needs no
 // spoofing.
 func (s *ingressReflectPathConn) sendViaBridge(reg pathRegistration, member netip.Addr, frame []byte, id uint32) error {
+	return unix.Sendto(s.fd, bridgeReflectedPacket(reg, member, frame, id), 0, &unix.SockaddrInet4{Addr: reg.path.ProxyBridge.As4()})
+}
+
+// bridgeReflectedPacket wraps a control frame that goes through member for
+// the bridge of an ingress reflect path.
+func bridgeReflectedPacket(reg pathRegistration, member netip.Addr, frame []byte, id uint32) []byte {
 	var innerSource, innerDestination netip.Addr
 	var innerProtocol byte
 	var inner []byte
@@ -181,8 +187,7 @@ func (s *ingressReflectPathConn) sendViaBridge(reg pathRegistration, member neti
 		innerSource, innerDestination, innerProtocol = member, reg.path.Server, unix.IPPROTO_UDP
 		inner = buildIPv4Packet(innerSource, innerDestination, unix.IPPROTO_UDP, segment, uint16(id))
 	}
-	packet := wrapForBridge(reg.advertisedIP, reg.path.ProxyBridge, reg.path.ServerPort, innerProtocol, innerSource, innerDestination, inner, uint16(id))
-	return unix.Sendto(s.fd, packet, 0, &unix.SockaddrInet4{Addr: reg.path.ProxyBridge.As4()})
+	return wrapForBridge(reg.advertisedIP, reg.path.ProxyBridge, reg.path.ServerPort, innerProtocol, innerSource, innerDestination, inner, uint16(id))
 }
 
 // sendEgressRegister sends one EGRESS_REGISTER to the server. The client of a

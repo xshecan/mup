@@ -13,15 +13,16 @@ This document describes version 1 of the MUP protocol as the code implements it.
 7. [Path selection](#path-selection)
 8. [Control plane](#control-plane)
 9. [Path health](#path-health)
-10. [Dataplane state](#dataplane-state)
-11. [Lifetimes and cleanup](#lifetimes-and-cleanup)
-12. [Input rules](#input-rules)
-13. [Drop reasons](#drop-reasons)
-14. [Attachment and restarts](#attachment-and-restarts)
-15. [Observability](#observability)
-16. [Control socket](#control-socket)
-17. [Trust model](#trust-model)
-18. [Limits](#limits)
+10. [Path measurement](#path-measurement)
+11. [Dataplane state](#dataplane-state)
+12. [Lifetimes and cleanup](#lifetimes-and-cleanup)
+13. [Input rules](#input-rules)
+14. [Drop reasons](#drop-reasons)
+15. [Attachment and restarts](#attachment-and-restarts)
+16. [Observability](#observability)
+17. [Control socket](#control-socket)
+18. [Trust model](#trust-model)
+19. [Limits](#limits)
 
 ## Terms
 
@@ -48,6 +49,7 @@ This document describes version 1 of the MUP protocol as the code implements it.
 | Target port | A UDP source port from 20000 to 60999 that the server gives to one route. |
 | Lease | The time that a registration stays valid without a new REGISTER frame. |
 | Quarantine | A wait time before a free token or port goes back into use. |
+| Count code | A 32-bit packet count in a control frame. Zero means no count. |
 | `TCX_NEXT` | The TCX verdict that passes a packet on to the kernel without a change. |
 
 ## Topology
@@ -374,9 +376,9 @@ The control frame is 48 bytes long, and all integers are big-endian.
 | ---: | ---: | --- | --- |
 | 0 | 4 | magic | 0x4d555043, which is "MUPC" in ASCII. |
 | 4 | 1 | version | 1. |
-| 5 | 1 | type | 1 is REGISTER, 2 is REGISTER_ACK, 3 is PROBE, 4 is PROBE_REPLY, and 7 is EGRESS_REGISTER. Types 5 and 6 are reserved. |
+| 5 | 1 | type | 1 is REGISTER, 2 is REGISTER_ACK, 3 is PROBE, 4 is PROBE_REPLY, 7 is EGRESS_REGISTER, 8 is MEASURE, and 9 is MEASURE_REPLY. Type 5 and type 6 are reserved. |
 | 6 | 1 | transport | 0 is UDP and 1 is ICMP. |
-| 7 | 1 | flags | Bit 0 means that the return IP field holds one return IP. Bit 1 means that it holds the base of a return pool. Bit 2 selects the per-packet balance mode of a pool. Bit 3 marks a PROBE or a PROBE_REPLY of an egress path, and its path ID is then an egress path ID. Bit 4 marks a EGRESS_REGISTER of an egress bridge. Bit 6 marks a EGRESS_REGISTER of an egress bridge whose return IP or pool applies to the leg from the server to the bridge. Bit 6 needs bit 4 and bit 0 or bit 1. Bit 5 marks a REGISTER whose return IP is the via of an ingress reflect path. Bit 7 marks a REGISTER or a EGRESS_REGISTER of a path with a source range. The other bits must be zero. |
+| 7 | 1 | flags | Bit 0 means that the return IP field holds one return IP. Bit 1 means that it holds the base of a return pool. Bit 2 selects the per-packet balance mode of a pool. Bit 3 marks a PROBE or a PROBE_REPLY of an egress path, and its path ID is then an egress path ID. Bit 4 marks a EGRESS_REGISTER of an egress bridge. Bit 6 marks a EGRESS_REGISTER of an egress bridge whose return IP or pool applies to the leg from the server to the bridge. Bit 6 needs bit 4 and bit 0 or bit 1. Bit 5 marks a REGISTER or a MEASURE whose return IP is the via of an ingress reflect path. Bit 7 marks a REGISTER or a EGRESS_REGISTER of a path with a source range. The other bits must be zero. |
 | 8 | 2 | length | 48. |
 | 10 | 2 | status | 0 is OK. 7 is NO_REFLECTOR: the return pool of the path has no healthy reflector. Values 1 to 6 name errors, but the server does not send them. |
 | 12 | 2 | path ID | 0 to 7, the slot of the path in the client. |
@@ -387,9 +389,9 @@ The control frame is 48 bytes long, and all integers are big-endian.
 | 20 | 4 | advertised IP | The client `-s` address. |
 | 24 | 4 | return IP | The return IP or the pool base of the path, or zero. In a PROBE_REPLY, the reflector that reached the client. |
 | 28 | 8 | instance nonce | The nonzero random number of the client process. |
-| 36 | 4 | sequence | A counter that goes up by one with each REGISTER on the path. A EGRESS_REGISTER does not use it. With flag bit 7, it holds the range: the first value at offsets 36 and 37, and the last value at offsets 38 and 39. |
-| 40 | 4 | lease seconds | 30. |
-| 44 | 4 | egress server | In a EGRESS_REGISTER, the server address of the egress path, or the bridge address with flag bit 4. A REGISTER does not use it. With flag bit 7, it holds the range: the first value at offsets 44 and 45, and the last value at offsets 46 and 47. Zero otherwise. |
+| 36 | 4 | sequence | A counter that goes up by one with each REGISTER on the path. A EGRESS_REGISTER does not use it. A MEASURE uses its own counter for each ingress path, and its MEASURE_REPLY copies it. With flag bit 7, it holds the range: the first value at offsets 36 and 37, and the last value at offsets 38 and 39. |
+| 40 | 4 | lease seconds or count code | In a REGISTER, a REGISTER_ACK, or an EGRESS_REGISTER, 30. In an EGRESS_REGISTER with a lease of zero, the frame withdraws an egress path. In a PROBE or a PROBE_REPLY of an egress path, the count code of the path, or zero. In a MEASURE or a MEASURE_REPLY, the count code of the packets that the client sent on the ingress path. |
+| 44 | 4 | egress server | In a EGRESS_REGISTER, the server address of the egress path, or the bridge address with flag bit 4. A REGISTER does not use it. In a MEASURE_REPLY, it holds the count code of the packets that the server received on the ingress path. In a MEASURE, it is zero. With flag bit 7, it holds the range: the first value at offsets 44 and 45, and the last value at offsets 46 and 47. Zero otherwise. |
 
 Some payloads are exactly 48 bytes long and start with the magic, version 1, and length 48. The TCX programs pass such a payload to the kernel as a control frame.
 
@@ -419,6 +421,83 @@ The client moves a path in this order:
 
 The path stays unhealthy until the first ACK on the new port. A result from the loop of the old port has no effect on the moved path. The server needs no change, because it learns the new port from the REGISTER frames. Each server route takes the new port with the next ingress packet of its peer. The registration of the old port ends with its lease after 30 seconds. The client does not save a move, so the path starts on the first port again at the next start.
 
+## Path measurement
+
+The client and the server measure the loss and the round trip time of each path. The measurement changes no path choice and no path health. It uses the counts of the data packets, and small control frames for the probe values.
+
+### Count code
+
+A count is the number of data packets that a path carries. A control frame carries the count as a 32-bit code. The sender computes the code as `code = count mod 0xFFFFFFFF + 1`. Code 0 means no count, and an older peer sends it. The difference of two codes is taken modulo 0xFFFFFFFF.
+
+### Counter maps
+
+Each side counts the data packets of its paths in two per-CPU maps. Each entry holds a packet count and a byte count. The byte count is the IPv4 total length of the packet at the count point. When Go reads an entry, it sums the CPUs.
+
+`client_path_counters` is an array of 16 entries. Index 0 to 7 counts the data packets that the client sends on each ingress path slot. Index 8 plus j counts the data packets that the client accepts from egress path j.
+
+`server_path_counters` is a hash of 8192 entries. Its key holds the client key, a path ID, and a direction. Direction 0 counts the data packets that the server receives from the client on an ingress path. Direction 1 counts the data packets that the server sends to the client on an egress path. The BPF programs add only to an entry that exists. Go creates an entry for each registered path, and it deletes the entry of each path or client that goes away.
+
+The programs count only data packets. They count before a later drop, such as the duplicate check of the repeater mode. The four count points are:
+
+1. The client counts each ingress send, once for each path that gets a copy. It counts after the path selection and the rewrite.
+2. The client counts each egress receive, where it accepts a data packet from an egress path.
+3. The server counts each ingress receive, right after the lookup in `registered_paths`. All members of an ingress reflect path count into one path ID.
+4. The server counts each egress send, once for each copy, in `down_send_core`. It counts after the rewrite and the wrap succeed.
+
+### Ingress measurement
+
+The client sends one MEASURE on each ingress path every 2 seconds. It sends the frame on every path, healthy or not. On an ingress reflect path, it sends one MEASURE through each member. The server answers each MEASURE with a MEASURE_REPLY, and the client takes an RTT sample from it.
+
+A MEASURE has type 8. Offsets 0 to 35 have the layout of a REGISTER. Its flags are zero, or bits 0 and 5 on an ingress reflect path, with the member in the return IP field. Offset 36 holds the sequence of the frame, and each ingress path has its own counter. Offset 40 holds the count code of the packets that the client sent on the ingress path. Offset 44 is zero.
+
+A MEASURE_REPLY has type 9. It copies the MEASURE and changes the type to 9. Offset 44 holds the count code of the packets that the server received on the ingress path. The server reads that count on arrival of the MEASURE.
+
+The server handles a MEASURE in the same way as a REGISTER. It makes the same checks of the source, the port, the transport, and the path ID. It accepts a MEASURE on a registered ingress reflect path, as it does for a REGISTER. It answers only for a registered client key and path. It creates and refreshes nothing. It sends the MEASURE_REPLY as it sends a REGISTER_ACK: to the source, and once on every egress path of the client.
+
+The client accepts a MEASURE_REPLY on the socket of the path, and on an egress path, as it accepts a REGISTER_ACK. It takes an RTT sample for each egress path from the MEASURE_REPLY that arrives there, as it does from a REGISTER round.
+
+A decoder must accept offset 44 for type 9. It must require zero at offset 44 for type 8, and it must allow no other flag on these types.
+
+### Egress measurement
+
+The server sends a PROBE on each egress path every 2 seconds, as described in [Egress path health](#egress-path-health). The lease field of the PROBE holds the count code of the packets that the server sent on that path. The server reads the count just before the send. All probes of one round for one path carry the same value. The client answers with a PROBE_REPLY. Its lease field holds the count code of the packets that the client accepted from that path. The client reads that count on arrival of the PROBE.
+
+### Loss trackers
+
+Each side keeps a loss tracker for each path that it measures. A loss tracker stores markers. A marker holds a sender count and a receiver count from the same moment. These frames give the counts:
+
+| Path | Side | Sender count | Receiver count |
+| --- | --- | --- | --- |
+| Ingress | Client | Count in the MEASURE | Count in the MEASURE_REPLY |
+| Egress | Server | Count in the PROBE | Count in the PROBE_REPLY |
+| Egress | Client | Count in the PROBE | Own count, read on arrival of the PROBE |
+
+The tracker takes the newest marker, and the oldest marker that is not older than the window. The window is 10 seconds or 60 seconds. The tracker gives a value only for two markers that are at least half a window apart.
+
+The tracker computes `dtx` and `drx`, the differences of the sender count and the receiver count between these two markers, modulo 0xFFFFFFFF. The loss is `max(0, 1 - drx / dtx) * 100`, in percent. If `dtx` is below 50 packets, the tracker gives no value.
+
+If a marker goes back, with a difference of 2^31 or more, the tracker ignores the marker. Three such markers in a row mean that a counter started again from zero, and the tracker then starts from the newest marker. If `drx` is larger than `dtx + max(64, dtx / 4)`, the peer started its counts again. The tracker then drops the older markers and starts from the new marker.
+
+### Probe trackers
+
+The server keeps a probe tracker for each member of each egress path. The client keeps one for each ingress path, and for each member of an ingress reflect path. A probe is complete after its answer arrives, or 2 seconds after it was sent. A second answer to the same probe counts once, with the time of the first answer.
+
+The probe loss is the share of the complete probes of the last 60 seconds that get no answer. It has no value until one answer arrives and 5 probes are complete. The average RTT is the mean RTT of the answers in the last 60 seconds. The jitter is the mean of the absolute difference between each RTT and the RTT before it, over the same 60 seconds.
+
+### Rate trackers
+
+The rate is the number of packets and bits per second of a counter over the last 10 seconds. The bits come from the byte counts. The client samples each ingress counter on each tick. The server samples each egress counter on each probe round.
+
+### Compatibility
+
+The change keeps every existing map layout and frame layout. It changes no path selection. These rules apply to mixed versions:
+
+- A peer that sends code 0, or no MEASURE_REPLY, gives no loss value. The loss field stays empty. It is never zero, and it is never 100 percent.
+- A new client with an old server gets no MEASURE_REPLY. The measurement fields of the ingress paths stay empty.
+- An old client with a new server ignores the count in the PROBE lease field. Its PROBE_REPLY holds code 0, so the egress data loss stays empty.
+- An older decoder refuses each type above 7. It drops the frame without a reply.
+- A bridge passes every 48-byte control frame, so it needs no change.
+
 ## Dataplane state
 
 Pinned BPF maps hold all dataplane state. Go writes the configuration and the registrations. The programs create routes, and Go expires them.
@@ -433,6 +512,8 @@ Pinned BPF maps hold all dataplane state. Go writes the configuration and the re
 | `path_state` | array | 1 | Healthy mask and generation. | Go |
 | `client_down_paths` | array | 8 | Server, return IP or pool, port, and transport of each egress path, and the time of its latest reply. | Both |
 | `client_down_src` | array | 8 | The first and last value of the source range of each egress path slot. A first of 0 means none. | Go |
+| `client_path_counters` | per-CPU array | 16 | Data packet and byte counts of each ingress path slot, and of each egress path. | Program |
+| `server_path_counters` | per-CPU hash | 8192 | Client key, path ID, and direction to the data packet and byte counts of the path. | Both |
 | `client_duplicate_cache` | LRU hash | 16384 | Token and first 24 WireGuard bytes to the time seen, for the egress repeater mode. | Program |
 | `client_peer_by_endpoint` | hash | 4096 | Peer endpoint to token and last-seen time. | Program |
 | `client_endpoint_by_token` | hash | 4096 | Token to peer endpoint, interface, and last-seen time. | Program |
@@ -490,6 +571,7 @@ The sweep copies each map before it deletes entries, because a deletion restarts
 | Quarantine | 120 s | Wait before a token or port goes back into use. |
 | Duplicate window | 2 s | Time in which the server drops a repeater copy, and the client drops an egress repeater copy. |
 | Egress path probe | 2 s | Time between two probes of each egress path. |
+| Path measurement | 2 s | Time between two MEASURE frames on each ingress path. |
 | Egress path health | 6 s | Life of the health of an egress path or a pool member without a probe reply. |
 | Sweep | 1 s | Time between two sweeps. |
 
@@ -554,7 +636,7 @@ At start, the loader does these steps in order:
 6. It deletes the groups that are not in the configuration, and it writes the configuration of the role.
 7. It replaces the program in each pinned link, or it attaches and pins a new link.
 
-Before step 1, the loader removes the pin of a map whose layout changed in this version. It does this only for the maps of counters and of state that the daemon or its clients write again soon after a start. v0.4.0 grew `stats`, `event_limits`, and `server_down_paths`, and v0.4.1 grew `path_config`. The client writes every slot of `path_config` at each start, so it loses no state. The program that is still attached keeps its old map until step 7 replaces it.
+Before step 1, the loader removes the pin of a map whose layout changed in this version. It does this only for the maps of counters and of state that the daemon or its clients write again soon after a start. v0.4.0 grew `stats`, `event_limits`, and `server_down_paths`, and v0.4.1 grew `path_config`. The client writes every slot of `path_config` at each start, so it loses no state. The program that is still attached keeps its old map until step 7 replaces it. The two path counter maps, `client_path_counters` and `server_path_counters`, are in the loader's rebuild list. Their content can be lost at a start, and their counts then start again from zero.
 
 Every other pinned map must keep its layout, because the BPF library refuses a pin with another layout, and the start fails. v0.4.1 grew `path_config` without this step, so v0.4.1 does not start over the pins of an earlier version. The test `TestChangedPinsAreRebuilt` compares the maps with the layouts of each release in `dataplane/testdata/released_maps.json`. After a new tag, add its layouts with `go test ./dataplane -run TestChangedPinsAreRebuilt -record-release vX.Y.Z`.
 

@@ -18,6 +18,7 @@ type fakeEgressPlane struct {
 	groups  map[egressGroupKey]dataplane.EgressGroupEntry
 	members map[dataplane.PoolKey][]netip.Addr
 	pools   []dataplane.PoolKey
+	fakeServerCounters
 }
 
 func newFakeEgressPlane() *fakeEgressPlane {

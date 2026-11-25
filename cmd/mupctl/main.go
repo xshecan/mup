@@ -32,6 +32,7 @@ Commands:
   peers                                  List the peers of a client, or the peer routes of a server
   clients                                List the clients that are registered on a server
   reflectors                             List the return-pool reflectors of a server and their health
+  members                                List the pool members of the paths with their loss and RTT
   drops                                  List the drop counters
   reset drops                            Set every drop counter to zero
   add path SERVER[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP]
@@ -223,7 +224,7 @@ func parseCommand(opts options) (command, error) {
 		if show, ok := listCommand(args[1]); ok {
 			return show, nil
 		}
-		return nil, fmt.Errorf("unknown resource %q: use groups, paths, peers, clients, reflectors, or drops", args[1])
+		return nil, fmt.Errorf("unknown resource %q: use groups, paths, peers, clients, reflectors, members, or drops", args[1])
 	case "reset":
 		if err := expectArgs(args, 2); err != nil {
 			return nil, err
@@ -293,6 +294,8 @@ func listCommand(name string) (command, bool) {
 		return showClients, true
 	case "reflector", "reflectors":
 		return showReflectors, true
+	case "member", "members":
+		return showMembers, true
 	case "drop", "drops":
 		return showDrops, true
 	}
@@ -406,6 +409,25 @@ func showReflectors(ctx context.Context, s invocation, w io.Writer) error {
 		return writeJSON(w, reflectors)
 	}
 	printReflectors(w, reflectors.Reflectors)
+	return nil
+}
+
+func showMembers(ctx context.Context, s invocation, w io.Writer) error {
+	status, err := s.daemon.Status(ctx)
+	if err != nil {
+		return err
+	}
+	if status.Role == api.RoleBridge {
+		return fmt.Errorf("the daemon runs as a bridge, and only a client or a server has members")
+	}
+	members, err := s.daemon.Members(ctx)
+	if err != nil {
+		return err
+	}
+	if s.output == "json" {
+		return writeJSON(w, members)
+	}
+	printMembers(w, members.Members)
 	return nil
 }
 

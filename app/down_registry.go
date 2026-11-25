@@ -33,6 +33,7 @@ type egressPlane interface {
 	DeleteServerEgressGroup(client dataplane.ClientKey, listenPort uint16) error
 	ObservePool(base netip.Addr, prefix uint8, transport protocol.TransportID) error
 	PoolMembers(dataplane.PoolKey) []netip.Addr
+	pathCounterStore
 }
 
 // egressLocator finds the interface that sends from a server address to a
@@ -84,6 +85,8 @@ type serverEgressPath struct {
 	replies map[netip.Addr]time.Time
 	written *dataplane.EgressPathEntry
 	cursor  int
+	// measure holds the loss, the probes and the rate of the path.
+	measure *egressMeasure
 }
 
 func (p *serverEgressPath) pool() bool {
@@ -247,6 +250,7 @@ func (r *egressRegistry) register(frame protocol.ControlFrame, now time.Time) er
 			srcLast:    frame.SrcLast,
 			since:      now,
 			replies:    make(map[netip.Addr]time.Time),
+			measure:    newEgressMeasure(),
 		}
 		if bridge {
 			localIP, ifindex, err := r.route(path.server)
@@ -283,6 +287,8 @@ func (r *egressRegistry) register(frame protocol.ControlFrame, now time.Time) er
 			}
 		}
 		r.paths[key] = path
+		// A missing counter only leaves the loss of the path unknown.
+		_ = r.plane.EnsureServerPathCounter(client, key.id, dataplane.PathCounterEgress)
 	}
 	// A path that changes its listen port moves to the new group, and the sync
 	// below also visits the old group.
@@ -327,6 +333,7 @@ func (r *egressRegistry) confirm(frame protocol.ControlFrame, now time.Time) boo
 		member = path.server
 	}
 	path.replies[member] = now
+	path.measure.answered(frame.Sequence, member, frame.LeaseSeconds, now)
 	return true
 }
 
@@ -407,6 +414,74 @@ func (r *egressRegistry) probeTargets(now time.Time) []egressTarget {
 	return targets
 }
 
+// egressProbeSend is one probe of a round: its target, its sequence, and the
+// count code of the data packets that the server sent on the path.
+type egressProbeSend struct {
+	target   egressTarget
+	sequence uint32
+	count    uint32
+}
+
+// probeRound returns the probes of one round: one for each live path and
+// each of its candidates, as probeTargets. It reads the egress counter of each
+// path once, and every probe of the path carries that count. next gives the
+// sequence of each probe.
+func (r *egressRegistry) probeRound(now time.Time, next func() uint32) []egressProbeSend {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var sends []egressProbeSend
+	for key, path := range r.paths {
+		if now.After(path.expires) {
+			continue
+		}
+		candidates := r.candidatesLocked(path)
+		counter, counted, err := r.plane.ServerPathCounter(key.client, key.id, dataplane.PathCounterEgress)
+		round := path.measure.startRound(counter, counted && err == nil, candidates, now)
+		for _, candidate := range candidates {
+			sequence := next()
+			path.measure.sent(round, sequence, candidate, now)
+			sends = append(sends, egressProbeSend{target: path.target(candidate), sequence: sequence, count: round.tx})
+		}
+	}
+	return sends
+}
+
+// members lists each candidate of each live egress path of each client, with
+// the measurement of its probes.
+func (r *egressRegistry) members(now time.Time) []api.Member {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var members []api.Member
+	for key, path := range r.paths {
+		if now.After(path.expires) {
+			continue
+		}
+		healthy := r.healthyLocked(path, now)
+		for _, candidate := range r.candidatesLocked(path) {
+			members = append(members, api.Member{
+				Client:      key.client.AdvertisedIP.String(),
+				Direction:   directionEgress,
+				PathID:      int(key.id),
+				ListenPort:  path.listenPort,
+				Address:     candidate.String(),
+				Healthy:     containsAddr(healthy, candidate),
+				Measurement: path.measure.memberView(candidate, now),
+			})
+		}
+	}
+	sort.Slice(members, func(i, j int) bool {
+		a, b := members[i], members[j]
+		if a.Client != b.Client {
+			return a.Client < b.Client
+		}
+		if a.PathID != b.PathID {
+			return a.PathID < b.PathID
+		}
+		return netip.MustParseAddr(a.Address).Less(netip.MustParseAddr(b.Address))
+	})
+	return members
+}
+
 // ackTargets returns one target for each live egress path of a client. A pool
 // path takes its healthy members in turn, or all its candidates in turn when
 // none is healthy.
@@ -462,6 +537,7 @@ func (r *egressRegistry) syncClientLocked(client dataplane.ClientKey, now time.T
 				continue
 			}
 			delete(r.paths, key)
+			_ = r.plane.DeleteServerPathCounter(client, key.id, dataplane.PathCounterEgress)
 			continue
 		}
 		for member, replied := range path.replies {
@@ -577,6 +653,7 @@ func (r *egressRegistry) clients(now time.Time) map[dataplane.ClientKey][]api.Eg
 				LeaseSeconds:   path.expires.Sub(now).Seconds(),
 				SrcFirst:       path.srcFirst,
 				SrcLast:        path.srcLast,
+				Measurement:    path.measure.view(now),
 			}
 			switch {
 			case path.pool():

@@ -22,6 +22,13 @@ type clientControls interface {
 	listenEgress(listen egressListen, handle func(egressProbe)) (func(), error)
 	// sendIngress sends one control frame on an ingress path.
 	sendIngress(registration pathRegistration, frame []byte) error
+	// sendIngressMember sends one control frame of an ingress reflect path
+	// through one member, as the REGISTER of that member goes.
+	sendIngressMember(registration pathRegistration, member netip.Addr, frame []byte) error
+	// listenMeasure starts to pass each MEASURE_REPLY that arrives on the
+	// socket of a path to handle. The replies that arrive on egress paths
+	// go to the handle of listenEgress. The returned function stops it.
+	listenMeasure(listen egressListen, handle func(egressProbe)) (func(), error)
 }
 
 // egressListen names what a client receives on its egress paths.
@@ -52,6 +59,14 @@ func (pathOpener) listenEgress(egressListen, func(egressProbe)) (func(), error) 
 
 func (pathOpener) sendIngress(pathRegistration, []byte) error {
 	return nil
+}
+
+func (pathOpener) sendIngressMember(pathRegistration, netip.Addr, []byte) error {
+	return nil
+}
+
+func (pathOpener) listenMeasure(egressListen, func(egressProbe)) (func(), error) {
+	return func() {}, nil
 }
 
 // ackRouter passes each REGISTER_ACK of a group with egress paths to the ingress path
@@ -210,12 +225,14 @@ func egressRegisterFrame(registration pathRegistration, slot uint16, path config
 	return packet, nil
 }
 
-// egressProbeReplyFrame answers a probe of an egress path. It names the return IP
+// egressProbeReplyFrame answers a probe of an egress path. Its lease field
+// holds count, the count code of the data packets that the client accepted on
+// the path when the probe arrived. It names the return IP
 // of the probe when the probe has one. The server puts the member there for a
 // bridge via path, because the client sees only the bridge address. Otherwise
 // it names the source that the probe came from, which is the reflector of a
 // reflected path.
-func egressProbeReplyFrame(registration pathRegistration, probe egressProbe, path config.Path) ([]byte, error) {
+func egressProbeReplyFrame(registration pathRegistration, probe egressProbe, path config.Path, count uint32) ([]byte, error) {
 	named := probe.source
 	if probe.frame.Flags&protocol.ControlFlagReturnIP != 0 && probe.frame.ReturnIP.IsValid() {
 		named = probe.frame.ReturnIP
@@ -231,6 +248,7 @@ func egressProbeReplyFrame(registration pathRegistration, probe egressProbe, pat
 		InstanceNonce: registration.nonce,
 		AdvertisedIP:  registration.advertisedIP,
 		ReturnIP:      named,
+		LeaseSeconds:  count,
 	}
 	packet := make([]byte, protocol.ControlFrameLength)
 	if err := protocol.EncodeControlFrame(packet, frame); err != nil {

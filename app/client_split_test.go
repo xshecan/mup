@@ -17,6 +17,9 @@ import (
 type sentFrame struct {
 	registration pathRegistration
 	frame        protocol.ControlFrame
+	// member is the member that a frame of an ingress reflect path goes
+	// through, or invalid for a frame on the path itself.
+	member netip.Addr
 }
 
 // fakeControls records what the controller asks of the control sockets.
@@ -25,8 +28,27 @@ type fakeControls struct {
 	registrations map[int]pathRegistration
 	listened      []egressListen
 	handle        func(egressProbe)
+	measure       func(egressProbe)
 	sent          []sentFrame
 	stopped       bool
+}
+
+func (f *fakeControls) sendIngressMember(registration pathRegistration, member netip.Addr, packet []byte) error {
+	frame, err := protocol.DecodeControlFrame(packet)
+	if err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sent = append(f.sent, sentFrame{registration: registration, frame: frame, member: member})
+	return nil
+}
+
+func (f *fakeControls) listenMeasure(_ egressListen, handle func(egressProbe)) (func(), error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.measure = handle
+	return func() {}, nil
 }
 
 func (f *fakeControls) open(registration pathRegistration) (pathConn, error) {

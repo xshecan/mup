@@ -128,6 +128,19 @@ type mupPathConfigV1 struct {
 	Bridge        uint32
 }
 
+type mupPathCounterKeyV1 struct {
+	_         structs.HostLayout
+	Client    mupClientKeyV1
+	PathId    uint32
+	Direction uint32
+}
+
+type mupPathCounterV1 struct {
+	_       structs.HostLayout
+	Packets uint64
+	Bytes   uint64
+}
+
 type mupPathGroupV1 struct {
 	_        structs.HostLayout
 	ReturnIp uint32
@@ -305,6 +318,7 @@ const (
 	mupMapClientDownSrc            = "client_down_src"
 	mupMapClientDuplicateCache     = "client_duplicate_cache"
 	mupMapClientEndpointByToken    = "client_endpoint_by_token"
+	mupMapClientPathCounters       = "client_path_counters"
 	mupMapClientPathSrc            = "client_path_src"
 	mupMapClientPeerByEndpoint     = "client_peer_by_endpoint"
 	mupMapClientRoutesBySource     = "client_routes_by_source"
@@ -327,6 +341,7 @@ const (
 	mupMapServerConfig             = "server_config"
 	mupMapServerDownGroups         = "server_down_groups"
 	mupMapServerDownPaths          = "server_down_paths"
+	mupMapServerPathCounters       = "server_path_counters"
 	mupMapServerPorts              = "server_ports"
 	mupMapServerRouteByKey         = "server_route_by_key"
 	mupMapServerRouteByPort        = "server_route_by_port"
@@ -409,6 +424,7 @@ type mupMapSpecs struct {
 	ClientDownSrc         *ebpf.MapSpec `ebpf:"client_down_src"`
 	ClientDuplicateCache  *ebpf.MapSpec `ebpf:"client_duplicate_cache"`
 	ClientEndpointByToken *ebpf.MapSpec `ebpf:"client_endpoint_by_token"`
+	ClientPathCounters    *ebpf.MapSpec `ebpf:"client_path_counters"`
 	ClientPathSrc         *ebpf.MapSpec `ebpf:"client_path_src"`
 	ClientPeerByEndpoint  *ebpf.MapSpec `ebpf:"client_peer_by_endpoint"`
 	ClientRoutesBySource  *ebpf.MapSpec `ebpf:"client_routes_by_source"`
@@ -431,6 +447,7 @@ type mupMapSpecs struct {
 	ServerConfig          *ebpf.MapSpec `ebpf:"server_config"`
 	ServerDownGroups      *ebpf.MapSpec `ebpf:"server_down_groups"`
 	ServerDownPaths       *ebpf.MapSpec `ebpf:"server_down_paths"`
+	ServerPathCounters    *ebpf.MapSpec `ebpf:"server_path_counters"`
 	ServerPorts           *ebpf.MapSpec `ebpf:"server_ports"`
 	ServerRouteByKey      *ebpf.MapSpec `ebpf:"server_route_by_key"`
 	ServerRouteByPort     *ebpf.MapSpec `ebpf:"server_route_by_port"`
@@ -475,6 +492,7 @@ type mupMaps struct {
 	ClientDownSrc         *ebpf.Map `ebpf:"client_down_src"`
 	ClientDuplicateCache  *ebpf.Map `ebpf:"client_duplicate_cache"`
 	ClientEndpointByToken *ebpf.Map `ebpf:"client_endpoint_by_token"`
+	ClientPathCounters    *ebpf.Map `ebpf:"client_path_counters"`
 	ClientPathSrc         *ebpf.Map `ebpf:"client_path_src"`
 	ClientPeerByEndpoint  *ebpf.Map `ebpf:"client_peer_by_endpoint"`
 	ClientRoutesBySource  *ebpf.Map `ebpf:"client_routes_by_source"`
@@ -497,6 +515,7 @@ type mupMaps struct {
 	ServerConfig          *ebpf.Map `ebpf:"server_config"`
 	ServerDownGroups      *ebpf.Map `ebpf:"server_down_groups"`
 	ServerDownPaths       *ebpf.Map `ebpf:"server_down_paths"`
+	ServerPathCounters    *ebpf.Map `ebpf:"server_path_counters"`
 	ServerPorts           *ebpf.Map `ebpf:"server_ports"`
 	ServerRouteByKey      *ebpf.Map `ebpf:"server_route_by_key"`
 	ServerRouteByPort     *ebpf.Map `ebpf:"server_route_by_port"`
@@ -517,6 +536,7 @@ func (m *mupMaps) Close() error {
 		m.ClientDownSrc,
 		m.ClientDuplicateCache,
 		m.ClientEndpointByToken,
+		m.ClientPathCounters,
 		m.ClientPathSrc,
 		m.ClientPeerByEndpoint,
 		m.ClientRoutesBySource,
@@ -539,6 +559,7 @@ func (m *mupMaps) Close() error {
 		m.ServerConfig,
 		m.ServerDownGroups,
 		m.ServerDownPaths,
+		m.ServerPathCounters,
 		m.ServerPorts,
 		m.ServerRouteByKey,
 		m.ServerRouteByPort,

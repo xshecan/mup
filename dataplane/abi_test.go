@@ -26,6 +26,8 @@ func TestGeneratedABISizes(t *testing.T) {
 		{name: "down group value", got: unsafe.Sizeof(mupDownGroupV1{}), want: 4},
 		{name: "down path value", got: unsafe.Sizeof(mupDownPathV1{}), want: 92},
 		{name: "path source range", got: unsafe.Sizeof(mupPathSrcV1{}), want: 4},
+		{name: "path counter key", got: unsafe.Sizeof(mupPathCounterKeyV1{}), want: 24},
+		{name: "path counter value", got: unsafe.Sizeof(mupPathCounterV1{}), want: 16},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/xshecan/mup/config"
 	"github.com/xshecan/mup/protocol"
 )
 
@@ -166,4 +167,20 @@ func (*Runtime) BridgeCounters() (BridgeCounters, error) {
 
 func (*Runtime) ResetDrops() error {
 	return ErrUnsupportedPlatform
+}
+
+func (*Runtime) ClientPathCounters() ([config.MaxPaths]PathCounter, [MaxEgressPaths]PathCounter, error) {
+	return [config.MaxPaths]PathCounter{}, [MaxEgressPaths]PathCounter{}, ErrUnsupportedPlatform
+}
+
+func (*Runtime) EnsureServerPathCounter(ClientKey, uint16, uint8) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Runtime) DeleteServerPathCounter(ClientKey, uint16, uint8) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Runtime) ServerPathCounter(ClientKey, uint16, uint8) (PathCounter, bool, error) {
+	return PathCounter{}, false, ErrUnsupportedPlatform
 }

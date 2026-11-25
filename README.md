@@ -522,7 +522,8 @@ mup bridge -s SERVER_IP -p PORT[-LAST] [-a CIDR] [-a ...] [--control-socket PATH
 | --- | --- | --- |
 | `mupctl status` | all | Shows an overview. A client lists its groups and paths, and a server lists its clients. A bridge shows its server and the packets that it sent in each direction. A bridge with more than one entry shows a table with the columns SERVER, PORT and ALLOW, with one row for each entry. The packet counters and the drop counters are for the whole bridge. |
 | `mupctl groups` | client | Lists the groups with their mode, healthy paths, and peers. |
-| `mupctl paths` | client | Lists the paths with their server port, return IP, state, the age of the last answer, and round-trip time. With `-o wide`, it also shows the port range, the source range (SRC), the priority, and the missed ACKs. |
+| `mupctl paths` | client | Lists the paths with their server port, return IP, state, the age of the last answer, round-trip time, and loss. With `-o wide`, it also shows the port range, the source range (SRC), the priority, and the missed ACKs. It also shows the average RTT, the jitter, the data loss, the probe loss, and the rate. |
+| `mupctl members` | both | Lists the pool members of ingress paths on a client and egress paths on a server, with their state, RTT, jitter, and probe loss. See [Path measurement](#path-measurement). |
 | `mupctl peers` | both | Lists the WireGuard peers of a client, or the peer routes of a server. |
 | `mupctl clients` | server | Lists the registered clients with their paths, peers, and lease. |
 | `mupctl reflectors` | server | Lists the members of the return pools and their health. |
@@ -551,13 +552,13 @@ GROUP   MODE       PATHS         PEERS
 51820   failover   2/2 healthy   2
 51821   repeater   0/1 healthy   1
 
-ID   GROUP   SERVER               TRANSPORT   VIA       INTERFACE   STATE       SEEN        RTT
-0    51820   203.0.113.5:5000     udp         -         eth0        active      4s ago      12.3ms
-1    51820   203.0.113.6:5000     icmp        -         eth1        standby     7s ago      18.7ms
-2    51821   198.51.100.20:6000   udp         1.1.1.1   eth2        unhealthy   2m10s ago   64.1ms
+ID   GROUP   SERVER               TRANSPORT   VIA       INTERFACE   STATE       SEEN        RTT       LOSS
+0    51820   203.0.113.5:5000     udp         -         eth0        active      4s ago      12.3ms    0.0%
+1    51820   203.0.113.6:5000     icmp        -         eth1        standby     7s ago      18.7ms    0.4%
+2    51821   198.51.100.20:6000   udp         1.1.1.1   eth2        unhealthy   2m10s ago   64.1ms    -
 ```
 
-The STATE column joins the health of a path and its use. A healthy path is `active` while its group sends traffic on it, and `standby` while it waits. In failover mode, only the first healthy path of the group is active. The SEEN column shows the age of the last answer of the server. The RTT column shows the time from a REGISTER to its ACK. For an egress path, the time starts with a REGISTER on the active ingress path of the group. It ends when the ACK arrives on that egress path.
+The STATE column joins the health of a path and its use. A healthy path is `active` while its group sends traffic on it, and `standby` while it waits. In failover mode, only the first healthy path of the group is active. The SEEN column shows the age of the last answer of the server. The RTT column shows the time from a REGISTER to its ACK. For an egress path, the time starts with a REGISTER on the active ingress path of the group. It ends when the ACK arrives on that egress path. The LOSS column is described in [Path measurement](#path-measurement).
 
 ```text
 $ sudo mupctl peers
@@ -588,6 +589,55 @@ These rules apply to path changes:
 - The changes last until the daemon restarts. The daemon then uses its flags or its configuration file again.
 
 Run `mupctl` as root. The daemon creates the socket at each start, with mode 0660 and root as the owner.
+
+## Path measurement
+
+MUP measures the loss and the round trip time of each path and of each pool member. The measurement changes no path choice. Health, failover, and balancing work as before.
+
+Data loss is the share of lost data packets. A data packet is a WireGuard packet that MUP forwards. The client and the server both count the data packets of each path. They compare the two counts, so the data loss needs no extra traffic. It shows the loss of the real traffic, and each direction has its own value.
+
+The data loss has two windows, 10 seconds and 60 seconds. If a path carries fewer than 50 packets in a window, it has no data loss value for that window.
+
+Probe loss is the share of unanswered control frames. The client sends one control frame on each ingress path every 2 seconds. The server sends one on each egress path every 2 seconds. The probe loss uses a window of 60 seconds. It is the only loss value of a standby path. The sender of the control frames has this value. So a client shows the probe loss of its ingress paths, and a server shows the probe loss of the egress paths.
+
+The average RTT and the jitter use a window of 60 seconds. Jitter is the mean change between neighboring RTT samples.
+
+A group without separate egress paths gets an ingress loss, which is the loss of the packets that the client sends. It gets no loss for its replies. The server sends each reply on the path of the latest packet, not on a path of its own.
+
+### Paths table
+
+The LOSS column appears in `mupctl status` and `mupctl get paths`, after RTT. If the path has a data loss value, the column shows it. Otherwise, the column shows the probe loss. If the path has neither value, the column shows `-`. Each value has one decimal place and a percent sign, for example `0.0%` or `12.5%`.
+
+With `-o wide`, the paths table adds these columns:
+
+| Column | Meaning |
+| --- | --- |
+| AVG RTT | The average RTT over 60 seconds. |
+| JITTER | The jitter over 60 seconds. |
+| DATA LOSS | The data loss over 10 seconds and over 60 seconds, as `10s/60s`, for example `0.4%/0.2%`. |
+| PROBE LOSS | The probe loss. |
+| RATE | The data rate over the last 10 seconds, in bits per second, for example `850kbit` or `12.4Mbit`. `-` means zero. |
+
+On a server, `mupctl get clients -o wide` adds the loss and the average RTT to each entry of the EGRESS LIST. If the path has them, the entry ends with them, for example `loss 0.3% rtt 15.2ms`.
+
+### Members
+
+`mupctl get members` lists the pool members. On a client, the list covers each ingress path that has a `via`. A path with one `via` has one member. On a server, it lists the members of each egress path of each client, and it adds the CLIENT column.
+
+| Column | Meaning |
+| --- | --- |
+| CLIENT | The advertised IP of the client. Only on a server. |
+| PATH | The path, as `ingress 4` or `egress 2`. |
+| GROUP | The listen port of the group. |
+| MEMBER | The address of the pool member. |
+| STATE | `healthy` or `unhealthy`. |
+| RTT | The average RTT of the member. |
+| JITTER | The jitter of the member. |
+| LOSS | The probe loss of the member. |
+
+### Versions
+
+The data loss and the probe loss of an ingress path need a client and a server of v0.5.3 or later. The data loss of an egress path needs the same versions. With an older peer, these fields show `-`, and nothing else changes. A bridge needs no update.
 
 ## Logs
 

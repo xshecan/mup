@@ -128,6 +128,48 @@ type Path struct {
 	// path, or zero for none.
 	SrcFirst uint16 `json:"src_first,omitempty"`
 	SrcLast  uint16 `json:"src_last,omitempty"`
+	Measurement
+}
+
+// Measurement is the measured quality of a path or of a pool member. A loss
+// field is nil while mup has no value for it, because 0 is a real result.
+type Measurement struct {
+	// LossPercent is the loss of data packets in the last 10 seconds, from
+	// the packet counts of both ends. It is nil for a path that carried too
+	// few packets, and for a peer that does not send counts.
+	LossPercent *float64 `json:"loss_percent,omitempty"`
+	// LossLongPercent is the same loss in the last 60 seconds.
+	LossLongPercent *float64 `json:"loss_long_percent,omitempty"`
+	// ProbeLossPercent is the part of the control probes of the last 60
+	// seconds that got no answer. A standby path has only this loss.
+	ProbeLossPercent *float64 `json:"probe_loss_percent,omitempty"`
+	// RTTAvgSeconds is the mean round trip time of the probes of the last 60
+	// seconds, and RTTJitterSeconds is the mean change between two probes
+	// in a row.
+	RTTAvgSeconds    float64 `json:"rtt_avg_seconds,omitzero"`
+	RTTJitterSeconds float64 `json:"rtt_jitter_seconds,omitzero"`
+	// RateBitsPerSecond and RatePacketsPerSecond are the data that this end
+	// sent or received on the path in the last 10 seconds.
+	RateBitsPerSecond    float64 `json:"rate_bps,omitzero"`
+	RatePacketsPerSecond float64 `json:"rate_pps,omitzero"`
+}
+
+// Member is one member of the pool of a path, or the one via of a path. A
+// client lists the members of its ingress paths. A server lists the members
+// of the egress paths of each client, and Client then names the client.
+type Member struct {
+	Client     string `json:"client,omitempty"`
+	Direction  string `json:"direction"`
+	PathID     int    `json:"path_id"`
+	ListenPort uint16 `json:"listen_port,omitempty"`
+	Address    string `json:"address"`
+	Healthy    bool   `json:"healthy"`
+	Measurement
+}
+
+// MemberList is the answer to a members request.
+type MemberList struct {
+	Members []Member `json:"members"`
 }
 
 // Peer is one WireGuard peer of a client.
@@ -220,6 +262,7 @@ type EgressPath struct {
 	// none.
 	SrcFirst uint16 `json:"src_first,omitempty"`
 	SrcLast  uint16 `json:"src_last,omitempty"`
+	Measurement
 }
 
 type RegisteredPath struct {

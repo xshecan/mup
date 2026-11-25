@@ -28,6 +28,7 @@ type registrationSink interface {
 	ConfirmReflector(source netip.Addr) error
 	RegisterPath(dataplane.RegistrationSettings) error
 	RevokeRegistration(dataplane.ClientKey) error
+	pathCounterStore
 }
 
 // daemonOptions builds the application of the configured role. Fx starts the

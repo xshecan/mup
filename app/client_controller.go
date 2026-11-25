@@ -19,6 +19,7 @@ import (
 	"github.com/xshecan/mup/config"
 	"github.com/xshecan/mup/control"
 	"github.com/xshecan/mup/dataplane"
+	"github.com/xshecan/mup/measure"
 	"github.com/xshecan/mup/protocol"
 )
 
@@ -94,6 +95,7 @@ type clientDataplane interface {
 	AttachClient(ifindexes []int) error
 	Snapshot() (dataplane.StatsSnapshot, error)
 	ClientRoutes() ([]dataplane.ClientRoute, error)
+	ClientPathCounters() ([config.MaxPaths]dataplane.PathCounter, [dataplane.MaxEgressPaths]dataplane.PathCounter, error)
 }
 
 type pathProbeResult struct {
@@ -205,6 +207,7 @@ type clientController struct {
 	slots        [config.MaxPaths]*clientPath
 	egressSlots  [dataplane.MaxEgressPaths]*clientEgressPath
 	stopEgress   func()
+	stopMeasure  func()
 	nextPriority int
 	nextEpoch    uint64
 	probes       chan pathProbeResult
@@ -221,6 +224,12 @@ type clientController struct {
 	rounds   [config.MaxPaths]ingressRound
 	arrivals [dataplane.MaxEgressPaths][config.MaxPaths]egressArrival
 	samples  [dataplane.MaxEgressPaths][config.MaxPaths]egressSample
+	// ingressMeasures and egressMeasures measure the paths, and
+	// measureArrivals keeps the earliest arrival of the latest MEASURE round
+	// of each ingress path on each egress path.
+	ingressMeasures [config.MaxPaths]*ingressMeasure
+	egressMeasures  [dataplane.MaxEgressPaths]*clientEgressMeasure
+	measureArrivals [dataplane.MaxEgressPaths][config.MaxPaths]egressArrival
 }
 
 func newClientController(
@@ -266,16 +275,23 @@ func (c *clientController) run(ctx context.Context) error {
 	}
 	defer func() {
 		c.mu.Lock()
-		stop := c.stopEgress
+		stop, stopMeasure := c.stopEgress, c.stopMeasure
 		c.mu.Unlock()
+		if stopMeasure != nil {
+			stopMeasure()
+		}
 		if stop != nil {
 			stop()
 		}
 	}()
+	measureTicker := time.NewTicker(measureInterval)
+	defer measureTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case now := <-measureTicker.C:
+			c.measureRound(now)
 		case err := <-c.failures:
 			return err
 		case probe := <-c.probes:
@@ -314,6 +330,13 @@ func (c *clientController) start(ctx context.Context) error {
 			return err
 		}
 		c.stopEgress = stop
+	}
+	stopMeasure, err := c.controls.listenMeasure(egressListen{advertisedIP: c.client.AdvertisedIP, nonce: c.nonce}, c.handleMeasureReply)
+	if err != nil {
+		// The paths work without their measurement.
+		c.logger.Printf("client: cannot receive the MEASURE replies, so the ingress paths show no loss: %v", err)
+	} else {
+		c.stopMeasure = stopMeasure
 	}
 	slot := 0
 	for index, group := range c.groups {
@@ -802,8 +825,12 @@ func (c *clientController) setEgressMaskLocked(group *pathGroup, mask uint8) err
 // handleEgressFrame takes a frame that arrived on an egress socket. A PROBE
 // gets an answer, and a REGISTER_ACK gives an RTT sample.
 func (c *clientController) handleEgressFrame(probe egressProbe) {
-	if probe.frame.Type == protocol.ControlRegisterACK {
+	switch probe.frame.Type {
+	case protocol.ControlRegisterACK:
 		c.handleEgressACK(probe)
+		return
+	case protocol.ControlMeasureReply:
+		c.handleMeasureReply(probe)
 		return
 	}
 	c.handleEgressProbe(probe)
@@ -868,7 +895,7 @@ func (c *clientController) measureEgressLocked(egress, ingress int) {
 	if rtt < 0 || rtt > egressRTTLimit {
 		return
 	}
-	c.samples[egress][ingress] = egressSample{known: true, rtt: rtt, at: arrival.at}
+	c.addEgressSampleLocked(egress, ingress, egressSample{known: true, rtt: rtt, at: arrival.at})
 }
 
 func (c *clientController) clearIngressRTTLocked(slot int) {
@@ -877,11 +904,13 @@ func (c *clientController) clearIngressRTTLocked(slot int) {
 		c.arrivals[index][slot] = egressArrival{}
 		c.samples[index][slot] = egressSample{}
 	}
+	c.clearIngressMeasureLocked(slot)
 }
 
 func (c *clientController) clearEgressRTTLocked(slot int) {
 	c.arrivals[slot] = [config.MaxPaths]egressArrival{}
 	c.samples[slot] = [config.MaxPaths]egressSample{}
+	c.clearEgressMeasureLocked(slot)
 }
 
 // egressRTTLocked is the RTT that an egress path shows: the sample for the best
@@ -918,6 +947,9 @@ func (c *clientController) egressRTTLocked(slot int, now time.Time) time.Duratio
 // none is healthy, so that a probe can bring the group back.
 func (c *clientController) handleEgressProbe(probe egressProbe) {
 	frame := probe.frame
+	// The count of the client is read when the probe arrives, so it pairs
+	// with the count of the server in the same probe.
+	counts, counted := egressCounts(c.dataplane)
 	c.mu.Lock()
 	if frame.AdvertisedIP != c.client.AdvertisedIP || frame.InstanceNonce != c.nonce ||
 		int(frame.PathID) >= len(c.egressSlots) {
@@ -930,11 +962,16 @@ func (c *clientController) handleEgressProbe(probe egressProbe) {
 		return
 	}
 	egress.lastProbe = probe.received
+	var count uint32
+	if counted {
+		count = measure.EncodeCount(counts[frame.PathID].Packets)
+		c.markEgressProbeLocked(int(frame.PathID), frame.LeaseSeconds, count, probe.received)
+	}
 	path := egress.path
 	targets := c.ingressTargetsLocked(egress.group)
 	c.mu.Unlock()
 	for _, registration := range targets {
-		reply, err := egressProbeReplyFrame(registration, probe, path)
+		reply, err := egressProbeReplyFrame(registration, probe, path, count)
 		if err != nil {
 			return
 		}
@@ -1143,21 +1180,22 @@ func (c *clientController) egressPathLocked(slot int, seen [dataplane.MaxEgressP
 		returnIP = egress.path.ReturnIP.String()
 	}
 	return api.Path{
-		ID:         slot,
-		Direction:  directionEgress,
-		Bridge:     egress.path.Bridge,
-		BridgeVia:  egress.path.BridgeVia,
-		ListenPort: egress.group.settings.ListenPort,
-		Server:     egress.path.Server.String(),
-		Port:       egress.path.ServerPort,
-		Transport:  egress.path.Transport.String(),
-		ReturnIP:   returnIP,
-		Healthy:    !egress.lastProbe.IsZero() && now.Sub(egress.lastProbe) < egressHealthWindow,
-		InUse:      seen[slot] >= 0 && seen[slot] < egressInUse,
-		LastProbe:  egress.lastProbe,
-		RTTSeconds: c.egressRTTLocked(slot, now).Seconds(),
-		SrcFirst:   egress.path.SrcFirst,
-		SrcLast:    egress.path.SrcLast,
+		ID:          slot,
+		Direction:   directionEgress,
+		Bridge:      egress.path.Bridge,
+		BridgeVia:   egress.path.BridgeVia,
+		ListenPort:  egress.group.settings.ListenPort,
+		Server:      egress.path.Server.String(),
+		Port:        egress.path.ServerPort,
+		Transport:   egress.path.Transport.String(),
+		ReturnIP:    returnIP,
+		Healthy:     !egress.lastProbe.IsZero() && now.Sub(egress.lastProbe) < egressHealthWindow,
+		InUse:       seen[slot] >= 0 && seen[slot] < egressInUse,
+		LastProbe:   egress.lastProbe,
+		RTTSeconds:  c.egressRTTLocked(slot, now).Seconds(),
+		SrcFirst:    egress.path.SrcFirst,
+		SrcLast:     egress.path.SrcLast,
+		Measurement: c.egressMeasurementLocked(slot, now),
 	}
 }
 
@@ -1188,26 +1226,27 @@ func (c *clientController) pathLocked(slot int, inUse [config.MaxPaths]bool) api
 		direction = directionIngress
 	}
 	return api.Path{
-		ID:         slot,
-		Direction:  direction,
-		Bridge:     current.path.Bridge,
-		ListenPort: current.group.settings.ListenPort,
-		Server:     current.path.Server.String(),
-		Port:       current.port,
-		FirstPort:  firstPort,
-		LastPort:   lastPort,
-		Transport:  current.path.Transport.String(),
-		ReturnIP:   returnIP,
-		Interface:  name,
-		Priority:   current.priority,
-		Healthy:    health.Healthy,
-		Reason:     reason,
-		InUse:      inUse[slot],
-		Misses:     health.Misses,
-		LastACK:    health.LastReply,
-		RTTSeconds: health.RTT.Seconds(),
-		SrcFirst:   current.path.SrcFirst,
-		SrcLast:    current.path.SrcLast,
+		ID:          slot,
+		Direction:   direction,
+		Bridge:      current.path.Bridge,
+		ListenPort:  current.group.settings.ListenPort,
+		Server:      current.path.Server.String(),
+		Port:        current.port,
+		FirstPort:   firstPort,
+		LastPort:    lastPort,
+		Transport:   current.path.Transport.String(),
+		ReturnIP:    returnIP,
+		Interface:   name,
+		Priority:    current.priority,
+		Healthy:     health.Healthy,
+		Reason:      reason,
+		InUse:       inUse[slot],
+		Misses:      health.Misses,
+		LastACK:     health.LastReply,
+		RTTSeconds:  health.RTT.Seconds(),
+		SrcFirst:    current.path.SrcFirst,
+		SrcLast:     current.path.SrcLast,
+		Measurement: c.ingressMeasurementLocked(slot, time.Now()),
 	}
 }
 

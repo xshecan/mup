@@ -164,6 +164,16 @@ func (s *serverInspector) Reflectors() (api.ReflectorList, error) {
 	return api.ReflectorList{Reflectors: list}, nil
 }
 
+// Members lists the members of the egress paths of each client with the
+// measurement of their probes.
+func (s *serverInspector) Members() (api.MemberList, error) {
+	members := []api.Member{}
+	if s.egresses != nil {
+		members = append(members, s.egresses.registry.members(time.Now())...)
+	}
+	return api.MemberList{Members: members}, nil
+}
+
 type poolPrefixKey struct {
 	client dataplane.ClientKey
 	base   netip.Addr
