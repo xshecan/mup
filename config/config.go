@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"slices"
@@ -113,6 +114,99 @@ func (m *Mode) UnmarshalText(text []byte) error {
 		return err
 	}
 	*m = mode
+	return nil
+}
+
+// LossLimit is a loss limit in tenths of a percent, from 1 to 1000, or zero for none.
+type LossLimit uint16
+
+// MaxLossLimit is the largest loss limit, 100 percent.
+const MaxLossLimit LossLimit = 1000
+
+// ParseLossLimit reads a percent from 0.1 to 100 with at most one digit after
+// the point. A trailing percent sign is optional.
+func ParseLossLimit(raw string) (LossLimit, error) {
+	text := strings.TrimSuffix(strings.TrimSpace(raw), "%")
+	text = strings.TrimSpace(text)
+	value, err := strconv.ParseFloat(text, 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0.1 || value > 100 {
+		return 0, fmt.Errorf("invalid max_loss %q: use a percent from 0.1 to 100, such as 5 or 5%%", raw)
+	}
+	tenths := math.Round(value * 10)
+	if math.Abs(value*10-tenths) > 1e-6 {
+		return 0, fmt.Errorf("invalid max_loss %q: use at most one digit after the point", raw)
+	}
+	return LossLimit(tenths), nil
+}
+
+// Percent returns the limit in percent, or zero for none.
+func (l LossLimit) Percent() float64 {
+	return float64(l) / 10
+}
+
+// String writes the limit as a percent such as 5% or 0.5%, or an empty string for none.
+func (l LossLimit) String() string {
+	if l == 0 {
+		return ""
+	}
+	return strconv.FormatFloat(l.Percent(), 'f', -1, 64) + "%"
+}
+
+// UnmarshalYAML reads a loss limit from a number or a string, so 5, 0.5 and
+// "5%" all work.
+func (l *LossLimit) UnmarshalYAML(unmarshal func(any) error) error {
+	var raw string
+	if err := unmarshal(&raw); err != nil {
+		return err
+	}
+	limit, err := ParseLossLimit(raw)
+	if err != nil {
+		return err
+	}
+	*l = limit
+	return nil
+}
+
+// Prefer is how a failover group picks among the paths that are healthy.
+type Prefer uint8
+
+const (
+	// PreferOrder picks the first healthy path in the order of the routes.
+	PreferOrder Prefer = iota
+	// PreferLatency picks the healthy path with the lowest round trip time.
+	PreferLatency
+)
+
+// ParsePrefer reads latency or order.
+func ParsePrefer(raw string) (Prefer, error) {
+	switch raw {
+	case "order":
+		return PreferOrder, nil
+	case "latency":
+		return PreferLatency, nil
+	default:
+		return 0, fmt.Errorf("invalid prefer %q: use latency or order", raw)
+	}
+}
+
+func (p Prefer) String() string {
+	switch p {
+	case PreferOrder:
+		return "order"
+	case PreferLatency:
+		return "latency"
+	default:
+		return fmt.Sprintf("prefer(%d)", uint8(p))
+	}
+}
+
+// UnmarshalText reads a prefer name from a configuration file.
+func (p *Prefer) UnmarshalText(text []byte) error {
+	prefer, err := ParsePrefer(string(text))
+	if err != nil {
+		return err
+	}
+	*p = prefer
 	return nil
 }
 
@@ -253,15 +347,24 @@ type Group struct {
 	Paths       []Path
 	EgressMode  Mode
 	EgressPaths []Path
+
+	// MaxLoss and Prefer are the ingress settings, and EgressMaxLoss and
+	// EgressPrefer are the egress settings. A zero loss limit means none.
+	MaxLoss       LossLimit
+	Prefer        Prefer
+	EgressMaxLoss LossLimit
+	EgressPrefer  Prefer
 }
 
 // Direction is the ingress or the egress block of a group in the
 // configuration file. Bridges are paths through a MUP bridge. They come after
 // the routes, so a route gets a lower path ID than a bridge.
 type Direction struct {
-	Mode    Mode   `yaml:"mode"`
-	Paths   []Path `yaml:"routes"`
-	Bridges []Path `yaml:"bridges"`
+	Mode    Mode      `yaml:"mode"`
+	MaxLoss LossLimit `yaml:"max_loss"`
+	Prefer  Prefer    `yaml:"prefer"`
+	Paths   []Path    `yaml:"routes"`
+	Bridges []Path    `yaml:"bridges"`
 }
 
 // all returns the routes and then the bridges of the direction, with the
@@ -342,6 +445,8 @@ func (g *Group) UnmarshalYAML(unmarshal func(any) error) error {
 	var raw struct {
 		ListenPort uint16     `yaml:"port"`
 		Mode       *Mode      `yaml:"mode"`
+		MaxLoss    *LossLimit `yaml:"max_loss"`
+		Prefer     *Prefer    `yaml:"prefer"`
 		Paths      []Path     `yaml:"routes"`
 		Ingress    *Direction `yaml:"ingress"`
 		Egress     *Direction `yaml:"egress"`
@@ -353,11 +458,17 @@ func (g *Group) UnmarshalYAML(unmarshal func(any) error) error {
 	if raw.Mode != nil {
 		g.Mode = *raw.Mode
 	}
+	if raw.MaxLoss != nil {
+		g.MaxLoss = *raw.MaxLoss
+	}
+	if raw.Prefer != nil {
+		g.Prefer = *raw.Prefer
+	}
 	if raw.Ingress == nil && raw.Egress == nil {
 		return nil
 	}
-	if raw.Mode != nil || len(raw.Paths) > 0 {
-		return fmt.Errorf("server %d: use mode and routes, or ingress and egress, not both", raw.ListenPort)
+	if raw.Mode != nil || raw.MaxLoss != nil || raw.Prefer != nil || len(raw.Paths) > 0 {
+		return fmt.Errorf("server %d: use mode, max_loss, prefer and routes, or ingress and egress, not both", raw.ListenPort)
 	}
 	if raw.Ingress == nil || raw.Egress == nil {
 		return fmt.Errorf("server %d: ingress and egress go together", raw.ListenPort)
@@ -366,6 +477,10 @@ func (g *Group) UnmarshalYAML(unmarshal func(any) error) error {
 		return fmt.Errorf("server %d: egress requires at least one route or bridge", raw.ListenPort)
 	}
 	g.Mode = raw.Ingress.Mode
+	g.MaxLoss = raw.Ingress.MaxLoss
+	g.Prefer = raw.Ingress.Prefer
+	g.EgressMaxLoss = raw.Egress.MaxLoss
+	g.EgressPrefer = raw.Egress.Prefer
 	g.Paths = raw.Ingress.all()
 	g.EgressMode = raw.Egress.Mode
 	egress, err := raw.Egress.allEgress()
@@ -444,6 +559,27 @@ func (g Group) validate() error {
 	}
 	if g.Mode > ModeRepeater {
 		return fmt.Errorf("server %d: invalid mode %d", g.ListenPort, uint8(g.Mode))
+	}
+	if g.Prefer > PreferLatency {
+		return fmt.Errorf("server %d: invalid prefer %d", g.ListenPort, uint8(g.Prefer))
+	}
+	if g.EgressPrefer > PreferLatency {
+		return fmt.Errorf("server %d: invalid egress prefer %d", g.ListenPort, uint8(g.EgressPrefer))
+	}
+	if g.MaxLoss > MaxLossLimit {
+		return fmt.Errorf("server %d: invalid max_loss %d", g.ListenPort, uint16(g.MaxLoss))
+	}
+	if g.EgressMaxLoss > MaxLossLimit {
+		return fmt.Errorf("server %d: invalid egress max_loss %d", g.ListenPort, uint16(g.EgressMaxLoss))
+	}
+	if g.Prefer == PreferLatency && g.Mode != ModeFailover {
+		return fmt.Errorf("server %d: prefer latency needs the failover mode, not %s", g.ListenPort, g.Mode)
+	}
+	if g.EgressPrefer == PreferLatency && g.EgressMode != ModeFailover {
+		return fmt.Errorf("server %d: egress prefer latency needs the failover mode, not %s", g.ListenPort, g.EgressMode)
+	}
+	if !g.Split() && (g.EgressMaxLoss != 0 || g.EgressPrefer != PreferOrder) {
+		return fmt.Errorf("server %d: the egress settings need a group with ingress and egress", g.ListenPort)
 	}
 	if len(g.Paths) == 0 {
 		return fmt.Errorf("server %d: requires at least one route", g.ListenPort)

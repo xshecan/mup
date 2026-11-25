@@ -409,3 +409,61 @@ func TestParseArgsBridge(t *testing.T) {
 		}
 	}
 }
+
+func TestParseArgsClientLossAndPreferSplit(t *testing.T) {
+	appConfig, err := parseArgs([]string{
+		"client", "-p", "51820", "-s", "192.0.2.10",
+		"--ingress", "203.0.113.5:9000/udp", "--egress", "203.0.113.5:9200/udp",
+		"--ingress-max-loss", "5%", "--ingress-prefer", "latency",
+		"--egress-max-loss", "0.5", "--egress-prefer", "order",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	group := appConfig.Client.Groups[0]
+	if group.MaxLoss != 50 || group.Prefer != config.PreferLatency || group.EgressMaxLoss != 5 || group.EgressPrefer != config.PreferOrder {
+		t.Fatalf("group = %#v", group)
+	}
+}
+
+func TestParseArgsClientLossAndPreferPlainValid(t *testing.T) {
+	appConfig, err := parseArgs([]string{
+		"client", "-p", "51820", "-s", "192.0.2.10", "-u", "203.0.113.5:9000/udp",
+		"--max-loss", "12.5", "--prefer", "latency",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	group := appConfig.Client.Groups[0]
+	if group.MaxLoss != 125 || group.Prefer != config.PreferLatency || group.EgressMaxLoss != 0 {
+		t.Fatalf("group = %#v", group)
+	}
+}
+
+func TestParseArgsClientLossAndPreferErrors(t *testing.T) {
+	plain := []string{"client", "-p", "51820", "-s", "192.0.2.10", "-u", "203.0.113.5:9000/udp"}
+	split := []string{"client", "-p", "51820", "-s", "192.0.2.10", "--ingress", "203.0.113.5:9000/udp", "--egress", "203.0.113.5:9200/udp"}
+	for _, tc := range []struct {
+		base  []string
+		extra []string
+		want  string
+	}{
+		{plain, []string{"--max-loss", "0"}, "--max-loss: invalid max_loss"},
+		{plain, []string{"--prefer", "fast"}, `--prefer: invalid prefer "fast"`},
+		{plain, []string{"--mode", "balancer", "--prefer", "latency"}, "prefer latency needs the failover mode"},
+		{split, []string{"--ingress-max-loss", "0.25"}, "--ingress-max-loss: invalid max_loss"},
+		{split, []string{"--egress-max-loss", "101"}, "--egress-max-loss: invalid max_loss"},
+		{split, []string{"--ingress-prefer", "fast"}, "--ingress-prefer: invalid prefer"},
+		{split, []string{"--egress-prefer", "latency", "--egress-mode", "repeater"}, "egress prefer latency needs the failover mode"},
+		{split, []string{"--max-loss", "5"}, "not both"},
+		{split, []string{"--prefer", "latency"}, "not both"},
+		{plain, []string{"--egress-max-loss", "5"}, "not both"},
+		{plain, []string{"--ingress-prefer", "latency"}, "not both"},
+	} {
+		args := append(append([]string{}, tc.base...), tc.extra...)
+		_, err := parseArgs(args)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("parseArgs(%q) error = %v, want %q", args, err, tc.want)
+		}
+	}
+}

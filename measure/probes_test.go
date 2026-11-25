@@ -262,3 +262,31 @@ func TestProbesCap(t *testing.T) {
 		t.Fatalf("list %d over the cap", len(p.list))
 	}
 }
+
+func TestProbesRTTSamples(t *testing.T) {
+	tests := []struct {
+		name string
+		now  float64
+		want int
+	}{
+		{"all in window", 10, 3},
+		{"old ones leave the window", ProbeWindow.Seconds() + 1.5, 1},
+		{"none left", 10 + ProbeWindow.Seconds() + 100, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var p Probes
+			sendAnswer(&p, 1, 0, ms(10))
+			sendAnswer(&p, 2, 1, ms(10))
+			sendAnswer(&p, 3, 2, ms(10))
+			p.Sent(4, at(3)) // not answered
+			if got := p.RTTSamples(at(tt.now)); got != tt.want {
+				t.Fatalf("got %d, want %d", got, tt.want)
+			}
+		})
+	}
+	var empty Probes
+	if got := empty.RTTSamples(at(0)); got != 0 {
+		t.Fatalf("empty: %d", got)
+	}
+}

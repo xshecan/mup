@@ -14,15 +14,16 @@ This document describes version 1 of the MUP protocol as the code implements it.
 8. [Control plane](#control-plane)
 9. [Path health](#path-health)
 10. [Path measurement](#path-measurement)
-11. [Dataplane state](#dataplane-state)
-12. [Lifetimes and cleanup](#lifetimes-and-cleanup)
-13. [Input rules](#input-rules)
-14. [Drop reasons](#drop-reasons)
-15. [Attachment and restarts](#attachment-and-restarts)
-16. [Observability](#observability)
-17. [Control socket](#control-socket)
-18. [Trust model](#trust-model)
-19. [Limits](#limits)
+11. [Loss limit and latency choice](#loss-limit-and-latency-choice)
+12. [Dataplane state](#dataplane-state)
+13. [Lifetimes and cleanup](#lifetimes-and-cleanup)
+14. [Input rules](#input-rules)
+15. [Drop reasons](#drop-reasons)
+16. [Attachment and restarts](#attachment-and-restarts)
+17. [Observability](#observability)
+18. [Control socket](#control-socket)
+19. [Trust model](#trust-model)
+20. [Limits](#limits)
 
 ## Terms
 
@@ -297,7 +298,9 @@ A packet with a nonzero token arrives at the advertised IP. The client program t
   <img alt="Failover, balancer, and repeater modes" src=".docs/images/modes-light.svg">
 </picture>
 
-The client program reads the healthy path mask from `path_state` for each packet. It keeps only the bits in the path mask of the group of the peer. The mode of the group then selects one of three rules:
+Go writes the data set of each group, not the set of healthy paths. The client writes it to `path_state`, and the server writes it to `server_down_groups`. A data set holds the paths that carry data, as defined in [Usable paths and data sets](#usable-paths-and-data-sets). The rules of the three modes then apply inside the data set. Each healthy path in the rules below means a path of the data set.
+
+The client program reads the data set mask from `path_state` for each packet. It keeps only the bits in the path mask of the group of the peer. The mode of the group then selects one of three rules:
 
 - Failover: The program uses the healthy path with the lowest priority. The priority is the position of the path in the configuration.
 - Balancer: The program computes a hash of the token and the mask, and uses it to pick one healthy path.
@@ -343,7 +346,7 @@ A REGISTER of a path with a source range has flag bit 7 and the first and last v
 
 ### Egress path registration
 
-An ingress path of a group with egress paths sends one EGRESS_REGISTER frame for each egress path of the group before each REGISTER. The frames travel like the REGISTER, so each server that an ingress path reaches gets all of them. The server applies the REGISTER rules to the source, the port, and the path ID. It keeps only an egress path whose server address is an address of the server host. An egress path has a lease of 30 seconds. A EGRESS_REGISTER with a lease of zero withdraws an egress path that `mupctl` removed.
+An ingress path of a group with egress paths sends one EGRESS_REGISTER frame for each egress path of the group before each REGISTER. The frames travel like the REGISTER, so each server that an ingress path reaches gets all of them. The server applies the REGISTER rules to the source, the port, and the path ID. It keeps only an egress path whose server address is an address of the server host. An egress path has a lease of 30 seconds, in bits 0 to 7 of the lease field. A EGRESS_REGISTER with a whole lease field of zero withdraws an egress path that `mupctl` removed.
 
 A EGRESS_REGISTER of an egress path with a source range has flag bit 7 and the first and last value of the range. The server writes the range to `server_down_paths`.
 
@@ -390,7 +393,7 @@ The control frame is 48 bytes long, and all integers are big-endian.
 | 24 | 4 | return IP | The return IP or the pool base of the path, or zero. In a PROBE_REPLY, the reflector that reached the client. |
 | 28 | 8 | instance nonce | The nonzero random number of the client process. |
 | 36 | 4 | sequence | A counter that goes up by one with each REGISTER on the path. A EGRESS_REGISTER does not use it. A MEASURE uses its own counter for each ingress path, and its MEASURE_REPLY copies it. With flag bit 7, it holds the range: the first value at offsets 36 and 37, and the last value at offsets 38 and 39. |
-| 40 | 4 | lease seconds or count code | In a REGISTER, a REGISTER_ACK, or an EGRESS_REGISTER, 30. In an EGRESS_REGISTER with a lease of zero, the frame withdraws an egress path. In a PROBE or a PROBE_REPLY of an egress path, the count code of the path, or zero. In a MEASURE or a MEASURE_REPLY, the count code of the packets that the client sent on the ingress path. |
+| 40 | 4 | lease seconds or count code | In a REGISTER or a REGISTER_ACK, 30. In an EGRESS_REGISTER, bits 0 to 7 hold the lease, 30. Bit 8 is prefer latency, with 1 for latency and 0 for order. Bits 16 to 31 hold the loss limit in tenths of a percent, from 0 for none to 1000. A whole field of zero withdraws an egress path. A server before v0.5.4 tests the field only against zero, so it ignores the new bits. In a PROBE or a PROBE_REPLY of an egress path, the count code of the path, or zero. In a MEASURE or a MEASURE_REPLY, the count code of the packets that the client sent on the ingress path. |
 | 44 | 4 | egress server | In a EGRESS_REGISTER, the server address of the egress path, or the bridge address with flag bit 4. A REGISTER does not use it. In a MEASURE_REPLY, it holds the count code of the packets that the server received on the ingress path. In a MEASURE, it is zero. With flag bit 7, it holds the range: the first value at offsets 44 and 45, and the last value at offsets 46 and 47. Zero otherwise. |
 
 Some payloads are exactly 48 bytes long and start with the magic, version 1, and length 48. The TCX programs pass such a payload to the kernel as a control frame.
@@ -497,6 +500,68 @@ The change keeps every existing map layout and frame layout. It changes no path 
 - An old client with a new server ignores the count in the PROBE lease field. Its PROBE_REPLY holds code 0, so the egress data loss stays empty.
 - An older decoder refuses each type above 7. It drops the frame without a reply.
 - A bridge passes every 48-byte control frame, so it needs no change.
+
+## Loss limit and latency choice
+
+The client and the server act on the loss and RTT values of [Path measurement](#path-measurement). Each group direction has two keys. `max_loss` is the loss limit, and `prefer` selects the latency choice of the failover mode. Without the keys, every decision works as in v0.5.3.
+
+### Usable paths and data sets
+
+A usable path is healthy and not degraded. If no path of a group direction is usable, every healthy path counts as usable. The data set of a group direction holds the paths that carry data.
+
+With failover and `prefer: latency`, the data set is the one path that the latency chooser returns. In every other case, the data set is the usable set. The rule of the mode then picks a path inside the data set. Failover takes the lowest priority or the lowest ID, balancer takes the hash, and repeater takes every path.
+
+### Loss gate
+
+The loss gate decides whether one path is degraded. Each path has its own gate, and each pool member has one too. On each evaluation, the gate reads the loss limit, the evidence, and the time. Its output is the degraded state and a reason.
+
+For a path with a data loss value, the evidence is the data loss over the 10 second window. Otherwise, the evidence is the probe loss.
+
+- A path that is not degraded becomes degraded with evidence above the limit.
+- For a degraded path, recovery needs two conditions. Its time in the degraded state is at least the hold. Its evidence is at most half the limit.
+- A path without evidence keeps its state.
+- The hold is the minimum time that a path stays degraded. Each degradation gets a strike number. A degradation within 10 minutes after the last recovery adds one to the number. Otherwise the number starts again at one.
+- The hold is 30 seconds at strike one. It doubles with each strike, up to 10 minutes.
+- A limit of zero means no limit. The gate then never degrades a path, and a degraded path recovers at once.
+- The reason names the evidence. For example, `loss 12.5% above 5%` or `probe loss 12.5% above 5%`.
+
+### Pool members
+
+A pool member uses the same gate, with its probe loss as the only evidence. A member that is degraded leaves the member list of its path. If every healthy member of a path is degraded, all healthy members stay in the list.
+
+### Latency chooser
+
+The latency chooser picks the path of a failover group direction that has `prefer: latency`. For each path, it gets the ID, the priority, the usable state, and the average RTT. The average RTT counts with at least 5 samples in its 60 second window. An RTT of zero means unknown.
+
+- With no current path, or an unusable current path, the chooser takes the usable path with the lowest known RTT at once. Paths without a known RTT rank after all others, by priority.
+- Otherwise, the chooser keeps the current path. A better path is a usable path whose RTT is lower than the current RTT by more than the margin. The margin is the larger of 10 percent of the current RTT and 2 milliseconds.
+- A better path must stay the best such candidate for 10 seconds without a break before the chooser switches to it.
+- A current path with an unknown RTT counts as worse than every known RTT. The same 10 second rule applies to it.
+
+The constants are `latencyMargin` of 0.10, `latencyMarginFloor` of 2 milliseconds, and `latencySwitchAfter` of 10 seconds.
+
+### Where each side applies the result
+
+- The client writes the union of the data sets of all its ingress group directions as the mask of `path_state`. Health does not change. The generation changes only with a change of the mask.
+- The client writes the members that are not degraded to `up_reflect_members` for each ingress reflect path.
+- The server writes the data set of each group to the healthy mask of `server_down_groups`, for that group.
+- The server writes the members that are not degraded to the member list of each egress path.
+- Each side uses the RTT that it measures for its own paths.
+
+### Evaluation times
+
+The client evaluates the gates and the chooser on each measurement tick, every 2 seconds, and on each health change. The server evaluates them on each probe round, every 2 seconds, and on each registration.
+
+### Egress keys on the wire
+
+The client sends both egress keys in each EGRESS_REGISTER of the group, in the lease field. All paths of one group carry the same keys. The server takes the keys of a group from the latest frame, as it does for the egress mode.
+
+### Mixed versions
+
+- A gate without evidence never degrades a path. An older server gives no loss counts, so the ingress paths of a client keep their state.
+- A server before v0.5.4 keeps its egress paths and ignores the keys. It has no gate and no latency choice for them.
+- The latency chooser needs only the RTT of the local side, so it works with any peer.
+- A bridge passes these control frames, so it needs no change.
 
 ## Dataplane state
 

@@ -75,6 +75,15 @@ type Group struct {
 	EgressMode         string `json:"egress_mode,omitempty"`
 	EgressPaths        int    `json:"egress_paths,omitempty"`
 	HealthyEgressPaths int    `json:"healthy_egress_paths,omitempty"`
+	// MaxLossPercent is the loss limit of the ingress paths, or zero for
+	// none. Prefer is "latency" when the failover mode picks the path with
+	// the lowest round trip time, and empty when it follows the order.
+	MaxLossPercent float64 `json:"max_loss_percent,omitzero"`
+	Prefer         string  `json:"prefer,omitempty"`
+	// EgressMaxLossPercent and EgressPrefer are the same settings of the
+	// egress paths. The server applies them.
+	EgressMaxLossPercent float64 `json:"egress_max_loss_percent,omitzero"`
+	EgressPrefer         string  `json:"egress_prefer,omitempty"`
 }
 
 // ServerStatus describes a server. It accepts the ports from Port to
@@ -128,6 +137,9 @@ type Path struct {
 	// path, or zero for none.
 	SrcFirst uint16 `json:"src_first,omitempty"`
 	SrcLast  uint16 `json:"src_last,omitempty"`
+	// Degraded marks a healthy path that carries no data, because its loss
+	// is above the loss limit of its group. Reason then names the loss.
+	Degraded bool `json:"degraded,omitempty"`
 	Measurement
 }
 
@@ -164,6 +176,9 @@ type Member struct {
 	ListenPort uint16 `json:"listen_port,omitempty"`
 	Address    string `json:"address"`
 	Healthy    bool   `json:"healthy"`
+	// Degraded marks a member that answers, but whose probe loss is above
+	// the loss limit of its group. Such a member carries no data.
+	Degraded bool `json:"degraded,omitempty"`
 	Measurement
 }
 
@@ -239,6 +254,11 @@ type EgressGroup struct {
 	ListenPort uint16       `json:"listen_port,omitempty"`
 	Mode       string       `json:"mode"`
 	Paths      []EgressPath `json:"paths"`
+	// MaxLossPercent is the loss limit that the client set for the egress
+	// paths, or zero for none. Prefer is "latency" when the failover mode
+	// picks the egress path with the lowest round trip time.
+	MaxLossPercent float64 `json:"max_loss_percent,omitzero"`
+	Prefer         string  `json:"prefer,omitempty"`
 }
 
 // EgressPath is one egress path of a client on a server. Members counts the
@@ -262,6 +282,12 @@ type EgressPath struct {
 	// none.
 	SrcFirst uint16 `json:"src_first,omitempty"`
 	SrcLast  uint16 `json:"src_last,omitempty"`
+	// Active marks a path that the server sends replies on now. Degraded
+	// marks a healthy path that carries no replies, because its loss is above
+	// the loss limit of its group, and Reason then names the loss.
+	Active   bool   `json:"active,omitempty"`
+	Degraded bool   `json:"degraded,omitempty"`
+	Reason   string `json:"reason,omitempty"`
 	Measurement
 }
 

@@ -138,6 +138,15 @@ func (p *clientPath) runtimePath() config.Path {
 type pathGroup struct {
 	settings dataplane.GroupSettings
 	egresses *egressSet
+	// policy is the loss limit and the path choice of the ingress paths.
+	// chooser picks the path of a group that prefers latency, and chosen is
+	// its latest pick. dataMask holds the ingress paths of the group that
+	// carry data.
+	policy    dataPolicy
+	chooser   *measure.LatencyChooser
+	chosen    int
+	hasChosen bool
+	dataMask  uint8
 }
 
 // clientEgressPath is one egress path of a group. It is healthy while the probes
@@ -219,6 +228,19 @@ type clientController struct {
 	// the other way.
 	reflectMu      sync.Mutex
 	reflectHealthy [config.MaxPaths][]netip.Addr
+	// reflectDegraded holds the members whose loss is above the limit of
+	// their group. reflectMu guards it too.
+	reflectDegraded [config.MaxPaths][]netip.Addr
+	// policies reports whether a group has a loss limit or a latency choice
+	// for its ingress paths. Without one, the path state is the health as
+	// before. pathMask and pathGeneration are the latest path state that
+	// the dataplane has, and lastMeasure is the time of the latest MEASURE
+	// round.
+	policies       bool
+	pathMask       uint8
+	pathGeneration uint32
+	pathPublished  bool
+	lastMeasure    time.Time
 	// rounds, arrivals and samples measure the RTT of the egress paths. They
 	// hold one entry per slot, so they never grow.
 	rounds   [config.MaxPaths]ingressRound
@@ -242,10 +264,20 @@ func newClientController(
 	logger *log.Logger,
 ) *clientController {
 	groups := make([]*pathGroup, 0, len(settings.Groups))
-	for _, group := range settings.Groups {
+	policies := false
+	for index, group := range settings.Groups {
 		current := &pathGroup{settings: group}
+		var egress protocol.EgressSettings
+		if index < len(client.Groups) {
+			current.policy = ingressPolicy(client.Groups[index])
+			egress = egressSettings(client.Groups[index])
+		}
+		if current.policy.latency {
+			current.chooser = &measure.LatencyChooser{}
+		}
+		policies = policies || current.policy.active()
 		if group.DownMask != 0 {
-			current.egresses = newEgressSet(group.EgressMode)
+			current.egresses = newEgressSet(group.EgressMode, egress)
 		}
 		groups = append(groups, current)
 	}
@@ -253,6 +285,7 @@ func newClientController(
 		client:        client,
 		nonce:         settings.InstanceNonce,
 		groups:        groups,
+		policies:      policies,
 		initial:       settings.Paths,
 		dataplane:     plane,
 		resolver:      resolver,
@@ -387,16 +420,9 @@ func (c *clientController) registrationLocked(group *pathGroup, path config.Path
 		registration.perPacket = path.Balance == config.BalancePerPacket
 		registration.writeMembers = func(members []netip.Addr) error {
 			c.reflectMu.Lock()
+			defer c.reflectMu.Unlock()
 			c.reflectHealthy[slot] = slices.Clone(members)
-			c.reflectMu.Unlock()
-			// An empty list never reaches the dataplane, because the data path
-			// sends a packet unreflected when the list is empty, and the
-			// server drops it. The dataplane keeps its last list. By then the
-			// path missed its rounds and has left the path mask, or is about to.
-			if len(members) == 0 {
-				return nil
-			}
-			return c.dataplane.SetIngressReflect(slot, members, registration.perPacket)
+			return c.writeReflectMembersLocked(slot, registration.perPacket)
 		}
 		// An older path in the slot can leave members of another pool, so
 		// the registration keeps only its own candidates.
@@ -581,9 +607,39 @@ func randomOtherPort(ports config.PortRange, current uint16) uint16 {
 	return port
 }
 
+// publishHealthLocked writes the path state after a change of the health.
 func (c *clientController) publishHealthLocked() error {
-	mask, generation := c.health.Snapshot()
-	return c.dataplane.UpdatePathState(mask, generation)
+	c.dataMasksLocked(false)
+	return c.writePathStateLocked(true)
+}
+
+// writePathStateLocked writes the paths that carry data to the dataplane.
+// Without a loss limit or a latency choice in any group, these are the healthy
+// paths with the generation of the health, as before. Otherwise they are the
+// union of the data sets of the groups, and the generation bumps only when
+// the mask changes. The state goes out when it changed, or always with force.
+func (c *clientController) writePathStateLocked(force bool) error {
+	var mask uint8
+	var generation uint32
+	if !c.policies {
+		mask, generation = c.health.Snapshot()
+	} else {
+		for _, group := range c.groups {
+			mask |= group.dataMask
+		}
+		generation = c.pathGeneration
+		if !c.pathPublished || mask != c.pathMask {
+			generation++
+		}
+	}
+	if !force && c.pathPublished && mask == c.pathMask && generation == c.pathGeneration {
+		return nil
+	}
+	if err := c.dataplane.UpdatePathState(mask, generation); err != nil {
+		return err
+	}
+	c.pathMask, c.pathGeneration, c.pathPublished = mask, generation, true
+	return nil
 }
 
 // groupLocked finds a group by listen port. A zero port selects the only group
@@ -1055,7 +1111,9 @@ func (c *clientController) SetMode(raw string, listenPort uint16) error {
 		return err
 	}
 	group.settings = updated
-	return nil
+	// A latency choice counts only in the failover mode.
+	c.dataMasksLocked(false)
+	return c.writePathStateLocked(false)
 }
 
 func (c *clientController) Status() (api.Status, error) {
@@ -1086,9 +1144,19 @@ func (c *clientController) Status() (api.Status, error) {
 func (c *clientController) groupsLocked(paths []api.Path, routes []dataplane.ClientRoute) []api.Group {
 	groups := make([]api.Group, 0, len(c.groups))
 	for _, group := range c.groups {
-		converted := api.Group{ListenPort: group.settings.ListenPort, Mode: group.settings.Mode.String()}
+		converted := api.Group{
+			ListenPort:     group.settings.ListenPort,
+			Mode:           group.settings.Mode.String(),
+			MaxLossPercent: group.policy.maxLoss.Percent(),
+			Prefer:         group.policy.prefer(),
+		}
 		if group.egresses != nil {
 			converted.EgressMode = group.settings.EgressMode.String()
+			settings := group.egresses.settingsOf()
+			converted.EgressMaxLossPercent = config.LossLimit(settings.MaxLossTenths).Percent()
+			if settings.PreferLatency {
+				converted.EgressPrefer = config.PreferLatency.String()
+			}
 		}
 		for _, path := range paths {
 			if path.ListenPort != converted.ListenPort {
@@ -1210,6 +1278,11 @@ func (c *clientController) pathLocked(slot int, inUse [config.MaxPaths]bool) api
 	if !health.Healthy && current.last == registerNoReflector {
 		reason = "no reflector"
 	}
+	var degraded bool
+	if m := c.ingressMeasures[slot]; health.Healthy && m != nil && m.gate.Degraded() {
+		degraded = true
+		reason = m.gate.Reason()
+	}
 	var returnIP string
 	switch {
 	case current.path.IsPool():
@@ -1240,6 +1313,7 @@ func (c *clientController) pathLocked(slot int, inUse [config.MaxPaths]bool) api
 		Priority:    current.priority,
 		Healthy:     health.Healthy,
 		Reason:      reason,
+		Degraded:    degraded,
 		InUse:       inUse[slot],
 		Misses:      health.Misses,
 		LastACK:     health.LastReply,
@@ -1251,8 +1325,9 @@ func (c *clientController) pathLocked(slot int, inUse [config.MaxPaths]bool) api
 }
 
 // inUseSlotsLocked mirrors the path choice of the client program in each group.
-// Failover uses the healthy path with the lowest priority. The other modes use
-// every healthy path.
+// Failover uses the path of the data set with the lowest priority. The other
+// modes use every path of the data set. Without a loss limit or a latency
+// choice, the data set is the healthy paths.
 func (c *clientController) inUseSlotsLocked() [config.MaxPaths]bool {
 	var inUse [config.MaxPaths]bool
 	for _, group := range c.groups {
@@ -1261,8 +1336,7 @@ func (c *clientController) inUseSlotsLocked() [config.MaxPaths]bool {
 			if current == nil || current.group != group {
 				continue
 			}
-			health, _ := c.health.Path(slot)
-			if !health.Healthy {
+			if group.dataMask&(1<<slot) == 0 {
 				continue
 			}
 			if group.settings.Mode != config.ModeFailover {

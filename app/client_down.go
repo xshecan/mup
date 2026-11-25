@@ -117,8 +117,11 @@ func (r *ackRouter) post(pathID uint16, frame []byte) {
 // egress path stays in the frames with a lease of zero for one lease, so the
 // servers forget it at once.
 type egressSet struct {
-	mu        sync.Mutex
-	mode      config.Mode
+	mu   sync.Mutex
+	mode config.Mode
+	// settings are the loss limit and the path choice of the egress paths,
+	// which the frames carry in their lease field.
+	settings  protocol.EgressSettings
 	paths     map[uint16]config.Path
 	withdrawn map[uint16]egressWithdrawal
 }
@@ -128,8 +131,8 @@ type egressWithdrawal struct {
 	until time.Time
 }
 
-func newEgressSet(mode config.Mode) *egressSet {
-	return &egressSet{mode: mode, paths: make(map[uint16]config.Path), withdrawn: make(map[uint16]egressWithdrawal)}
+func newEgressSet(mode config.Mode, settings protocol.EgressSettings) *egressSet {
+	return &egressSet{mode: mode, settings: settings, paths: make(map[uint16]config.Path), withdrawn: make(map[uint16]egressWithdrawal)}
 }
 
 func (d *egressSet) set(slot uint16, path config.Path) {
@@ -154,6 +157,13 @@ func (d *egressSet) setMode(mode config.Mode) {
 	d.mode = mode
 }
 
+// settingsOf returns the settings of the egress paths.
+func (d *egressSet) settingsOf() protocol.EgressSettings {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.settings
+}
+
 // frames builds the EGRESS_REGISTER frames that an ingress path sends before its
 // REGISTER with this sequence.
 func (d *egressSet) frames(registration pathRegistration, sequence uint32, now time.Time) [][]byte {
@@ -164,7 +174,7 @@ func (d *egressSet) frames(registration pathRegistration, sequence uint32, now t
 	defer d.mu.Unlock()
 	frames := make([][]byte, 0, len(d.paths)+len(d.withdrawn))
 	for slot, path := range d.paths {
-		if frame, err := egressRegisterFrame(registration, slot, path, d.mode, sequence, registrationLeaseSeconds); err == nil {
+		if frame, err := egressRegisterFrame(registration, slot, path, d.mode, sequence, protocol.PackEgressLease(registrationLeaseSeconds, d.settings)); err == nil {
 			frames = append(frames, frame)
 		}
 	}

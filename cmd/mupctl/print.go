@@ -167,7 +167,7 @@ func printGroups(w io.Writer, groups []api.Group) {
 	for _, group := range groups {
 		cells := []string{
 			strconv.Itoa(int(group.ListenPort)),
-			group.Mode,
+			modeText(group.Mode, group.Prefer, group.MaxLossPercent),
 			fmt.Sprintf("%d/%d healthy", group.HealthyPaths, group.Paths),
 		}
 		if split {
@@ -175,11 +175,30 @@ func printGroups(w io.Writer, groups []api.Group) {
 			if group.EgressMode != "" {
 				egressPaths = fmt.Sprintf("%d/%d healthy", group.HealthyEgressPaths, group.EgressPaths)
 			}
-			cells = append(cells, orDash(group.EgressMode), egressPaths)
+			cells = append(cells, orDash(modeText(group.EgressMode, group.EgressPrefer, group.EgressMaxLossPercent)), egressPaths)
 		}
 		row(table, append(cells, strconv.Itoa(group.Peers))...)
 	}
 	_ = table.Flush()
+}
+
+// modeText shows a mode with its settings in brackets: "failover (latency,
+// loss 5%)". A mode without settings shows alone, and an empty mode stays empty.
+func modeText(mode, prefer string, maxLoss float64) string {
+	if mode == "" {
+		return ""
+	}
+	var settings []string
+	if prefer == "latency" {
+		settings = append(settings, prefer)
+	}
+	if maxLoss > 0 {
+		settings = append(settings, "loss "+strconv.FormatFloat(maxLoss, 'f', -1, 64)+"%")
+	}
+	if len(settings) == 0 {
+		return mode
+	}
+	return mode + " (" + strings.Join(settings, ", ") + ")"
 }
 
 func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
@@ -445,7 +464,7 @@ func egressSummary(groups []api.EgressGroup) string {
 				healthy++
 			}
 		}
-		return fmt.Sprintf("%d/%d healthy, %s", healthy, len(group.Paths), group.Mode)
+		return fmt.Sprintf("%d/%d healthy, %s", healthy, len(group.Paths), modeText(group.Mode, group.Prefer, group.MaxLossPercent))
 	})
 }
 
@@ -453,7 +472,8 @@ func egressSummary(groups []api.EgressGroup) string {
 // healthy members of a path that reflects. A bridge that sends the replies from
 // the via shows "reflects via". A bridge via path shows "via" alone, because
 // the server sends to the bridge from the via. A path with a source range ends
-// with "src A-B".
+// with "src A-B". An active path starts with a star, and a degraded path has
+// the word degraded after its entry.
 func egressList(groups []api.EgressGroup) string {
 	return joinGroups(groups, func(group api.EgressGroup) string {
 		list := make([]string, 0, len(group.Paths))
@@ -468,6 +488,12 @@ func egressList(groups []api.EgressGroup) string {
 					via = "reflects via"
 				}
 				text += fmt.Sprintf(" %s %s (%d/%d)", via, path.ReturnIP, path.HealthyMembers, path.Members)
+			}
+			if path.Degraded {
+				text += " degraded"
+			}
+			if path.Active {
+				text = "*" + text
 			}
 			if loss := lossText(path.Measurement); loss != "-" {
 				text += " loss " + loss
@@ -650,7 +676,7 @@ func printMembers(w io.Writer, members []api.Member) {
 			fmt.Sprintf("%s %d", member.Direction, member.PathID),
 			group,
 			member.Address,
-			healthText(member.Healthy),
+			memberStateText(member),
 			formatRTT(member.RTTAvgSeconds),
 			formatRTT(member.RTTJitterSeconds),
 			formatLoss(member.ProbeLossPercent),
@@ -661,6 +687,15 @@ func printMembers(w io.Writer, members []api.Member) {
 		row(table, cells...)
 	}
 	_ = table.Flush()
+}
+
+// memberStateText shows degraded for a healthy member whose loss is above the
+// limit, and the health otherwise.
+func memberStateText(member api.Member) string {
+	if member.Healthy && member.Degraded {
+		return "degraded"
+	}
+	return healthText(member.Healthy)
 }
 
 func healthText(healthy bool) string {
@@ -688,10 +723,14 @@ func orDash(value string) string {
 // path when the daemon knows it.
 // pathStateText gives one word for the health and the use of a path: active
 // for a healthy path that the group sends on, standby for a healthy path that
-// waits, and unhealthy, with the reason if the daemon gave one.
+// waits, degraded for a healthy path that carries no data because of its loss,
+// and unhealthy, with the reason if the daemon gave one.
 func pathStateText(path api.Path) string {
 	if !path.Healthy {
 		return pathStatusText(path)
+	}
+	if path.Degraded {
+		return "degraded"
 	}
 	if path.InUse {
 		return "active"

@@ -13,6 +13,7 @@ import (
 	"github.com/xshecan/mup/api"
 	"github.com/xshecan/mup/config"
 	"github.com/xshecan/mup/dataplane"
+	"github.com/xshecan/mup/measure"
 	"github.com/xshecan/mup/protocol"
 )
 
@@ -87,6 +88,13 @@ type serverEgressPath struct {
 	cursor  int
 	// measure holds the loss, the probes and the rate of the path.
 	measure *egressMeasure
+	// gate and memberGates are the loss gates of the path and of its members
+	// in a group with a loss limit.
+	gate        measure.LossGate
+	memberGates map[netip.Addr]*measure.LossGate
+	// degradedMembers holds the members that the gates degraded in the
+	// latest sync.
+	degradedMembers []netip.Addr
 }
 
 func (p *serverEgressPath) pool() bool {
@@ -145,9 +153,31 @@ type egressGroupKey struct {
 	listenPort uint16
 }
 
+// serverEgressGroup is one egress group of a client. Its mode and its
+// settings come from the latest EGRESS_REGISTER of the group. dataMask holds
+// the paths that carry replies.
 type serverEgressGroup struct {
-	mode    config.Mode
-	written *dataplane.EgressGroupEntry
+	mode     config.Mode
+	settings protocol.EgressSettings
+	chooser  measure.LatencyChooser
+	dataMask uint8
+	written  *dataplane.EgressGroupEntry
+}
+
+// activeMask holds the paths that the server sends replies on now, as the
+// program picks them from the data set: the path with the lowest ID in the
+// failover mode, which is the chosen path with a latency choice, and every
+// path of the data set in the other modes.
+func (g *serverEgressGroup) activeMask() uint8 {
+	if g.mode == config.ModeFailover {
+		return g.dataMask & -g.dataMask
+	}
+	return g.dataMask
+}
+
+// policy is the loss limit and the path choice of the group.
+func (g *serverEgressGroup) policy() dataPolicy {
+	return egressPolicy(g.settings, g.mode)
 }
 
 // egressTarget is one way to send a control frame on an egress path. Member is the
@@ -236,21 +266,22 @@ func (r *egressRegistry) register(frame protocol.ControlFrame, now time.Time) er
 	}
 	if path == nil || !path.sameAs(frame) {
 		path = &serverEgressPath{
-			key:        key,
-			listenPort: frame.ListenPort,
-			server:     frame.EgressServer,
-			port:       frame.ServerPort,
-			transport:  frame.Transport,
-			returnIP:   frame.ReturnIP,
-			prefix:     frame.ReturnPrefix,
-			perPacket:  frame.Flags&protocol.ControlFlagBalancePerPacket != 0,
-			bridge:     bridge,
-			bridgeVia:  frame.Flags&protocol.ControlFlagBridgeVia != 0,
-			srcFirst:   frame.SrcFirst,
-			srcLast:    frame.SrcLast,
-			since:      now,
-			replies:    make(map[netip.Addr]time.Time),
-			measure:    newEgressMeasure(),
+			key:         key,
+			listenPort:  frame.ListenPort,
+			server:      frame.EgressServer,
+			port:        frame.ServerPort,
+			transport:   frame.Transport,
+			returnIP:    frame.ReturnIP,
+			prefix:      frame.ReturnPrefix,
+			perPacket:   frame.Flags&protocol.ControlFlagBalancePerPacket != 0,
+			bridge:      bridge,
+			bridgeVia:   frame.Flags&protocol.ControlFlagBridgeVia != 0,
+			srcFirst:    frame.SrcFirst,
+			srcLast:     frame.SrcLast,
+			since:       now,
+			replies:     make(map[netip.Addr]time.Time),
+			measure:     newEgressMeasure(),
+			memberGates: make(map[netip.Addr]*measure.LossGate),
 		}
 		if bridge {
 			localIP, ifindex, err := r.route(path.server)
@@ -301,6 +332,9 @@ func (r *egressRegistry) register(frame protocol.ControlFrame, now time.Time) er
 		r.groups[groupKey] = group
 	}
 	group.mode = config.Mode(frame.EgressMode)
+	// The lease field also carries the settings of the group. The frame of
+	// an older client has none.
+	_, group.settings = protocol.UnpackEgressLease(frame.LeaseSeconds)
 	r.syncClientLocked(client, now)
 	return nil
 }
@@ -465,6 +499,7 @@ func (r *egressRegistry) members(now time.Time) []api.Member {
 				ListenPort:  path.listenPort,
 				Address:     candidate.String(),
 				Healthy:     containsAddr(healthy, candidate),
+				Degraded:    containsAddr(path.degradedMembers, candidate),
 				Measurement: path.measure.memberView(candidate, now),
 			})
 		}
@@ -525,7 +560,10 @@ func (r *egressRegistry) sync(now time.Time) {
 // port has its own group with only the paths of that port. A failed
 // write leaves the old entry, and the next sync tries again.
 func (r *egressRegistry) syncClientLocked(client dataplane.ClientKey, now time.Time) {
-	type masks struct{ path, healthy, icmp uint8 }
+	type masks struct {
+		path, icmp uint8
+		candidates []dataCandidate
+	}
 	byPort := make(map[uint16]*masks)
 	for key, path := range r.paths {
 		if key.client != client {
@@ -546,6 +584,11 @@ func (r *egressRegistry) syncClientLocked(client dataplane.ClientKey, now time.T
 			}
 		}
 		healthy := r.healthyLocked(path, now)
+		var policy dataPolicy
+		if group := r.groups[egressGroupKey{client: client, listenPort: path.listenPort}]; group != nil {
+			policy = group.policy()
+		}
+		degraded := r.evaluateGatesLocked(path, policy, now)
 		entry := dataplane.EgressPathEntry{
 			Client:     client,
 			PathID:     key.id,
@@ -563,7 +606,7 @@ func (r *egressRegistry) syncClientLocked(client dataplane.ClientKey, now time.T
 			SrcLast:    path.srcLast,
 		}
 		if path.pool() {
-			entry.Members = healthy
+			entry.Members = publishedMembers(healthy, path.degradedMembers)
 		}
 		if path.written == nil || !sameEgressEntry(*path.written, entry) {
 			if err := r.plane.SetServerEgressPath(entry); err != nil {
@@ -581,9 +624,13 @@ func (r *egressRegistry) syncClientLocked(client dataplane.ClientKey, now time.T
 		if path.transport == protocol.TransportICMP {
 			group.icmp |= 1 << key.id
 		}
-		if len(healthy) > 0 {
-			group.healthy |= 1 << key.id
-		}
+		group.candidates = append(group.candidates, dataCandidate{
+			id:       int(key.id),
+			priority: int(key.id),
+			healthy:  len(healthy) > 0,
+			degraded: degraded,
+			rtt:      choiceRTT(&path.measure.probes, now),
+		})
 	}
 	for key, group := range r.groups {
 		if key.client != client {
@@ -598,12 +645,17 @@ func (r *egressRegistry) syncClientLocked(client dataplane.ClientKey, now time.T
 			delete(r.groups, key)
 			continue
 		}
+		var chooser *measure.LatencyChooser
+		if group.policy().latency {
+			chooser = &group.chooser
+		}
+		group.dataMask = dataSet(mask.candidates, chooser, now)
 		entry := dataplane.EgressGroupEntry{
 			Client:      client,
 			ListenPort:  key.listenPort,
 			Mode:        group.mode,
 			PathMask:    mask.path,
-			HealthyMask: mask.healthy,
+			HealthyMask: group.dataMask,
 			ICMPMask:    mask.icmp,
 		}
 		if group.written != nil && *group.written == entry {
@@ -615,6 +667,55 @@ func (r *egressRegistry) syncClientLocked(client dataplane.ClientKey, now time.T
 		}
 		group.written = &entry
 	}
+}
+
+// evaluateGatesLocked runs the loss gates of a path and of its members, and
+// reports whether the path is degraded. Without a loss limit nothing is
+// degraded. The evidence of the path is the loss of its data, or else the
+// loss of its probes, and the evidence of a member is the loss of its probes.
+func (r *egressRegistry) evaluateGatesLocked(path *serverEgressPath, policy dataPolicy, now time.Time) bool {
+	limit := policy.maxLoss.Percent()
+	if limit == 0 {
+		path.gate = measure.LossGate{}
+		clear(path.memberGates)
+		path.degradedMembers = nil
+		return false
+	}
+	data, _ := lossMeasurement(&path.measure.loss, now)
+	var probe *float64
+	if loss, ok := path.measure.probes.LossPercent(now); ok {
+		probe = &loss
+	}
+	degraded := path.gate.Evaluate(limit, data, probe, now)
+	path.degradedMembers = nil
+	if !path.returnIP.IsValid() {
+		return degraded
+	}
+	candidates := r.candidatesLocked(path)
+	for member := range path.memberGates {
+		if !containsAddr(candidates, member) {
+			delete(path.memberGates, member)
+		}
+	}
+	for _, member := range candidates {
+		tracker := path.measure.members[member]
+		if tracker == nil {
+			continue
+		}
+		gate := path.memberGates[member]
+		if gate == nil {
+			gate = &measure.LossGate{}
+			path.memberGates[member] = gate
+		}
+		var loss *float64
+		if value, ok := tracker.LossPercent(now); ok {
+			loss = &value
+		}
+		if gate.Evaluate(limit, nil, loss, now) {
+			path.degradedMembers = append(path.degradedMembers, member)
+		}
+	}
+	return degraded
 }
 
 func sameEgressEntry(a, b dataplane.EgressPathEntry) bool {
@@ -634,7 +735,14 @@ func (r *egressRegistry) clients(now time.Time) map[dataplane.ClientKey][]api.Eg
 	defer r.mu.Unlock()
 	result := make(map[dataplane.ClientKey][]api.EgressGroup)
 	for groupKey, group := range r.groups {
-		view := api.EgressGroup{ListenPort: groupKey.listenPort, Mode: group.mode.String()}
+		policy := group.policy()
+		view := api.EgressGroup{
+			ListenPort:     groupKey.listenPort,
+			Mode:           group.mode.String(),
+			MaxLossPercent: policy.maxLoss.Percent(),
+			Prefer:         policy.prefer(),
+		}
+		active := group.activeMask()
 		for key, path := range r.paths {
 			if key.client != groupKey.client || path.listenPort != groupKey.listenPort || now.After(path.expires) {
 				continue
@@ -653,7 +761,12 @@ func (r *egressRegistry) clients(now time.Time) map[dataplane.ClientKey][]api.Eg
 				LeaseSeconds:   path.expires.Sub(now).Seconds(),
 				SrcFirst:       path.srcFirst,
 				SrcLast:        path.srcLast,
+				Active:         active&(1<<key.id) != 0,
+				Degraded:       len(healthy) > 0 && path.gate.Degraded(),
 				Measurement:    path.measure.view(now),
+			}
+			if egress.Degraded {
+				egress.Reason = path.gate.Reason()
 			}
 			switch {
 			case path.pool():

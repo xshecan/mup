@@ -26,10 +26,14 @@ type ingressMeasure struct {
 	loss    measure.Loss
 	rate    measure.Rate
 	members map[netip.Addr]*measure.Probes
+	// gate and memberGates hold the loss gates of the path and of its
+	// members in a group with a loss limit.
+	gate        measure.LossGate
+	memberGates map[netip.Addr]*measure.LossGate
 }
 
 func newIngressMeasure() *ingressMeasure {
-	return &ingressMeasure{members: make(map[netip.Addr]*measure.Probes)}
+	return &ingressMeasure{members: make(map[netip.Addr]*measure.Probes), memberGates: make(map[netip.Addr]*measure.LossGate)}
 }
 
 // clientEgressMeasure measures one egress path of the client. The loss pairs
@@ -118,6 +122,11 @@ func (c *clientController) measureRound(now time.Time) {
 				c.egressMeasureLocked(slot).rate.Sample(egress[slot].Packets, egress[slot].Bytes, now)
 			}
 		}
+	}
+	// The data sets follow the loss and the RTT that this round measured
+	// up to now. A new answer counts in the next round.
+	if err := c.evaluateDataLocked(now); err != nil {
+		c.logger.Printf("client: cannot write the path state: %v", err)
 	}
 	c.mu.Unlock()
 	for _, send := range sends {
@@ -261,7 +270,9 @@ func (c *clientController) egressMeasurementLocked(slot int, now time.Time) api.
 }
 
 // Members lists each member of each ingress reflect path. A member is healthy
-// while the path publishes it to the dataplane.
+// while it answers, and degraded while its probe loss is above the loss limit
+// of its group. A degraded member leaves the list of the dataplane, unless
+// every healthy member of the path is degraded.
 func (c *clientController) Members() (api.MemberList, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -273,6 +284,7 @@ func (c *clientController) Members() (api.MemberList, error) {
 		}
 		c.reflectMu.Lock()
 		published := c.reflectHealthy[slot]
+		degraded := c.reflectDegraded[slot]
 		c.reflectMu.Unlock()
 		m := c.ingressMeasures[slot]
 		for _, member := range candidateMembers(current.runtimePath()) {
@@ -282,6 +294,7 @@ func (c *clientController) Members() (api.MemberList, error) {
 				ListenPort: current.group.settings.ListenPort,
 				Address:    member.String(),
 				Healthy:    containsAddr(published, member),
+				Degraded:   containsAddr(degraded, member),
 			}
 			if m != nil {
 				if tracker := m.members[member]; tracker != nil {
@@ -297,6 +310,9 @@ func (c *clientController) Members() (api.MemberList, error) {
 // clearIngressMeasureLocked starts the measurement of an ingress path again.
 func (c *clientController) clearIngressMeasureLocked(slot int) {
 	c.ingressMeasures[slot] = nil
+	c.reflectMu.Lock()
+	c.reflectDegraded[slot] = nil
+	c.reflectMu.Unlock()
 	for index := range c.measureArrivals {
 		c.measureArrivals[index][slot] = egressArrival{}
 	}

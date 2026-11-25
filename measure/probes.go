@@ -5,6 +5,8 @@ import "time"
 const (
 	maxProbes        = 512
 	minCompleteProbe = 5
+	// MinChoiceSamples is the fewest RTT samples that a latency choice uses.
+	MinChoiceSamples = 5
 )
 
 type probe struct {
@@ -123,6 +125,18 @@ func (p *Probes) RTTAvg(now time.Time) (time.Duration, bool) {
 		return 0, false
 	}
 	return sum / time.Duration(n), true
+}
+
+// RTTSamples returns the number of answered probes in the window, which the
+// mean of RTTAvg is over.
+func (p *Probes) RTTSamples(now time.Time) int {
+	n := 0
+	for i := range p.list {
+		if p.list[i].answered && inWindow(&p.list[i], now) {
+			n++
+		}
+	}
+	return n
 }
 
 // RTTLast returns the round trip time of the most recently answered probe.

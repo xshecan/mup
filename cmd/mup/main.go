@@ -21,12 +21,15 @@ const usage = `usage:
   mup --config FILE
   mup server -p PORT[-LAST] -r TARGET_IP:PORT [--target-ingress] [--control-socket PATH]
   mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP]" [-u ...] -s CLIENT_IP
-             [-r RETURN_IP] [--mode failover|balancer|repeater] [--control-socket PATH]
+             [-r RETURN_IP] [--mode failover|balancer|repeater] [--max-loss PERCENT] [--prefer latency|order]
+             [--control-socket PATH]
   mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp" [--ingress ...]
              --egress "SERVER_IP:PORT/udp|icmp [via RETURN_IP [bridge BRIDGE_IP]]" [--egress ...] -s CLIENT_IP
              [--ingress-bridge "BRIDGE_IP[%IFACE]:PORT[-LAST]/udp|icmp"] [--ingress-bridge ...]
              [--egress-bridge "BRIDGE_IP:PORT/udp|icmp [via RETURN_IP]"] [--egress-bridge ...]
-             [--ingress-mode MODE] [--egress-mode MODE] [--control-socket PATH]
+             [--ingress-mode MODE] [--egress-mode MODE]
+             [--ingress-max-loss PERCENT] [--ingress-prefer latency|order]
+             [--egress-max-loss PERCENT] [--egress-prefer latency|order] [--control-socket PATH]
   mup bridge -s SERVER_IP -p PORT[-LAST] [-a CIDR] [-a ...] [--control-socket PATH]
 `
 
@@ -138,6 +141,7 @@ func parseClientArgs(args []string) (*config.Client, error) {
 	var rawPaths, rawIngress, rawEgress, rawIngressBridges, rawEgressBridges stringList
 	var port int
 	var advertisedText, returnIPText, modeName, ingressModeName, egressModeName, controlSocket string
+	var maxLossText, preferName, ingressMaxLossText, ingressPreferName, egressMaxLossText, egressPreferName string
 	fs.IntVar(&port, "p", 0, "local WireGuard UDP listen port")
 	fs.Var(&rawPaths, "u", "server path as IPv4:PORT/udp or /icmp, where PORT can be a range FIRST-LAST")
 	fs.Var(&rawIngress, "ingress", "ingress path as IPv4:PORT/udp or /icmp, for the ingress only")
@@ -146,6 +150,12 @@ func parseClientArgs(args []string) (*config.Client, error) {
 	fs.Var(&rawEgressBridges, "egress-bridge", "egress path through a MUP bridge, as BRIDGE_IP:PORT/udp or /icmp")
 	fs.StringVar(&ingressModeName, "ingress-mode", "failover", "ingress mode: failover, balancer, or repeater")
 	fs.StringVar(&egressModeName, "egress-mode", "failover", "egress mode: failover, balancer, or repeater")
+	fs.StringVar(&ingressMaxLossText, "ingress-max-loss", "", "ingress loss limit in percent, such as 5 or 5%, or empty for none")
+	fs.StringVar(&egressMaxLossText, "egress-max-loss", "", "egress loss limit in percent, such as 5 or 5%, or empty for none")
+	fs.StringVar(&ingressPreferName, "ingress-prefer", "", "ingress failover preference: latency or order (the default)")
+	fs.StringVar(&egressPreferName, "egress-prefer", "", "egress failover preference: latency or order (the default)")
+	fs.StringVar(&maxLossText, "max-loss", "", "loss limit in percent, such as 5 or 5%, or empty for none")
+	fs.StringVar(&preferName, "prefer", "", "failover preference: latency or order (the default)")
 	fs.StringVar(&advertisedText, "s", "", "advertised client IPv4")
 	fs.StringVar(&returnIPText, "r", "", "return IPv4 of each -u path without its own via")
 	fs.StringVar(&modeName, "mode", "failover", "failover, balancer, or repeater")
@@ -173,16 +183,23 @@ func parseClientArgs(args []string) (*config.Client, error) {
 	}
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
-	split := splitArgs{ingress: rawIngress, egress: rawEgress, ingressBridges: rawIngressBridges, egressBridges: rawEgressBridges, ingressMode: ingressModeName, egressMode: egressModeName}
-	if split.any() || set["ingress-mode"] || set["egress-mode"] || set["up-mode"] || set["down-mode"] {
-		if len(rawPaths) > 0 || set["mode"] || set["r"] {
-			return nil, errors.New("use -u, -r, and --mode, or --ingress, --egress, the bridges, --ingress-mode, and --egress-mode, not both")
+	split := splitArgs{ingress: rawIngress, egress: rawEgress, ingressBridges: rawIngressBridges, egressBridges: rawEgressBridges, ingressMode: ingressModeName, egressMode: egressModeName,
+		ingressMaxLoss: ingressMaxLossText, ingressPrefer: ingressPreferName, egressMaxLoss: egressMaxLossText, egressPrefer: egressPreferName}
+	splitSettings := set["ingress-mode"] || set["egress-mode"] || set["ingress-max-loss"] || set["ingress-prefer"] ||
+		set["egress-max-loss"] || set["egress-prefer"] || set["up-mode"] || set["down-mode"]
+	if split.any() || splitSettings {
+		if len(rawPaths) > 0 || set["mode"] || set["max-loss"] || set["prefer"] || set["r"] {
+			return nil, errors.New("use -u, -r, --mode, --max-loss, and --prefer, or --ingress, --egress, the bridges, --ingress-mode, --egress-mode, --ingress-max-loss, --ingress-prefer, --egress-max-loss, and --egress-prefer, not both")
 		}
 		return parseSplitClientArgs(listenPort, advertised, controlSocket, split)
 	}
 	mode, err := config.ParseMode(modeName)
 	if err != nil {
 		return nil, fmt.Errorf("--mode: %w", err)
+	}
+	maxLoss, prefer, err := parseLossAndPrefer("--max-loss", maxLossText, "--prefer", preferName)
+	if err != nil {
+		return nil, err
 	}
 	paths := make([]config.Path, 0, len(rawPaths))
 	for i, raw := range rawPaths {
@@ -198,7 +215,7 @@ func parseClientArgs(args []string) (*config.Client, error) {
 	client := &config.Client{
 		AdvertisedIP:  advertised,
 		ControlSocket: controlSocket,
-		Groups:        []config.Group{{ListenPort: listenPort, Mode: mode, Paths: paths}},
+		Groups:        []config.Group{{ListenPort: listenPort, Mode: mode, Paths: paths, MaxLoss: maxLoss, Prefer: prefer}},
 	}
 	if err := client.Validate(); err != nil {
 		return nil, err
@@ -210,6 +227,30 @@ func parseClientArgs(args []string) (*config.Client, error) {
 type splitArgs struct {
 	ingress, egress, ingressBridges, egressBridges []string
 	ingressMode, egressMode                        string
+	ingressMaxLoss, ingressPrefer                  string
+	egressMaxLoss, egressPrefer                    string
+}
+
+// parseLossAndPrefer reads the loss limit and the preference of one direction.
+// An empty text means no limit and the order preference.
+func parseLossAndPrefer(lossFlag, lossText, preferFlag, preferText string) (config.LossLimit, config.Prefer, error) {
+	var maxLoss config.LossLimit
+	if lossText != "" {
+		var err error
+		maxLoss, err = config.ParseLossLimit(lossText)
+		if err != nil {
+			return 0, 0, fmt.Errorf("%s: %w", lossFlag, err)
+		}
+	}
+	var prefer config.Prefer
+	if preferText != "" {
+		var err error
+		prefer, err = config.ParsePrefer(preferText)
+		if err != nil {
+			return 0, 0, fmt.Errorf("%s: %w", preferFlag, err)
+		}
+	}
+	return maxLoss, prefer, nil
 }
 
 func (s splitArgs) any() bool {
@@ -230,7 +271,18 @@ func parseSplitClientArgs(listenPort uint16, advertised netip.Addr, controlSocke
 	if err != nil {
 		return nil, fmt.Errorf("--egress-mode: %w", err)
 	}
-	group := config.Group{ListenPort: listenPort, Mode: ingressMode, EgressMode: egressMode}
+	ingressMaxLoss, ingressPrefer, err := parseLossAndPrefer("--ingress-max-loss", split.ingressMaxLoss, "--ingress-prefer", split.ingressPrefer)
+	if err != nil {
+		return nil, err
+	}
+	egressMaxLoss, egressPrefer, err := parseLossAndPrefer("--egress-max-loss", split.egressMaxLoss, "--egress-prefer", split.egressPrefer)
+	if err != nil {
+		return nil, err
+	}
+	group := config.Group{
+		ListenPort: listenPort, Mode: ingressMode, EgressMode: egressMode,
+		MaxLoss: ingressMaxLoss, Prefer: ingressPrefer, EgressMaxLoss: egressMaxLoss, EgressPrefer: egressPrefer,
+	}
 	for _, part := range []struct {
 		flagName string
 		raws     []string

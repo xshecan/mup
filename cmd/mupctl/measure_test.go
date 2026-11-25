@@ -207,3 +207,120 @@ func TestWideClientsShowTheLossAndRTTOfEachEgressPath(t *testing.T) {
 		t.Fatalf("clients output misses %q:\n%s", want, out.String())
 	}
 }
+
+func TestModeTextShowsTheSettings(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		mode, prefer string
+		loss         float64
+		want         string
+	}{
+		{"failover", "latency", 5, "failover (latency, loss 5%)"},
+		{"failover", "latency", 0, "failover (latency)"},
+		{"balancer", "", 2.5, "balancer (loss 2.5%)"},
+		{"failover", "order", 0, "failover"},
+		{"repeater", "", 0, "repeater"},
+		{"", "", 0, ""},
+	} {
+		if got := modeText(test.mode, test.prefer, test.loss); got != test.want {
+			t.Errorf("modeText(%q, %q, %v) = %q, want %q", test.mode, test.prefer, test.loss, got, test.want)
+		}
+	}
+}
+
+func TestGroupsShowTheSettingsNextToTheMode(t *testing.T) {
+	t.Parallel()
+
+	var out strings.Builder
+	printGroups(&out, []api.Group{
+		{ListenPort: 51820, Mode: "failover", Prefer: "latency", MaxLossPercent: 5, EgressMode: "balancer", EgressMaxLossPercent: 2.5, Paths: 2, HealthyPaths: 2, EgressPaths: 1, HealthyEgressPaths: 1},
+		{ListenPort: 51821, Mode: "repeater", Paths: 1, HealthyPaths: 1},
+	})
+	for _, want := range []string{"failover (latency, loss 5%)", "balancer (loss 2.5%)", "51821   repeater "} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("groups output misses %q:\n%s", want, out.String())
+		}
+	}
+	t.Log("\n" + out.String())
+
+	var plain strings.Builder
+	printGroups(&plain, []api.Group{{ListenPort: 51820, Mode: "failover", Paths: 1, HealthyPaths: 1}})
+	if strings.Contains(plain.String(), "(") {
+		t.Fatalf("plain groups output has settings:\n%s", plain.String())
+	}
+}
+
+func TestDegradedPathsShowTheirState(t *testing.T) {
+	t.Parallel()
+
+	var out strings.Builder
+	printPaths(&out, []api.Path{
+		{ID: 0, ListenPort: 51820, Server: "203.0.113.5", Port: 9000, Transport: "udp", Healthy: true, InUse: true},
+		{ID: 1, ListenPort: 51820, Server: "203.0.113.6", Port: 9000, Transport: "udp", Healthy: true, Degraded: true, Reason: "loss 12.5% above 5%"},
+		{ID: 2, ListenPort: 51820, Server: "203.0.113.7", Port: 9000, Transport: "udp", Degraded: true},
+		{ID: 3, ListenPort: 51820, Server: "203.0.113.8", Port: 9000, Transport: "udp", Healthy: true},
+	}, false, testNow)
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	for i, want := range []string{"active", "degraded", "unhealthy", "standby"} {
+		if got := strings.Fields(lines[i+1])[6]; got != want {
+			t.Fatalf("row %d state = %q, want %q:\n%s", i, got, want, out.String())
+		}
+	}
+	t.Log("\n" + out.String())
+}
+
+func TestEgressSummaryAndListShowTheSettings(t *testing.T) {
+	t.Parallel()
+
+	clients := []api.RegisteredClient{{AdvertisedIP: "192.0.2.10", Nonce: "8f3a0000000000aa",
+		Egress: &api.EgressGroup{Mode: "failover", Prefer: "latency", MaxLossPercent: 5, Paths: []api.EgressPath{
+			{ID: 0, Server: "203.0.113.5", Port: 9200, Transport: "udp", Healthy: true, Active: true,
+				Measurement: api.Measurement{LossPercent: percent(0.3), RTTAvgSeconds: 0.0152}},
+			{ID: 1, Server: "203.0.113.5", Port: 9300, Transport: "udp", Healthy: true, Degraded: true, Reason: "loss 12.5% above 5%",
+				Measurement: api.Measurement{LossPercent: percent(12.5), RTTAvgSeconds: 0.02}},
+			{ID: 2, Server: "203.0.113.5", Port: 9400, Transport: "udp", Healthy: true},
+		}}}}
+	var out strings.Builder
+	printClients(&out, clients, true)
+	for _, want := range []string{
+		"3/3 healthy, failover (latency, loss 5%)",
+		"*0:udp:203.0.113.5:9200 loss 0.3% rtt 15.2ms",
+		"1:udp:203.0.113.5:9300 degraded loss 12.5% rtt 20ms",
+		"2:udp:203.0.113.5:9400",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("clients output misses %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "*1:") || strings.Contains(out.String(), "*2:") || strings.Contains(out.String(), "2:udp:203.0.113.5:9400 degraded") {
+		t.Fatalf("a path that is not active has a star:\n%s", out.String())
+	}
+	t.Log("\n" + out.String())
+
+	var plain strings.Builder
+	printClients(&plain, []api.RegisteredClient{{AdvertisedIP: "192.0.2.10", Nonce: "8f3a",
+		Egress: &api.EgressGroup{Mode: "failover", Paths: []api.EgressPath{{ID: 0, Server: "203.0.113.5", Port: 9200, Transport: "udp", Healthy: true}}}}}, true)
+	if strings.Contains(plain.String(), "*") || strings.Contains(plain.String(), "degraded") || strings.Contains(plain.String(), "(") && strings.Contains(plain.String(), "failover (") {
+		t.Fatalf("plain clients output has a mark:\n%s", plain.String())
+	}
+}
+
+func TestMembersShowDegraded(t *testing.T) {
+	t.Parallel()
+
+	var out strings.Builder
+	printMembers(&out, []api.Member{
+		{Direction: "ingress", PathID: 4, ListenPort: 51820, Address: "198.51.100.1", Healthy: true, Degraded: true,
+			Measurement: api.Measurement{ProbeLossPercent: percent(12.5)}},
+		{Direction: "ingress", PathID: 4, ListenPort: 51820, Address: "198.51.100.2", Degraded: true},
+		{Direction: "ingress", PathID: 4, ListenPort: 51820, Address: "198.51.100.3", Healthy: true},
+	})
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	for i, want := range []string{"degraded", "unhealthy", "healthy"} {
+		if got := strings.Fields(lines[i+1])[4]; got != want {
+			t.Fatalf("member %d state = %q, want %q:\n%s", i, got, want, out.String())
+		}
+	}
+	t.Log("\n" + out.String())
+}

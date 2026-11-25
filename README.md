@@ -144,6 +144,10 @@ server:
 | `client.control_socket` | `--control-socket` | Optional. The socket for `mupctl`. An empty value turns the socket off. |
 | `client.servers[].port` | `-p` | The port where the group receives packets from its peers. |
 | `client.servers[].mode` | `--mode` | Optional. The path mode of the group. The default is `failover`. |
+| `client.servers[].max_loss` | `--max-loss` | Optional. The loss limit of the group, as a percent from 0.1 to 100, for example `5%`. A path above the limit is degraded. The default is no limit. See [Loss limit and latency choice](#loss-limit-and-latency-choice). |
+| `client.servers[].prefer` | `--prefer` | Optional. `latency` makes the failover mode pick the path with the lowest RTT. The values are `latency` and `order`. The default is `order`, which keeps the existing choice. In another mode, `latency` is rejected. |
+| `client.servers[].ingress.max_loss`, `client.servers[].egress.max_loss` | `--ingress-max-loss`, `--egress-max-loss` | Optional. The loss limit of each direction, in place of the `max_loss` of the group. |
+| `client.servers[].ingress.prefer`, `client.servers[].egress.prefer` | `--ingress-prefer`, `--egress-prefer` | Optional. The `prefer` setting of each direction, in place of the `prefer` of the group. |
 | `client.servers[].ingress`, `client.servers[].egress` | `--ingress`, `--egress` | Optional. A `mode` and `routes` for each direction, in place of `mode` and `routes`. See [Separate ingress and egress paths](#separate-ingress-and-egress-paths). |
 | `client.servers[].ingress.bridges`, `client.servers[].egress.bridges` | `--ingress-bridge`, `--egress-bridge` | Optional. The paths through a bridge in each direction. An egress bridge can have `via`. See [Bridges](#bridges). |
 | `client.servers[].routes` | `-u` | The paths of the group, in the form of the `-u` flag. A path can end with `via RETURN_IP`. The server port of a path can be a range, `FIRST-LAST`. See [Server port ranges](#server-port-ranges). A path can also end with `src FIRST-LAST`. See [Source range](#source-range). |
@@ -465,12 +469,15 @@ The command `mup --config FILE` reads a [configuration file](#configuration-file
 
 ```text
 mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP] [src FIRST-LAST]" [-u ...] -s CLIENT_IP
-           [-r RETURN_IP] [--mode failover|balancer|repeater] [--control-socket PATH]
+           [-r RETURN_IP] [--mode failover|balancer|repeater] [--max-loss PERCENT] [--prefer latency|order]
+           [--control-socket PATH]
 mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP] [src FIRST-LAST]" [--ingress ...]
            --egress "SERVER_IP:PORT/udp|icmp [via RETURN_IP] [src FIRST-LAST] [bridge BRIDGE_IP]" [--egress ...] -s CLIENT_IP
            [--ingress-bridge "BRIDGE_IP[%IFACE]:PORT[-LAST]/udp|icmp [src FIRST-LAST]"] [--ingress-bridge ...]
            [--egress-bridge "BRIDGE_IP:PORT/udp|icmp [via RETURN_IP] [src FIRST-LAST]"] [--egress-bridge ...]
-           [--ingress-mode MODE] [--egress-mode MODE] [--control-socket PATH]
+           [--ingress-mode MODE] [--egress-mode MODE]
+           [--ingress-max-loss PERCENT] [--ingress-prefer latency|order]
+           [--egress-max-loss PERCENT] [--egress-prefer latency|order] [--control-socket PATH]
 ```
 
 | Flag | Value | Meaning |
@@ -484,6 +491,8 @@ mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via
 | `--egress` | `SERVER_IP:PORT/udp` or `/icmp`, then optionally `via RETURN_IP`, `src FIRST-LAST`, and `bridge BRIDGE_IP` | One egress path. With `bridge BRIDGE_IP`, the bridge spoofs the reply, and `via` is required. See [Separate ingress and egress paths](#separate-ingress-and-egress-paths) and [Bridges](#bridges). |
 | `--ingress-bridge`, `--egress-bridge` | `BRIDGE_IP:PORT/udp` or `/icmp` | One ingress path or egress path through a bridge. An egress bridge can end with `via RETURN_IP`, and then the server spoofs the wrapper. Both can end with `src FIRST-LAST`. See [Bridges](#bridges) and [Source range](#source-range). |
 | `--ingress-mode`, `--egress-mode` | `failover`, `balancer`, `repeater` | The ingress mode and the egress mode. The default is `failover`. |
+| `--max-loss`, `--ingress-max-loss`, `--egress-max-loss` | percent, for example `5%` | The loss limit of the group, or of one direction. See [Loss limit and latency choice](#loss-limit-and-latency-choice). |
+| `--prefer`, `--ingress-prefer`, `--egress-prefer` | `latency`, `order` | The path choice of the failover mode of the group, or of one direction. The default is `order`. |
 | `--control-socket` | path | The socket for `mupctl`. The default is `/run/mup/client.sock`. An empty value turns the socket off. |
 
 ### Server
@@ -592,7 +601,7 @@ Run `mupctl` as root. The daemon creates the socket at each start, with mode 066
 
 ## Path measurement
 
-MUP measures the loss and the round trip time of each path and of each pool member. The measurement changes no path choice. Health, failover, and balancing work as before.
+MUP measures the loss and the round trip time of each path and of each pool member. The measurement alone changes no path choice. A group uses the values only with the keys of [Loss limit and latency choice](#loss-limit-and-latency-choice).
 
 Data loss is the share of lost data packets. A data packet is a WireGuard packet that MUP forwards. The client and the server both count the data packets of each path. They compare the two counts, so the data loss needs no extra traffic. It shows the loss of the real traffic, and each direction has its own value.
 
@@ -638,6 +647,74 @@ On a server, `mupctl get clients -o wide` adds the loss and the average RTT to e
 ### Versions
 
 The data loss and the probe loss of an ingress path need a client and a server of v0.5.3 or later. The data loss of an egress path needs the same versions. With an older peer, these fields show `-`, and nothing else changes. A bridge needs no update.
+
+## Loss limit and latency choice
+
+The keys `max_loss` and `prefer` let a group act on the measured loss and RTT of its paths. Both are optional. Without them, every path choice works as before.
+
+### Loss limit
+
+`max_loss: 5%` sets the loss limit of a group. A path whose loss is above the limit is degraded. A usable path is healthy and not degraded. A degraded path stays healthy, but it carries no data while another path of its group is usable.
+
+The loss of a path is its data loss over the last 10 seconds. A path with no data loss value uses its probe loss instead. Data loss takes priority because a network limit can drop only the data of a busy path, so probes pass and the path looks clean.
+
+If every path of a group is above the limit, the group chooses from all its healthy paths. So the loss limit never stops a group. Without `max_loss`, no path is degraded.
+
+### Recovery
+
+When a degraded path stays degraded for its hold time, and its loss is at most half the limit, the path recovers. The hold time is the wait before recovery. It starts at 30 seconds.
+
+A strike is a repeat degradation. It happens within 10 minutes after the last recovery. Each strike doubles the hold time, up to 10 minutes. A path that does not degrade for 10 minutes after its last recovery starts again at 30 seconds.
+
+### Latency choice
+
+`prefer: latency` works only in the failover mode. With it, the group uses the usable path with the lowest average RTT, not the first path in the list. The default, `prefer: order`, keeps the choice by priority.
+
+A better path has an RTT lower by more than 10 percent of the current RTT. It must also be lower by more than 2 milliseconds. When a better path stays the best candidate for 10 seconds without a break, the group moves to it. A path that fails is replaced at once.
+
+### Pool members
+
+A pool member with a probe loss above the limit leaves the pool. It returns under the same recovery rules, with its probe loss as the only loss value. When every healthy member of a path is above the limit, all healthy members stay in the pool.
+
+### Who decides
+
+The client decides for the ingress paths. A group without separate directions uses its own keys for its ingress paths. The server decides for the egress paths. The client sends the two keys of the egress block to the server with each egress registration.
+
+### Example
+
+```yaml
+client:
+  advertise: 192.0.2.10
+  servers:
+    - port: 51820
+      ingress:
+        mode: failover
+        max_loss: 5%
+        prefer: latency
+        routes:
+          - 203.0.113.5:5000-5099/udp
+          - 203.0.113.5:5100/icmp
+      egress:
+        mode: failover
+        max_loss: 2%
+        prefer: latency
+        routes:
+          - 203.0.113.5:5200/udp
+          - 203.0.113.6:5300/udp
+```
+
+The client applies the 5% limit and the latency choice to the ingress paths. The server applies the 2% limit and the latency choice to the egress paths, from the keys that the client sends.
+
+### What mupctl shows
+
+- `mupctl status` and `mupctl paths` show `degraded` in the STATE column of a degraded path. An unhealthy path keeps the state `unhealthy`.
+- The groups table of `mupctl status` and `mupctl groups` shows the values in brackets after the mode, for example `failover (latency, loss 5%)`. A group without these values shows only its mode.
+- `mupctl members` shows `degraded` in the STATE column of a degraded member.
+- On a server, `mupctl get clients -o wide` shows the values next to the egress mode. In the EGRESS LIST, the active egress path has a `*` in front. A degraded egress path has the word `degraded` after it.
+
+### Versions of the settings
+
+Both keys need a client of v0.5.4. The loss limit of the ingress paths also needs a server of v0.5.3 or later, because the loss comes from the counts of the server. The keys of the egress block need a server of v0.5.4. An older server keeps the egress paths and ignores the keys. A bridge needs no update.
 
 ## Logs
 
