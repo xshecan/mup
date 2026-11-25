@@ -140,6 +140,10 @@ type Path struct {
 	// Degraded marks a healthy path that carries no data, because its loss
 	// is above the loss limit of its group. Reason then names the loss.
 	Degraded bool `json:"degraded,omitempty"`
+	// BandwidthBitsPerSecond is the bandwidth limit of the path, or zero for
+	// none. With BandwidthPerMember, each member of its pool has that limit.
+	BandwidthBitsPerSecond float64 `json:"bw_bps,omitzero"`
+	BandwidthPerMember     bool    `json:"bw_per_member,omitempty"`
 	Measurement
 }
 
@@ -288,6 +292,10 @@ type EgressPath struct {
 	Active   bool   `json:"active,omitempty"`
 	Degraded bool   `json:"degraded,omitempty"`
 	Reason   string `json:"reason,omitempty"`
+	// BandwidthBitsPerSecond is the bandwidth limit of the path, or zero for
+	// none. With BandwidthPerMember, each member of its pool has that limit.
+	BandwidthBitsPerSecond float64 `json:"bw_bps,omitzero"`
+	BandwidthPerMember     bool    `json:"bw_per_member,omitempty"`
 	Measurement
 }
 

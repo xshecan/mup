@@ -80,6 +80,28 @@
 #define MUP_ICMP_SEQUENCE_TAG(sequence) \
 	(((__u32)(sequence) >> MUP_ICMP_TAG_SHIFT) & 0xfU)
 #define MUP_ICMP_SEQUENCE_TOKEN(sequence) ((__u32)(sequence) & MUP_ICMP_TOKEN_MASK)
+/*
+ * A path with a bandwidth limit has MUP_LIMIT_PATH or MUP_LIMIT_MEMBER in its
+ * limit field. MUP_LIMIT_PATH gives the path one bucket. MUP_LIMIT_MEMBER
+ * gives each member of its pool a bucket of its own, and a path with one via
+ * address uses the bucket of member 0. A path without either bit has no limit.
+ */
+#define MUP_LIMIT_PATH (1U << 0)
+#define MUP_LIMIT_MEMBER (1U << 1)
+/*
+ * client_rate_buckets holds the bucket of each client path slot at the slot,
+ * and the bucket of member M of slot S at MUP_RATE_MEMBER_BASE + S *
+ * MUP_MAX_POOL + M.
+ */
+#define MUP_RATE_MEMBER_BASE 8
+#define MUP_RATE_BUCKETS (MUP_RATE_MEMBER_BASE + 8 * MUP_MAX_POOL)
+/*
+ * A down group with MUP_DOWN_GROUP_PREFERRED tries its preferred path first in
+ * the failover mode. A balancer group with MUP_DOWN_GROUP_WEIGHTED has paths
+ * of different weights. Go sets each flag only for the mode that uses it.
+ */
+#define MUP_DOWN_GROUP_PREFERRED (1U << 0)
+#define MUP_DOWN_GROUP_WEIGHTED (1U << 1)
 
 enum mup_mode {
 	MUP_MODE_FALLBACK = 0,
@@ -129,7 +151,8 @@ enum mup_drop_reason {
 	MUP_DROP_BRIDGE_SOURCE = 23,
 	MUP_DROP_BRIDGE_PACKET = 24,
 	MUP_DROP_BRIDGE_SIZE = 25,
-	MUP_DROP_REASON_COUNT = 26,
+	MUP_DROP_RATE_LIMIT = 26,
+	MUP_DROP_REASON_COUNT = 27,
 };
 
 struct control_v1 {
@@ -242,6 +265,18 @@ struct down_group_v1 {
 	__u8 path_mask;
 	__u8 healthy_mask;
 	__u8 icmp_mask;
+	/*
+	 * limit_mask has a bit for each path of the group with a bandwidth
+	 * limit. Go keeps it from the limits of the down paths. flags holds the
+	 * MUP_DOWN_GROUP_* flags, and preferred is the path that the failover
+	 * mode tries first with MUP_DOWN_GROUP_PREFERRED. weights holds the share
+	 * of each path in the balancer mode, and Go writes 1 for an equal share.
+	 */
+	__u8 limit_mask;
+	__u8 flags;
+	__u8 preferred;
+	__u8 padding;
+	__u8 weights[8];
 };
 
 struct down_path_key_v1 {
@@ -312,6 +347,39 @@ struct down_path_v1 {
 	 */
 	__u16 src_first;
 	__u16 src_last;
+	/*
+	 * The MUP_LIMIT_* bits of the bandwidth limit of the path. Its buckets
+	 * are in server_rate_buckets.
+	 */
+	__u8 limit;
+	__u8 padding[3];
+};
+
+/*
+ * rate_bucket_v1 is the bucket of one bandwidth limit, in the virtual
+ * scheduling form of GCRA. cost_q16 is the cost of one byte in nanoseconds, in
+ * 48.16 fixed point, and burst_ns is the burst that the bucket allows. Go
+ * writes both. tat_ns is the theoretical arrival time, which the programs
+ * move with a compare-and-swap. A bucket with a cost_q16 of 0 has room for
+ * every packet.
+ */
+struct rate_bucket_v1 {
+	__u64 tat_ns;
+	__u64 cost_q16;
+	__u64 burst_ns;
+};
+
+/*
+ * rate_bucket_key_v1 names a bucket of one down path of a client on a server:
+ * member 0 for a limit of the whole path, or the index of the pool member for
+ * a limit per member. It has the layout of down_path_key_v1, so the server
+ * builds it in the same scratch value. Go creates and deletes the buckets with
+ * the path.
+ */
+struct rate_bucket_key_v1 {
+	struct client_key_v1 client;
+	__u32 path_id;
+	__u32 member;
 };
 
 /*
@@ -464,6 +532,14 @@ struct path_config_v1 {
 	 * It is zero on a route that the client sends itself.
 	 */
 	__be32 bridge;
+	/*
+	 * limit holds the MUP_LIMIT_* bits of the bandwidth limit of the path,
+	 * with its buckets in client_rate_buckets. weight is the share of the
+	 * path in the balancer mode, and Go writes 1 for an equal share.
+	 */
+	__u8 limit;
+	__u8 weight;
+	__u8 padding[2];
 };
 
 /*
@@ -565,7 +641,7 @@ _Static_assert(sizeof(struct peer_token_value_v1) == 16, "peer_token_value_v1 AB
 _Static_assert(sizeof(struct peer_endpoint_value_v1) == 24, "peer_endpoint_value_v1 ABI");
 _Static_assert(sizeof(struct server_route_value_v1) == 40, "server_route_value_v1 ABI");
 _Static_assert(sizeof(struct server_reverse_value_v1) == 64, "server_reverse_value_v1 ABI");
-_Static_assert(sizeof(struct path_config_v1) == 20, "path_config_v1 ABI");
+_Static_assert(sizeof(struct path_config_v1) == 24, "path_config_v1 ABI");
 _Static_assert(sizeof(struct path_return_v1) == 8, "path_return_v1 ABI");
 _Static_assert(sizeof(struct up_reflect_v1) == 72, "up_reflect_v1 ABI");
 _Static_assert(sizeof(struct reflector_key_v1) == 8, "reflector_key_v1 ABI");
@@ -576,9 +652,14 @@ _Static_assert(sizeof(struct event_v1) == 32, "event_v1 ABI");
 _Static_assert(sizeof(struct client_down_path_v1) == 24, "client_down_path_v1 ABI");
 _Static_assert(sizeof(struct client_duplicate_key_v1) == 28, "client_duplicate_key_v1 ABI");
 _Static_assert(sizeof(struct down_group_key_v1) == 24, "down_group_key_v1 ABI");
-_Static_assert(sizeof(struct down_group_v1) == 4, "down_group_v1 ABI");
+_Static_assert(sizeof(struct down_group_v1) == 16, "down_group_v1 ABI");
 _Static_assert(sizeof(struct down_path_key_v1) == 24, "down_path_key_v1 ABI");
-_Static_assert(sizeof(struct down_path_v1) == 92, "down_path_v1 ABI");
+_Static_assert(sizeof(struct down_path_v1) == 96, "down_path_v1 ABI");
+_Static_assert(sizeof(struct rate_bucket_v1) == 24, "rate_bucket_v1 ABI");
+_Static_assert(sizeof(struct rate_bucket_key_v1) == sizeof(struct down_path_key_v1) &&
+		       __builtin_offsetof(struct rate_bucket_key_v1, path_id) ==
+			       __builtin_offsetof(struct down_path_key_v1, path_id),
+	       "rate_bucket_key_v1 has the layout of down_path_key_v1");
 _Static_assert(sizeof(struct path_counter_v1) == 16, "path_counter_v1 ABI");
 _Static_assert(sizeof(struct path_counter_key_v1) == 24, "path_counter_key_v1 ABI");
 _Static_assert(sizeof(struct path_counter_key_v1) == sizeof(struct down_path_key_v1) &&

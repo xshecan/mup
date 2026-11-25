@@ -1,12 +1,12 @@
 package app
 
 import (
-	"math/bits"
 	"net/netip"
 	"slices"
 	"time"
 
 	"github.com/xshecan/mup/config"
+	"github.com/xshecan/mup/dataplane"
 	"github.com/xshecan/mup/measure"
 )
 
@@ -69,13 +69,18 @@ func (c *clientController) evaluateDataLocked(now time.Time) error {
 		c.reflectMu.Unlock()
 	}
 	c.dataMasksLocked(true)
+	if err := c.syncPathSettingsLocked(); err != nil {
+		return err
+	}
 	return c.writePathStateLocked(false)
 }
 
 // dataMasksLocked computes the data set of each group from the health, the
 // loss gates and the latency choice. On a health change, tick is false, and a
 // group that prefers latency keeps its path while that path stays usable, so
-// only a MEASURE round moves it to a faster path.
+// only a MEASURE round moves it to a faster path. The data set is the usable
+// set, and the chosen path of a latency choice becomes the head of the order
+// that syncPathSettingsLocked writes.
 func (c *clientController) dataMasksLocked(tick bool) {
 	for _, group := range c.groups {
 		var candidates []dataCandidate
@@ -95,18 +100,107 @@ func (c *clientController) dataMasksLocked(tick bool) {
 		if group.chooser != nil && group.settings.Mode == config.ModeFailover {
 			chooser = group.chooser
 		}
+		if chooser == nil {
+			group.hasHead = false
+		}
 		if chooser != nil && !tick && group.hasChosen {
-			if mask := dataSet(candidates, nil, c.lastMeasure); mask&(1<<group.chosen) != 0 {
-				group.dataMask = 1 << group.chosen
+			if mask, _, _ := dataSet(candidates, nil, c.lastMeasure); mask&(1<<group.chosen) != 0 {
+				group.dataMask = mask
 				continue
 			}
 		}
-		group.dataMask = dataSet(candidates, chooser, c.lastMeasure)
+		mask, chosen, ok := dataSet(candidates, chooser, c.lastMeasure)
+		group.dataMask = mask
 		group.hasChosen = false
-		if chooser != nil && group.dataMask != 0 {
-			group.chosen, group.hasChosen = bits.TrailingZeros8(group.dataMask), true
+		if chooser != nil && ok && mask&(1<<chosen) != 0 {
+			group.chosen, group.hasChosen = chosen, true
+			group.head, group.hasHead = chosen, true
 		}
 	}
+}
+
+// groupPathsLocked returns the paths of a group by slot, with current in its
+// slot. A path that is about to join the group is not in c.slots yet.
+func (c *clientController) groupPathsLocked(group *pathGroup, slot int, current *clientPath) [config.MaxPaths]*clientPath {
+	var paths [config.MaxPaths]*clientPath
+	for index, path := range c.slots {
+		if path != nil && path.group == group {
+			paths[index] = path
+		}
+	}
+	paths[slot] = current
+	return paths
+}
+
+// pathSettingsLocked is the dataplane setting of a path in slot: the path on
+// its server port with its rate limit, the priority of the order of its group,
+// and its balancer weight.
+func (c *clientController) pathSettingsLocked(slot int, current *clientPath) dataplane.PathSettings {
+	paths := c.groupPathsLocked(current.group, slot, current)
+	settings := clientPathSettings(current.runtimePath(), c.client.AdvertisedIP, current.ifindex, dataPriority(current.group, paths, slot))
+	shares := make([]rateShare, 0, len(paths))
+	for index, path := range paths {
+		if path != nil {
+			shares = append(shares, rateShare{id: index, limit: rateLimitOf(path.path), members: len(candidateMembers(path.path))})
+		}
+	}
+	settings.Weight = balancerWeights(current.group.settings.Mode, shares)[slot]
+	return settings
+}
+
+// dataPriority is the priority that the dataplane gets for the path in slot.
+// Without a latency choice it is the configured priority. With one, the
+// chosen path gets zero, and the other paths of the group get 1, 2 and so on
+// in their configured order, so the failover mode tries the chosen path first
+// and then the others as before.
+func dataPriority(group *pathGroup, paths [config.MaxPaths]*clientPath, slot int) uint8 {
+	current := paths[slot]
+	if !group.hasHead || group.head < 0 || group.head >= len(paths) || paths[group.head] == nil {
+		return current.priority
+	}
+	if slot == group.head {
+		return 0
+	}
+	rank := uint8(1)
+	for index, other := range paths {
+		if other == nil || index == slot || index == group.head {
+			continue
+		}
+		if other.priority < current.priority || other.priority == current.priority && index < slot {
+			rank++
+		}
+	}
+	return rank
+}
+
+// syncPathSettingsLocked writes the setting of each path whose priority or
+// weight changed. Without a latency choice and without rate limits, nothing
+// changes, and nothing is written. The dataplane clears the member list of a
+// slot when it writes the path, so an ingress reflect path gets its list again.
+func (c *clientController) syncPathSettingsLocked() error {
+	for slot, current := range c.slots {
+		if current == nil {
+			continue
+		}
+		settings := c.pathSettingsLocked(slot, current)
+		if settings == current.written {
+			continue
+		}
+		if err := c.dataplane.SetPath(slot, settings); err != nil {
+			return err
+		}
+		current.written = settings
+		if !current.path.IngressReflect(current.group.egresses != nil) {
+			continue
+		}
+		c.reflectMu.Lock()
+		err := c.writeReflectMembersLocked(slot, current.path.Balance == config.BalancePerPacket)
+		c.reflectMu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // writeReflectMembersLocked writes the member list of an ingress reflect path:

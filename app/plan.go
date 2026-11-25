@@ -63,6 +63,7 @@ func buildPlan(appConfig config.App, nonce uint64, resolver routeResolver) (runt
 		var ingressReflectMask uint32
 		for _, group := range client.Groups {
 			var pathMask uint8
+			first := len(settings.Paths)
 			for _, path := range group.Paths {
 				slot := len(settings.Paths)
 				// An ingress reflect path sends to the via host, so the interface
@@ -90,6 +91,10 @@ func buildPlan(appConfig config.App, nonce uint64, resolver routeResolver) (runt
 				attachIfindexes = append(attachIfindexes, ifindex)
 				settings.Paths = append(settings.Paths, clientPathSettings(path, client.AdvertisedIP, ifindex, uint8(slot)))
 				pathMask |= 1 << slot
+			}
+			weights := balancerWeights(group.Mode, groupRateShares(group.Paths, first))
+			for slot := first; slot < len(settings.Paths); slot++ {
+				settings.Paths[slot].Weight = weights[slot]
 			}
 			var egressMask uint8
 			for _, egress := range group.EgressPaths {
@@ -187,5 +192,16 @@ func clientPathSettings(path config.Path, advertisedIP netip.Addr, ifindex int, 
 		ProxyBridge:   path.ProxyBridge,
 		SrcFirst:      path.SrcFirst,
 		SrcLast:       path.SrcLast,
+		Limit:         rateLimitOf(path),
 	}
+}
+
+// groupRateShares returns the rate limits of the ingress paths of a group,
+// whose first path is in slot first.
+func groupRateShares(paths []config.Path, first int) []rateShare {
+	shares := make([]rateShare, 0, len(paths))
+	for index, path := range paths {
+		shares = append(shares, rateShare{id: first + index, limit: rateLimitOf(path), members: len(candidateMembers(path))})
+	}
+	return shares
 }

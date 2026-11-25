@@ -430,6 +430,9 @@ func NormalizeEgressPath(path Path, bridgeEntry bool) (Path, error) {
 		NamedServer:  path.Server,
 		SrcFirst:     path.SrcFirst,
 		SrcLast:      path.SrcLast,
+
+		BandwidthBitsPerSecond: path.BandwidthBitsPerSecond,
+		BandwidthPerMember:     path.BandwidthPerMember,
 	}, nil
 }
 
@@ -665,6 +668,17 @@ type Path struct {
 	// range. Zero means no range, and the path keeps one fixed value.
 	SrcFirst uint16
 	SrcLast  uint16
+	// BandwidthBitsPerSecond is the rate limit of the data on the path in bits
+	// per second, or zero for none. With BandwidthPerMember, each member of the
+	// via of the path has its own limit of that rate, and the path has none of
+	// its own.
+	BandwidthBitsPerSecond uint64
+	BandwidthPerMember     bool
+}
+
+// HasBandwidth reports whether the path has a rate limit.
+func (p Path) HasBandwidth() bool {
+	return p.BandwidthBitsPerSecond != 0
 }
 
 // Kind names the path type for the status output: "bridge" or "route".
@@ -741,7 +755,8 @@ func (p Path) SharesServerPort(other Path) bool {
 }
 
 // String formats the path as SERVER[%IFACE]:PORT[-LAST]/TRANSPORT
-// [via RETURN_IP] [src FIRST-LAST], the form that ParsePath accepts. A bridge
+// [via RETURN_IP] [src FIRST-LAST] [bw RATE [per-member]] [bridge BRIDGE_IP],
+// the form that ParsePath accepts. A bridge
 // that spoofs the last leg prints as the egress route that named it, with the
 // bridge suffix.
 func (p Path) String() string {
@@ -760,6 +775,12 @@ func (p Path) String() string {
 	}
 	if p.HasSrc() {
 		text += " src " + p.srcText()
+	}
+	if p.HasBandwidth() {
+		text += " bw " + FormatRate(p.BandwidthBitsPerSecond)
+		if p.BandwidthPerMember {
+			text += " per-member"
+		}
 	}
 	if p.ProxyBridge.IsValid() {
 		text += " bridge " + p.ProxyBridge.String()
@@ -883,6 +904,17 @@ func (p Path) validate() error {
 			return errors.New("source range must be FIRST-LAST between 1 and 65535, with FIRST not above LAST")
 		}
 	}
+	if p.HasBandwidth() && (p.BandwidthBitsPerSecond < MinRate || p.BandwidthBitsPerSecond > MaxRate) {
+		return fmt.Errorf("bw %s is outside the rates from %s to %s", FormatRate(p.BandwidthBitsPerSecond), FormatRate(MinRate), FormatRate(MaxRate))
+	}
+	if p.BandwidthPerMember {
+		if !p.HasBandwidth() {
+			return errors.New("per-member needs bw RATE before it")
+		}
+		if !p.ReturnIP.IsValid() {
+			return errors.New("bw per-member needs a via, because each member of the via has its own limit")
+		}
+	}
 	return nil
 }
 
@@ -980,7 +1012,10 @@ func (b Bridge) Validate() error {
 // PORT can be a range FIRST-LAST. It accepts an optional "via RETURN_IP", or
 // "via POOL_CIDR" with an optional "per-peer" or "per-packet" after the pool.
 // An optional "src FIRST-LAST" (or "src N") sets the source range of the path.
-// It comes after the via part. A trailing "bridge BRIDGE_IP" needs a via. On an ingress route it makes the
+// It comes after the via part. An optional "bw RATE" sets the rate limit of the
+// path, and "per-member" right after the rate gives each member of the via its
+// own limit. It comes after the via part and the source range. A trailing
+// "bridge BRIDGE_IP" needs a via. On an ingress route it makes the
 // bridge emit the reflected ingress. On an egress route it makes the bridge
 // spoof the reply that the server wraps for it. Other paths refuse the suffix.
 func ParsePath(raw string) (Path, error) {
@@ -990,7 +1025,9 @@ func ParsePath(raw string) (Path, error) {
 	var proxyBridge netip.Addr
 	var srcFirst, srcLast uint16
 	balance := BalancePerPeer
-	usage := errors.New("path must use IPv4:PORT/udp or /icmp, with an optional via RETURN_IP, or via POOL_CIDR with an optional per-peer or per-packet, then an optional src FIRST-LAST, then an optional bridge BRIDGE_IP")
+	var bandwidth uint64
+	var perMember bool
+	usage := errors.New("path must use IPv4:PORT/udp or /icmp, with an optional via RETURN_IP, or via POOL_CIDR with an optional per-peer or per-packet, then an optional src FIRST-LAST, then an optional bw RATE with an optional per-member, then an optional bridge BRIDGE_IP")
 	// A trailing "bridge BRIDGE" names a bridge that emits the reflected ingress.
 	if n := len(fields); n >= 2 && fields[n-2] == "bridge" {
 		address, err := netip.ParseAddr(fields[n-1])
@@ -999,6 +1036,33 @@ func ParsePath(raw string) (Path, error) {
 		}
 		proxyBridge = address
 		fields = fields[:n-2]
+	}
+	// A trailing "bw RATE" or "bw RATE per-member" sets the rate limit.
+	if n := len(fields); n >= 1 && fields[n-1] == "per-member" {
+		if n < 3 || fields[n-3] != "bw" {
+			return Path{}, errors.New("per-member comes right after bw RATE")
+		}
+		perMember = true
+		fields = fields[:n-1]
+	}
+	if n := len(fields); n >= 1 && fields[n-1] == "bw" {
+		return Path{}, errors.New("bw needs a rate, such as 10mbit")
+	} else if n >= 3 && fields[n-2] == "bw" {
+		rate, err := ParseRate(fields[n-1])
+		if err != nil {
+			return Path{}, err
+		}
+		bandwidth = rate
+		fields = fields[:n-2]
+	}
+	if slices.Contains(fields, "bw") {
+		if bandwidth != 0 {
+			return Path{}, errors.New("a path takes bw once")
+		}
+		return Path{}, errors.New("bw RATE comes after via and src, and before bridge")
+	}
+	if slices.Contains(fields, "per-member") {
+		return Path{}, errors.New("per-member comes right after bw RATE")
 	}
 	// A trailing "src FIRST-LAST" sets the source range of the data packets.
 	if n := len(fields); n >= 2 && fields[n-1] == "src" {
@@ -1078,11 +1142,90 @@ func ParsePath(raw string) (Path, error) {
 	if err != nil {
 		return Path{}, errors.New("server path address must be a nonzero IPv4")
 	}
-	path := Path{Server: address, ServerPort: serverPort, LastPort: lastPort, Transport: transportID, Interface: interfaceName, ReturnIP: returnIP, ReturnPrefix: returnPrefix, Balance: balance, ProxyBridge: proxyBridge, SrcFirst: srcFirst, SrcLast: srcLast}
+	path := Path{Server: address, ServerPort: serverPort, LastPort: lastPort, Transport: transportID, Interface: interfaceName, ReturnIP: returnIP, ReturnPrefix: returnPrefix, Balance: balance, ProxyBridge: proxyBridge, SrcFirst: srcFirst, SrcLast: srcLast,
+		BandwidthBitsPerSecond: bandwidth, BandwidthPerMember: perMember}
 	if err := path.validate(); err != nil {
 		return Path{}, err
 	}
 	return path, nil
+}
+
+// MinRate and MaxRate are the smallest and the largest rate limit of a path,
+// in bits per second: 8 kbit and 100 gbit.
+const (
+	MinRate uint64 = 8_000
+	MaxRate uint64 = 100_000_000_000
+)
+
+// rateUnits are the units of a rate, in bits per second. They are decimal,
+// and the bps forms are synonyms of the bit forms.
+var rateUnits = []struct {
+	name string
+	bits float64
+}{
+	{"kbit", 1e3}, {"mbit", 1e6}, {"gbit", 1e9},
+	{"kbps", 1e3}, {"mbps", 1e6}, {"gbps", 1e9},
+}
+
+// ParseRate reads a rate such as 10mbit, 500kbit or 1.5gbit, with no space
+// between the number and the unit, and returns it in bits per second. The
+// unit is case-insensitive. The rate must be a whole number of kbit from 8
+// kbit to 100 gbit.
+func ParseRate(raw string) (uint64, error) {
+	text := strings.ToLower(raw)
+	for _, unit := range rateUnits {
+		number, ok := strings.CutSuffix(text, unit.name)
+		if !ok {
+			continue
+		}
+		if !isDecimal(number) {
+			break
+		}
+		value, err := strconv.ParseFloat(number, 64)
+		if err != nil || value <= 0 || math.IsInf(value, 0) {
+			break
+		}
+		kbit := value * unit.bits / 1e3
+		whole := math.Round(kbit)
+		if math.Abs(kbit-whole) > 1e-6*math.Max(1, kbit) {
+			return 0, fmt.Errorf("invalid bw %q: use a whole number of kbit, such as 1.5mbit or 1500kbit", raw)
+		}
+		if whole < float64(MinRate/1e3) || whole > float64(MaxRate/1e3) {
+			return 0, fmt.Errorf("invalid bw %q: use a rate from 8kbit to 100gbit", raw)
+		}
+		return uint64(whole) * 1e3, nil
+	}
+	return 0, fmt.Errorf("invalid bw %q: use a positive number and a unit with no space, such as 10mbit, 500kbit or 1.5gbit (kbit, mbit, gbit, kbps, mbps, gbps)", raw)
+}
+
+// isDecimal reports whether text is digits with at most one point and at
+// least one digit.
+func isDecimal(text string) bool {
+	digits, points := 0, 0
+	for _, char := range text {
+		switch {
+		case char >= '0' && char <= '9':
+			digits++
+		case char == '.':
+			points++
+		default:
+			return false
+		}
+	}
+	return digits > 0 && points <= 1
+}
+
+// FormatRate writes a rate in bits per second in the form that ParseRate
+// reads: in gbit from 1 gbit, in mbit from 1 mbit, and in kbit below.
+func FormatRate(bitsPerSecond uint64) string {
+	unit, name := 1e3, "kbit"
+	switch {
+	case bitsPerSecond >= 1e9:
+		unit, name = 1e9, "gbit"
+	case bitsPerSecond >= 1e6:
+		unit, name = 1e6, "mbit"
+	}
+	return strconv.FormatFloat(float64(bitsPerSecond)/unit, 'f', -1, 64) + name
 }
 
 // parseSourceRange parses N or FIRST-LAST, with both values between 1 and 65535.

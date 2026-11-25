@@ -23,6 +23,7 @@ var (
 	ErrControlPrefix      = errors.New("invalid mup control pool prefix")
 	ErrControlMode        = errors.New("invalid mup control egress mode")
 	ErrControlSourceRange = errors.New("invalid mup control source range")
+	ErrControlRate        = errors.New("invalid mup control rate limit")
 	ErrZeroInstanceNonce  = errors.New("instance nonce must be nonzero")
 )
 
@@ -66,6 +67,12 @@ type ControlFrame struct {
 	// MEASURE_REPLY, LeaseSeconds holds the count code of the sender instead
 	// of a lease, and zero there means no count.
 	PeerCount uint32
+	// LimitKbps and LimitFlags are the rate limit of an egress path in
+	// kilobits per second and its flags, at offsets 36 and 40. Only an
+	// EGRESS_LIMIT carries them, and its sequence and lease are zero. A rate
+	// of zero removes the limit.
+	LimitKbps  uint32
+	LimitFlags uint32
 }
 
 func EncodeControlFrame(dst []byte, frame ControlFrame) error {
@@ -98,6 +105,10 @@ func EncodeControlFrame(dst []byte, frame ControlFrame) error {
 	binary.BigEndian.PutUint64(dst[28:36], frame.InstanceNonce)
 	binary.BigEndian.PutUint32(dst[36:40], frame.Sequence)
 	binary.BigEndian.PutUint32(dst[40:44], frame.LeaseSeconds)
+	if frame.Type == ControlEgressLimit {
+		binary.BigEndian.PutUint32(dst[36:40], frame.LimitKbps)
+		binary.BigEndian.PutUint32(dst[40:44], frame.LimitFlags)
+	}
 	if frame.Type == ControlEgressRegister {
 		dst[18] = frame.EgressMode
 		server := frame.EgressServer.As4()
@@ -166,6 +177,10 @@ func DecodeControlFrame(src []byte) (ControlFrame, error) {
 	if frame.Type == ControlMeasureReply {
 		frame.PeerCount = binary.BigEndian.Uint32(src[44:48])
 	}
+	if frame.Type == ControlEgressLimit {
+		frame.LimitKbps, frame.LimitFlags = frame.Sequence, frame.LeaseSeconds
+		frame.Sequence, frame.LeaseSeconds = 0, 0
+	}
 	if frame.Type == ControlEgressRegister {
 		frame.EgressMode = src[18]
 		frame.EgressServer = netip.AddrFrom4([4]byte(src[44:48]))
@@ -204,8 +219,26 @@ func RandomInstanceNonce() (uint64, error) {
 }
 
 func validateControlFrame(frame ControlFrame) error {
-	if frame.Type < ControlRegister || frame.Type > ControlMeasureReply {
+	if frame.Type < ControlRegister || frame.Type > ControlEgressLimit {
 		return ErrControlType
+	}
+	if frame.Type == ControlEgressLimit {
+		// The rate and its flags take the bytes of the sequence and the
+		// lease, and the frame has no flag of its own.
+		if frame.Flags != 0 || frame.LimitFlags&^EgressLimitPerMember != 0 {
+			return ErrControlFlags
+		}
+		if frame.Sequence != 0 || frame.LeaseSeconds != 0 {
+			return ErrControlReserved
+		}
+		if frame.LimitKbps == 0 && frame.LimitFlags != 0 {
+			return ErrControlFlags
+		}
+		if frame.LimitKbps != 0 && (frame.LimitKbps < MinEgressLimitKbps || frame.LimitKbps > MaxEgressLimitKbps) {
+			return ErrControlRate
+		}
+	} else if frame.LimitKbps != 0 || frame.LimitFlags != 0 {
+		return ErrControlReserved
 	}
 	if frame.Transport != TransportUDP && frame.Transport != TransportICMP {
 		return ErrControlTransport

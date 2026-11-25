@@ -47,8 +47,8 @@ func TestLoadStartsOverChangedPins(t *testing.T) {
 	}
 	defer runtime.Close()
 	paths, err := runtime.objects.PathConfig.Info()
-	if err != nil || paths.ValueSize != 20 {
-		t.Fatalf("path_config value size = %d (%v), want 20", paths.ValueSize, err)
+	if err != nil || paths.ValueSize != 24 {
+		t.Fatalf("path_config value size = %d (%v), want 24", paths.ValueSize, err)
 	}
 	stats, err := runtime.objects.Stats.Info()
 	if err != nil || stats.MaxEntries != uint32(dropReasonCount) {

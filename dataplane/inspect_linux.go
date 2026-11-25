@@ -12,24 +12,40 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-// SetPath writes the configuration of one client path slot.
+// SetPath writes the configuration of one client path slot. A slot that holds
+// the same path already keeps its reflect members and its bucket, unless its
+// limit changed. A new path on the slot clears both.
 func (r *Runtime) SetPath(slot int, path PathSettings) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
 		return errors.New("set path: MUP dataplane is closed")
 	}
-	return applyPath(r.objects.PathConfig, r.objects.PathReturns, r.objects.UpReflectMembers, r.objects.ClientPathSrc, slot, path)
+	return setClientPath(r.clientPathMaps(), slot, path)
 }
 
-// ClearPath removes the configuration of one client path slot.
+// ClearPath removes the configuration of one client path slot and empties its
+// buckets.
 func (r *Runtime) ClearPath(slot int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
 		return errors.New("clear path: MUP dataplane is closed")
 	}
-	return clearPath(r.objects.PathConfig, r.objects.PathReturns, r.objects.UpReflectMembers, r.objects.ClientPathSrc, slot)
+	if err := clearPath(r.objects.PathConfig, r.objects.PathReturns, r.objects.UpReflectMembers, r.objects.ClientPathSrc, slot); err != nil {
+		return err
+	}
+	return clearClientBuckets(r.objects.ClientRateBuckets, slot)
+}
+
+func (r *Runtime) clientPathMaps() clientPathMaps {
+	return clientPathMaps{
+		paths:          r.objects.PathConfig,
+		returns:        r.objects.PathReturns,
+		ingressReflect: r.objects.UpReflectMembers,
+		pathSrc:        r.objects.ClientPathSrc,
+		buckets:        r.objects.ClientRateBuckets,
+	}
 }
 
 // SetIngressReflect writes the healthy reflect members of an ingress reflect path slot.

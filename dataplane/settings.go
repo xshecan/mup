@@ -52,6 +52,19 @@ type PathSettings struct {
 	// no range.
 	SrcFirst uint16
 	SrcLast  uint16
+	// Limit is the bandwidth limit of the data that the client sends on the
+	// path. Weight is the share of the path in the balancer mode, and zero
+	// means the same share as a weight of one.
+	Limit  RateLimit
+	Weight uint8
+}
+
+// RateLimit is the bandwidth limit of a path. The zero value is no limit.
+// With PerMember, each member of the pool of the path has its own limit of
+// BitsPerSecond, and the path has no limit of its own.
+type RateLimit struct {
+	BitsPerSecond uint64
+	PerMember     bool
 }
 
 type ServerSettings struct {
@@ -248,7 +261,7 @@ func encodePathSettings(index int, path PathSettings) (mupPathConfigV1, error) {
 			return mupPathConfigV1{}, err
 		}
 	}
-	return mupPathConfigV1{
+	encoded := mupPathConfigV1{
 		DestinationIp: destinationIP,
 		SourceIp:      sourceIP,
 		Ifindex:       uint32(path.Ifindex),
@@ -256,7 +269,9 @@ func encodePathSettings(index int, path PathSettings) (mupPathConfigV1, error) {
 		Transport:     uint8(path.Transport),
 		Priority:      path.Priority,
 		Bridge:        bridge,
-	}, nil
+	}
+	setPathLimitFields(&encoded, path)
+	return encoded, nil
 }
 
 // encodePathSrc encodes the source range of a client path or egress path.

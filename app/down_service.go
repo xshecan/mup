@@ -29,7 +29,8 @@ type egressService struct {
 	sequence atomic.Uint32
 }
 
-// handle answers a EGRESS_REGISTER or a PROBE_REPLY of an egress path. The
+// handle answers a EGRESS_REGISTER, an EGRESS_LIMIT or a PROBE_REPLY of an
+// egress path. The
 // server takes such a frame from the advertised IP, or from a via host when
 // reflected reports that the frame arrived on an ingress reflect path of its
 // client. It reports false for any other frame.
@@ -45,6 +46,15 @@ func (d *egressService) handle(frame protocol.ControlFrame, source netip.Addr, r
 			return true
 		}
 		if err := d.registry.register(frame, time.Now()); err != nil {
+			d.logger.Printf("mup egress path %d of %s: %v", frame.PathID, frame.AdvertisedIP, err)
+		}
+		return true
+	case frame.Type == protocol.ControlEgressLimit:
+		if !trusted {
+			d.logger.Printf("mup egress path %d of %s: EGRESS_LIMIT from %s is not from the client", frame.PathID, frame.AdvertisedIP, source)
+			return true
+		}
+		if err := d.registry.limit(frame, time.Now()); err != nil {
 			d.logger.Printf("mup egress path %d of %s: %v", frame.PathID, frame.AdvertisedIP, err)
 		}
 		return true

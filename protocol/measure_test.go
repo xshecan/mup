@@ -115,7 +115,7 @@ func TestMeasureFrameRules(t *testing.T) {
 		{name: "peer count in an ACK", base: measureFrame, alter: func(f *ControlFrame) {
 			f.Type, f.PeerCount = ControlRegisterACK, 1
 		}, err: ErrControlReserved},
-		{name: "unknown type", base: measureFrame, alter: func(f *ControlFrame) { f.Type = ControlMeasureReply + 1 }, err: ErrControlType},
+		{name: "unknown type", base: measureFrame, alter: func(f *ControlFrame) { f.Type = ControlEgressLimit + 1 }, err: ErrControlType},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -155,7 +155,7 @@ func TestDecodeKeepsTheMeasureTailZero(t *testing.T) {
 		t.Fatalf("DecodeControlFrame error = %v, want %v", err, ErrControlReserved)
 	}
 	unknown := bytes.Clone(buf)
-	unknown[5] = byte(ControlMeasureReply + 1)
+	unknown[5] = byte(ControlEgressLimit + 1)
 	if _, err := DecodeControlFrame(unknown); !errors.Is(err, ErrControlType) {
 		t.Fatalf("DecodeControlFrame error = %v, want %v", err, ErrControlType)
 	}

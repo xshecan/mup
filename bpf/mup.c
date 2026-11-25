@@ -264,6 +264,34 @@ struct {
 } server_path_counters SEC(".maps");
 
 /*
+ * client_rate_buckets holds the buckets of the bandwidth limits of the client
+ * path slots, at the indexes that mup_abi.h gives. Go writes the cost and the
+ * burst of a bucket, and starts it over only when the limit of its slot
+ * changes or a new path takes the slot.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, MUP_RATE_BUCKETS);
+	MUP_PINNED;
+	__type(key, __u32);
+	__type(value, struct rate_bucket_v1);
+} client_rate_buckets SEC(".maps");
+
+/*
+ * server_rate_buckets holds the buckets of the bandwidth limits of the down
+ * paths of the clients on a server. Go creates them with a path that has a
+ * limit and deletes them with the path. A path without a bucket has room.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 32768);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	MUP_PINNED;
+	__type(key, struct rate_bucket_key_v1);
+	__type(value, struct rate_bucket_v1);
+} server_rate_buckets SEC(".maps");
+
+/*
  * bridge_config holds the entries of the bridge. The port of a packet picks
  * the entry, and an entry with a zero server_ip is unused.
  */
@@ -358,17 +386,64 @@ struct {
 /*
  * send_scratch holds the large values of a send that would not fit on the
  * stack of a function that a program calls: the FIB lookup of a clone, and
- * the key of a down path. The key of a path counter has the same layout, so
- * it shares the place of the down path key. It holds no state, so it is not
- * pinned.
+ * the key of a down path. The keys of a path counter, a bucket and a down
+ * group have the same size, so they share the place of the down path key.
+ * plan_members holds the member choice of a send plan, 8 bits for each path:
+ * 0 for the normal member choice, or the member index plus one. It holds no
+ * state, so it is not pinned.
  */
 struct send_scratch_layout {
 	struct bpf_fib_lookup fib;
 	union {
 		struct down_path_key_v1 key;
 		struct path_counter_key_v1 counter_key;
+		struct rate_bucket_key_v1 bucket_key;
+		struct down_group_key_v1 group_key;
 	};
+	__u64 plan_members;
+	/*
+	 * The running values of mup_client_plan and mup_down_plan. They live
+	 * here and not in registers, so the states of the verifier at each step
+	 * of their loops are the same.
+	 */
+	__u32 plan_mask;
+	__u32 plan_code;
+	__u32 plan_count;
+	__u32 plan_total;
+	__u32 plan_weight_or;
+	__u32 plan_weight_and;
+	__u32 plan_limit_and;
+	__u32 plan_walk;
+	__u32 plan_first;
+	__u32 plan_best;
+	/*
+	 * The inputs of mup_down_plan. The server ingress program leaves only
+	 * 48 bytes of stack to a function that it calls, so the plan keeps its
+	 * values here and reads them again after each helper call.
+	 */
+	__u64 plan_nonce;
+	__u64 plan_now;
+	__u32 plan_ip;
+	__u32 plan_bytes;
+	__u32 plan_token;
+	__u32 plan_usable;
+	__u32 plan_limit;
+	__u32 plan_cost;
+	__u32 plan_listen;
+	__u32 plan_mode;
+	__u32 plan_weighted;
+	__u32 plan_flags;
+	__u32 plan_preferred;
+	__u8 plan_weights[8];
 };
+
+/*
+ * MUP_PLAN reads a plan value from the scratch memory. The compiler loads the
+ * value again after each helper call, because the call can change the memory.
+ * A volatile read is not used here: the compiler then keeps the address of
+ * each field on the stack, and the stack is what the plan must save.
+ */
+#define MUP_PLAN(scratch, field) ((scratch)->field)
 
 /* bpf2go cannot describe the unions of bpf_fib_lookup, so the map holds words. */
 struct send_scratch {
@@ -672,11 +747,13 @@ static __always_inline int mup_src_match(const struct path_src_v1 *src,
  * source becomes the server and the destination becomes the member, so the
  * member answers the server with an Echo Reply. On a UDP path the source
  * becomes the member and the destination stays the server. A slot without an
- * entry, or with no member, keeps the path as it is.
+ * entry, or with no member, keeps the path as it is. A member_code that is not
+ * 0 is the member index plus one that the bandwidth limit chose, and it takes
+ * the place of the balance mode.
  */
 static __always_inline void apply_up_reflect(__u32 index,
 					     struct path_config_v1 *path,
-					     __u32 peer_token)
+					     __u32 peer_token, __u32 member_code)
 {
 	struct up_reflect_v1 *reflect;
 	__u32 cursor_key = 0;
@@ -691,7 +768,9 @@ static __always_inline void apply_up_reflect(__u32 index,
 	count = reflect->count;
 	if (count == 0 || count > MUP_MAX_POOL)
 		return;
-	if (reflect->flags & MUP_FLAG_BALANCE_PER_PACKET) {
+	if (member_code) {
+		slot = member_code - 1;
+	} else if (reflect->flags & MUP_FLAG_BALANCE_PER_PACKET) {
 		__u32 *cursor = bpf_map_lookup_elem(&up_reflect_cursor,
 						    &cursor_key);
 
@@ -720,9 +799,317 @@ static __always_inline void apply_up_reflect(__u32 index,
 	}
 }
 
+/*
+ * mup_bucket_take decides whether bucket has room for a packet of bytes bytes
+ * at now, and takes the bytes when it has. It is the virtual scheduling form of
+ * GCRA: the packet moves the theoretical arrival time by its cost, and it has
+ * room when that time stays at most burst_ns ahead of now. A compare-and-swap
+ * writes the new time, so all CPUs share one bucket without a lock. A packet
+ * that loses the race to another CPU has room without a write. A second
+ * attempt would multiply the states of the verifier at each call, and the
+ * limit stays close without it.
+ *
+ * The later of tat and now comes without a branch: ahead is all ones when tat
+ * is after now. The times are far below 2^63, so the sign of their difference
+ * tells. The barrier keeps the compiler from turning it into a branch.
+ */
+static __always_inline int mup_bucket_take(struct rate_bucket_v1 *bucket,
+					   __u32 bytes, __u64 now)
+{
+	__u64 charge = bucket->cost_q16;
+	__u64 tat;
+	__u64 ahead;
+	__u64 next;
+
+	if (!charge)
+		return 1;
+	/*
+	 * The charge comes first and the burst is read last, so few values
+	 * are in use at one time. The plan of the server has almost no stack
+	 * for the values that do not fit the registers.
+	 */
+	charge = ((__u64)bytes * charge) >> 16;
+	tat = *(volatile __u64 *)&bucket->tat_ns;
+	ahead = (__u64)((__s64)(now - tat) >> 63);
+	asm volatile("" : "+r"(ahead));
+	next = now + ((tat - now) & ahead) + charge;
+	if (next - now > bucket->burst_ns)
+		return 0;
+	__sync_val_compare_and_swap(&bucket->tat_ns, tat, next);
+	return 1;
+}
+
+/* The bucket of client_rate_buckets at index, or room when it is missing. */
+static __always_inline int client_bucket_take(__u32 index, __u32 bytes,
+					      __u64 now)
+{
+	struct rate_bucket_v1 *bucket;
+
+	bucket = bpf_map_lookup_elem(&client_rate_buckets, &index);
+	return !bucket || mup_bucket_take(bucket, bytes, now);
+}
+
+/*
+ * client_path_room decides whether client path slot index has room for a data
+ * packet of bytes bytes, and takes the bytes from the bucket that has room. A
+ * path that wraps the packet for a bridge counts MUP_BRIDGE_OVERHEAD more. It
+ * returns -1 without room, 0 for a path without a limit or with one bucket,
+ * and the member index plus one for a limit per member. The member choice
+ * starts at the member that apply_up_reflect picks, and goes on in the order
+ * of the member list while a member has no room.
+ */
+static __always_inline int client_path_room(__u32 index, __u32 bytes,
+					    __u32 peer_token, __u64 now)
+{
+	struct path_config_v1 *path;
+	struct up_reflect_v1 *reflect;
+	__u32 key = index & 7;
+	__u32 base = MUP_RATE_MEMBER_BASE + key * MUP_MAX_POOL;
+	__u32 cursor_key = 0;
+	__u32 count;
+	__u32 start;
+	__u8 limit;
+
+	path = bpf_map_lookup_elem(&path_config, &key);
+	if (!path)
+		return 0;
+	limit = path->limit;
+	if (!(limit & (MUP_LIMIT_PATH | MUP_LIMIT_MEMBER)))
+		return 0;
+	if (path->bridge)
+		bytes += MUP_BRIDGE_OVERHEAD;
+	if (limit & MUP_LIMIT_PATH)
+		return client_bucket_take(key, bytes, now) ? 0 : -1;
+	reflect = bpf_map_lookup_elem(&up_reflect_members, &key);
+	count = reflect ? reflect->count & 31 : 0;
+	if (count == 0 || count > MUP_MAX_POOL)
+		return client_bucket_take(base, bytes, now) ? 0 : -1;
+	if (reflect->flags & MUP_FLAG_BALANCE_PER_PACKET) {
+		__u32 *cursor = bpf_map_lookup_elem(&up_reflect_cursor,
+						    &cursor_key);
+
+		if (!cursor)
+			return 0;
+		start = (*cursor)++ % count;
+	} else {
+		__u32 hash = peer_token * 0x9e3779b1U;
+
+		hash ^= hash >> 16;
+		start = hash % count;
+	}
+	/*
+	 * The loop is unrolled, so each step is a constant that the verifier
+	 * compares with count, and the walk ends after MUP_MAX_POOL steps.
+	 */
+#pragma clang loop unroll(full)
+	for (int step = 0; step < MUP_MAX_POOL; step++) {
+		__u32 member = start + step;
+
+		/*
+		 * A step past the list is skipped, not a break. A break on
+		 * count gives the loop a length that the compiler does not
+		 * know, and it then refuses to unroll the loop.
+		 */
+		if ((__u32)step >= count)
+			continue;
+		if (member >= count)
+			member -= count;
+		member &= MUP_MAX_POOL - 1;
+		if (client_bucket_take(base + member, bytes, now))
+			return member + 1;
+	}
+	return -1;
+}
+
+/*
+ * mup_client_plan picks the paths of a data packet of bytes bytes in a group
+ * whose paths have a bandwidth limit. usable_mask holds the usable path slots.
+ * The failover mode takes the paths in the order of their priority, and uses
+ * the first one with room. The balancer mode takes the path of the hash first,
+ * and then the others in the failover order. When every usable path has a
+ * limit and their weights differ, the hash shares the peers by the weights,
+ * and otherwise it is the hash of select_client_path. The burst mode takes
+ * every usable path with room.
+ *
+ * It returns the slot of the path in bits 0 to 2 and its member code in bits
+ * 8 to 12, or in the burst mode the mask of the slots, and their member codes
+ * in plan_members of send_scratch. A packet that no path has room for gets
+ * -MUP_DROP_RATE_LIMIT, and a group without a valid path -MUP_DROP_NO_PATH.
+ * The running values live in send_scratch, so the verifier walks each step of
+ * the loops once. The verifier checks this global function once.
+ */
+__attribute__((noinline)) int mup_client_plan(__u32 usable_mask, __u32 mode,
+					      __u32 peer_token, __u32 bytes)
+{
+	struct send_scratch_layout *scratch;
+	struct path_config_v1 *path;
+	__u32 scratch_key = 0;
+	__u64 now = bpf_ktime_get_ns();
+	__u32 first = 8;
+	__u32 target;
+	__u32 hash;
+	int code;
+
+	scratch = bpf_map_lookup_elem(&send_scratch, &scratch_key);
+	if (!scratch)
+		return -MUP_DROP_MAP_INVARIANT;
+	scratch->plan_members = 0;
+	scratch->plan_mask = 0;
+	scratch->plan_count = 0;
+	scratch->plan_total = 0;
+	scratch->plan_weight_or = 0;
+	scratch->plan_weight_and = 0xff;
+	scratch->plan_limit_and = 1;
+#pragma clang loop unroll(full)
+	for (int index = 0; index < 8; index++) {
+		__u32 key = index;
+		__u32 weight;
+
+		if (!mup_mask_has(usable_mask, index))
+			continue;
+		path = bpf_map_lookup_elem(&path_config, &key);
+		if (!path || !path->destination_ip || !path->ifindex ||
+		    path->transport > MUP_TRANSPORT_ICMP)
+			continue;
+		weight = path->weight;
+		scratch->plan_mask |= 1U << index;
+		scratch->plan_count += 1;
+		scratch->plan_total += weight;
+		scratch->plan_weight_or |= weight;
+		scratch->plan_weight_and &= weight;
+		if (!path->limit)
+			scratch->plan_limit_and = 0;
+	}
+	if (!scratch->plan_mask)
+		return -MUP_DROP_NO_PATH;
+
+	if (mode == MUP_MODE_BURST) {
+		scratch->plan_code = 0;
+#pragma clang loop unroll(full)
+		for (int index = 0; index < 8; index++) {
+			if (!((scratch->plan_mask >> index) & 1))
+				continue;
+			code = client_path_room(index, bytes, peer_token, now);
+			if (code < 0)
+				continue;
+			scratch->plan_code |= 1U << index;
+			scratch->plan_members |= (__u64)(code & 0x1f) << (index * 8);
+		}
+		if (!scratch->plan_code)
+			return -MUP_DROP_RATE_LIMIT;
+		return scratch->plan_code & 0xff;
+	}
+
+	if (mode == MUP_MODE_BALANCER) {
+		/*
+		 * Equal weights give the hash of select_client_path, so a group
+		 * keeps the placement of its peers.
+		 */
+		__u32 weighted = scratch->plan_limit_and && scratch->plan_total &&
+				 scratch->plan_weight_or != scratch->plan_weight_and;
+
+		hash = peer_token * 0x9e3779b1U ^ usable_mask * 0x85ebca6bU;
+		hash ^= hash >> 16;
+		target = weighted ? hash % scratch->plan_total :
+				    hash % scratch->plan_count;
+		scratch->plan_walk = 0;
+		scratch->plan_first = 8;
+#pragma clang loop unroll(full)
+		for (int index = 0; index < 8; index++) {
+			__u32 key = index;
+
+			if (!((scratch->plan_mask >> index) & 1))
+				continue;
+			path = bpf_map_lookup_elem(&path_config, &key);
+			if (!path)
+				continue;
+			scratch->plan_walk += weighted ? path->weight : 1;
+			if (scratch->plan_first == 8 && target < scratch->plan_walk)
+				scratch->plan_first = index;
+		}
+		first = scratch->plan_first & 0xf;
+		if (first < 8) {
+			code = client_path_room(first, bytes, peer_token, now);
+			if (code >= 0)
+				return first | ((code & 0x1f) << 8);
+		}
+	}
+
+	/*
+	 * The failover order: each round takes the untried path with the
+	 * lowest priority, and the lowest slot among equal priorities, as
+	 * select_client_path does.
+	 */
+	scratch->plan_code = 0;
+#pragma clang loop unroll(full)
+	for (int round = 0; round < 8; round++) {
+		__u32 best;
+		__u32 slot;
+
+		scratch->plan_best = 0xffff;
+#pragma clang loop unroll(full)
+		for (int index = 0; index < 8; index++) {
+			__u32 key = index;
+			__u32 order;
+
+			if (!((scratch->plan_mask >> index) & 1) ||
+			    ((scratch->plan_code >> index) & 1))
+				continue;
+			path = bpf_map_lookup_elem(&path_config, &key);
+			if (!path)
+				continue;
+			order = ((__u32)path->priority << 3) | index;
+			if (order < scratch->plan_best)
+				scratch->plan_best = order;
+		}
+		best = scratch->plan_best;
+		if (best > 0x7ff)
+			break;
+		slot = best & 7;
+		scratch->plan_code |= 1U << slot;
+		if (slot == first)
+			continue;
+		code = client_path_room(slot, bytes, peer_token, now);
+		if (code >= 0)
+			return slot | ((code & 0x1f) << 8);
+	}
+	return -MUP_DROP_RATE_LIMIT;
+}
+
+/*
+ * client_plan_path runs mup_client_plan for a single path mode and returns
+ * its path, with the member code in member_out, or 0 with the drop reason in
+ * reason_out.
+ */
+static __always_inline struct path_config_v1 *client_plan_path(
+	const struct path_group_v1 *group, __u32 usable_mask, __u32 peer_token,
+	__u32 bytes, __u32 *selected_index_out, __u32 *member_out,
+	__u32 *reason_out)
+{
+	int plan = mup_client_plan(usable_mask, group->mode, peer_token, bytes);
+	__u32 selected_index;
+
+	if (plan < 0) {
+		*reason_out = (__u32)-plan;
+		return 0;
+	}
+	selected_index = plan & 7;
+	*selected_index_out = selected_index;
+	*member_out = (plan >> 8) & 0x1f;
+	return bpf_map_lookup_elem(&path_config, &selected_index);
+}
+
+/*
+ * select_client_path picks the path of a data packet of bytes bytes in a
+ * failover or balancer group. When the path that it picks has a bandwidth
+ * limit, mup_client_plan decides instead, so a group without a limit tests
+ * one field more than before. Go sets the weights of a group only when each
+ * of its paths has a limit, so the hash path then has one too. The member
+ * code goes to member_out, and the drop reason of no path to reason_out.
+ */
 static __always_inline struct path_config_v1 *select_client_path(
-	const struct path_group_v1 *group, __u32 peer_token,
-	__u32 *selected_index_out)
+	const struct path_group_v1 *group, __u32 peer_token, __u32 bytes,
+	__u32 *selected_index_out, __u32 *member_out, __u32 *reason_out)
 {
 	struct path_state_v1 *state;
 	struct path_config_v1 *path;
@@ -733,8 +1120,9 @@ static __always_inline struct path_config_v1 *select_client_path(
 	__u32 usable_mask;
 	__u8 selected_priority = 0xff;
 
-	if (selected_index_out)
-		*selected_index_out = 0;
+	*selected_index_out = 0;
+	*member_out = 0;
+	*reason_out = MUP_DROP_NO_PATH;
 	state = bpf_map_lookup_elem(&path_state, &state_key);
 	if (!state)
 		return 0;
@@ -767,33 +1155,35 @@ static __always_inline struct path_config_v1 *select_client_path(
 			if (!path || !path->destination_ip || !path->ifindex)
 				continue;
 			if (healthy_count == ordinal) {
-				if (selected_index_out)
-					*selected_index_out = index;
-				return path;
+				selected = path;
+				selected_index = index;
+				break;
 			}
 			healthy_count++;
 		}
-		return 0;
-	}
-
+	} else {
 #pragma clang loop unroll(full)
-	for (int index = 0; index < 8; index++) {
-		if (!mup_mask_has(usable_mask, index))
-			continue;
-		__u32 key = index;
-		path = bpf_map_lookup_elem(&path_config, &key);
-		if (!path || !path->destination_ip || !path->ifindex)
-			continue;
-		if (!selected || path->priority < selected_priority) {
-			selected = path;
-			selected_priority = path->priority;
-			selected_index = index;
+		for (int index = 0; index < 8; index++) {
+			if (!mup_mask_has(usable_mask, index))
+				continue;
+			__u32 key = index;
+			path = bpf_map_lookup_elem(&path_config, &key);
+			if (!path || !path->destination_ip || !path->ifindex)
+				continue;
+			if (!selected || path->priority < selected_priority) {
+				selected = path;
+				selected_priority = path->priority;
+				selected_index = index;
+			}
 		}
 	}
 	if (!selected)
 		return 0;
-	if (selected_index_out)
-		*selected_index_out = selected_index;
+	if (selected->limit)
+		return client_plan_path(group, usable_mask, peer_token, bytes,
+					selected_index_out, member_out,
+					reason_out);
+	*selected_index_out = selected_index;
 	return bpf_map_lookup_elem(&path_config, &selected_index);
 }
 
@@ -1383,10 +1773,18 @@ static __always_inline int prepare_clone_l2(
 #define MUP_BURST_SKIPPED 1
 #define MUP_BURST_FAILED 2
 
+/*
+ * mup_burst_clone sends a copy of a burst packet on path slot index. Bits 0 to
+ * 15 of ports are the listen port, and bits 16 to 20 the member code that the
+ * bandwidth limit chose for the copy, or 0. A BPF function has at most five
+ * arguments.
+ */
 __attribute__((noinline)) int mup_burst_clone(struct __sk_buff *skb, __u32 index,
-					      __u32 listen_port, __u32 peer_token,
+					      __u32 ports, __u32 peer_token,
 					      __u32 partial)
 {
+	__u32 listen_port = ports & 0xffff;
+	__u32 member_code = (ports >> 16) & 0x1f;
 	struct mup_packet packet = {};
 	struct path_config_v1 *mapped_path;
 	struct path_config_v1 path = {};
@@ -1401,7 +1799,7 @@ __attribute__((noinline)) int mup_burst_clone(struct __sk_buff *skb, __u32 index
 	    !mapped_path->ifindex || mapped_path->transport > MUP_TRANSPORT_ICMP)
 		return MUP_BURST_SKIPPED;
 	path = *mapped_path;
-	apply_up_reflect(index, &path, peer_token);
+	apply_up_reflect(index, &path, peer_token, member_code);
 	result = rewrite_for_path(skb, &packet, (__u16)listen_port, &path,
 				  index, peer_token, partial);
 	if (result) {
@@ -1426,6 +1824,12 @@ __attribute__((noinline)) int mup_burst_clone(struct __sk_buff *skb, __u32 index
 	return MUP_BURST_SENT;
 }
 
+/*
+ * burst_client_packet sends a copy of a packet on each usable path of a burst
+ * group, and the packet itself on the highest one. When a path of the group
+ * has a bandwidth limit, mup_client_plan takes only the paths with room, and
+ * a packet that no path has room for is dropped with MUP_DROP_RATE_LIMIT.
+ */
 static __always_inline int burst_client_packet(
 	struct __sk_buff *skb,
 	struct mup_packet *packet,
@@ -1440,6 +1844,8 @@ static __always_inline int burst_client_packet(
 	__u32 state_key = 0;
 	__u32 final_key;
 	__u32 healthy_mask;
+	__u32 limited = 0;
+	__u64 members = 0;
 	int final_index = -1;
 	int cloned = 0;
 	int result;
@@ -1460,18 +1866,46 @@ static __always_inline int burst_client_packet(
 		mapped_path = bpf_map_lookup_elem(&path_config, &key);
 		if (mapped_path && mapped_path->destination_ip &&
 		    mapped_path->ifindex &&
-		    mapped_path->transport <= MUP_TRANSPORT_ICMP)
+		    mapped_path->transport <= MUP_TRANSPORT_ICMP) {
 			final_index = index;
+			limited |= mapped_path->limit;
+		}
 	}
 	if (final_index < 0)
 		return count_and_drop(skb, MUP_DROP_NO_PATH);
+	if (limited) {
+		struct send_scratch_layout *scratch;
+		__u32 scratch_key = 0;
+		int plan;
+
+		plan = mup_client_plan(healthy_mask, MUP_MODE_BURST, peer_token,
+				       mup_packet_length(packet));
+		if (plan < 0)
+			return count_and_drop(skb, (__u32)-plan);
+		scratch = bpf_map_lookup_elem(&send_scratch, &scratch_key);
+		if (!scratch)
+			return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
+		members = scratch->plan_members;
+		healthy_mask = plan & 0xff;
+		final_index = -1;
+#pragma clang loop unroll(full)
+		for (int index = 0; index < 8; index++) {
+			if (mup_mask_has(healthy_mask, index))
+				final_index = index;
+		}
+		if (final_index < 0)
+			return count_and_drop(skb, MUP_DROP_RATE_LIMIT);
+	}
 
 #pragma clang loop unroll(full)
 	for (int index = 0; index < 8; index++) {
 		if (!mup_mask_has(healthy_mask, index) || index == final_index)
 			continue;
-		result = mup_burst_clone(skb, index, listen_port, peer_token,
-					 partial);
+		result = mup_burst_clone(skb, index,
+					 listen_port |
+						 (((members >> (index * 8)) & 0x1f)
+						  << 16),
+					 peer_token, partial);
 		if (result == MUP_BURST_FAILED)
 			return TC_ACT_SHOT;
 		if (result == MUP_BURST_SENT)
@@ -1488,7 +1922,8 @@ static __always_inline int burst_client_packet(
 	    !mapped_path->ifindex || mapped_path->transport > MUP_TRANSPORT_ICMP)
 		return cloned ? TC_ACT_SHOT : count_and_drop(skb, MUP_DROP_NO_PATH);
 	path = *mapped_path;
-	apply_up_reflect(final_key, &path, peer_token);
+	apply_up_reflect(final_key, &path, peer_token,
+			 (members >> ((final_key & 7) * 8)) & 0x1f);
 	result = rewrite_for_path(skb, packet, listen_port, &path, final_key,
 				  peer_token, partial);
 	if (result == -2)
@@ -1766,9 +2201,12 @@ int mup_client_ingress(struct __sk_buff *skb)
 					   partial);
 	}
 	__u32 selected_index = 0;
-	path = select_client_path(group, peer_token, &selected_index);
+	__u32 member_code = 0;
+	__u32 reason = MUP_DROP_NO_PATH;
+	path = select_client_path(group, peer_token, mup_packet_length(&packet),
+				  &selected_index, &member_code, &reason);
 	if (!path)
-		return count_and_drop(skb, MUP_DROP_NO_PATH);
+		return count_and_drop(skb, reason);
 	struct path_config_v1 selected_path = *path;
 	/*
 	 * A bridge reflect route wraps the reflected packet for its bridge, so
@@ -1779,7 +2217,7 @@ int mup_client_ingress(struct __sk_buff *skb)
 	__be32 reflect_bridge = selected_path.bridge;
 	__be32 reflect_source = selected_path.source_ip;
 	__u16 reflect_port = selected_path.server_port;
-	apply_up_reflect(selected_index, &selected_path, peer_token);
+	apply_up_reflect(selected_index, &selected_path, peer_token, member_code);
 	if (mup_set_peer_token(&packet, peer_token))
 		return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
 	result = rewrite_for_path(skb, &packet, endpoint.listen_port,
@@ -1866,13 +2304,247 @@ __attribute__((noinline)) __be32 pick_reflector(__be32 base, __u8 transport,
 
 /*
  * The meta argument of mup_down_send packs the listen port in bits 0 to 15,
- * the down path ID in bits 16 to 18, the flags below, and the peer token in
- * bits 22 to 33. A BPF function has at most five arguments.
+ * the down path ID in bits 16 to 18, the flags below, the peer token in bits
+ * 22 to 33, and in bits 34 to 38 the member code that the bandwidth limit
+ * chose: 0 for the normal member choice, or the member index plus one. A BPF
+ * function has at most five arguments.
  */
 #define MUP_DOWN_META_PARTIAL (1ULL << 19)
 #define MUP_DOWN_META_CLONE (1ULL << 20)
 #define MUP_DOWN_META_EGRESS (1ULL << 21)
 #define MUP_DOWN_META_TOKEN_SHIFT 22
+#define MUP_DOWN_META_MEMBER_SHIFT 34
+
+/* The bucket of member member of a down path, or room when it is missing. */
+static __always_inline int down_bucket_take(struct send_scratch_layout *scratch,
+					    __u32 member)
+{
+	struct rate_bucket_v1 *bucket;
+
+	scratch->bucket_key.member = member;
+	bucket = bpf_map_lookup_elem(&server_rate_buckets, &scratch->bucket_key);
+	return !bucket || mup_bucket_take(bucket, MUP_PLAN(scratch, plan_cost),
+					  MUP_PLAN(scratch, plan_now));
+}
+
+/*
+ * down_path_room decides whether down path path_id of a client has room for a
+ * reply of bytes bytes, and takes the bytes from the bucket that has room. A
+ * path through a bridge counts MUP_BRIDGE_OVERHEAD more. It returns -1
+ * without room, 0 for a path without a limit or with one bucket, and the
+ * member index plus one for a limit per member of a pool. The member choice
+ * starts at the member that down_send_core picks, and goes on in the order of
+ * the members while a member has no room. A path with a single return IP uses
+ * the bucket of member 0. The key goes into send_scratch.
+ * The client key, the size of the reply, the token and the time come from the
+ * plan values in scratch, so they need no stack.
+ */
+static __always_inline int down_path_room(struct send_scratch_layout *scratch,
+					  __u32 path_id, __u32 *zero_key)
+{
+	struct down_path_v1 *path;
+	__u32 count;
+	__u32 start;
+	__u8 limit;
+
+	__builtin_memset(&scratch->bucket_key, 0, sizeof(scratch->bucket_key));
+	scratch->bucket_key.client.advertised_ip = MUP_PLAN(scratch, plan_ip);
+	scratch->bucket_key.client.instance_nonce = MUP_PLAN(scratch, plan_nonce);
+	scratch->bucket_key.path_id = path_id & 7;
+	path = bpf_map_lookup_elem(&server_down_paths, &scratch->bucket_key);
+	if (!path)
+		return 0;
+	limit = path->limit;
+	if (!(limit & (MUP_LIMIT_PATH | MUP_LIMIT_MEMBER)))
+		return 0;
+	scratch->plan_cost = MUP_PLAN(scratch, plan_bytes);
+	if (path->flags & MUP_FLAG_BRIDGE)
+		scratch->plan_cost += MUP_BRIDGE_OVERHEAD;
+	if ((limit & MUP_LIMIT_PATH) || !(path->flags & MUP_FLAG_RETURN_POOL))
+		return down_bucket_take(scratch, 0) ? 0 : -1;
+	count = path->count & 31;
+	/* down_send_core drops the reply of a pool without members. */
+	if (count == 0 || count > MUP_MAX_POOL)
+		return 0;
+	if (path->flags & MUP_FLAG_BALANCE_PER_PACKET) {
+		__u32 *cursor;
+
+		/* The key of the cursor is the zero key of the caller. */
+		cursor = bpf_map_lookup_elem(&reflector_cursor, zero_key);
+		if (!cursor)
+			return 0;
+		start = (*cursor)++ % count;
+	} else {
+		__u32 hash = MUP_PLAN(scratch, plan_token) * 0x9e3779b1U;
+
+		hash ^= hash >> 16;
+		start = hash % count;
+	}
+	/*
+	 * The walk keeps its place in scratch, because a value in a register
+	 * goes to the stack at each helper call. The loop is not unrolled, so
+	 * the function holds one copy of the bucket code. Its bound is the
+	 * constant MUP_MAX_POOL, which the verifier can see: a step past the
+	 * list is skipped, not a break, so the compiler does not replace the
+	 * bound with the count.
+	 */
+	scratch->plan_walk = start;
+	scratch->plan_count = count;
+#pragma clang loop unroll(disable)
+	for (__u32 step = 0; step < MUP_MAX_POOL; step++) {
+		__u32 member;
+
+		if (step >= MUP_PLAN(scratch, plan_count))
+			continue;
+		member = MUP_PLAN(scratch, plan_walk) + step;
+		if (member >= MUP_PLAN(scratch, plan_count))
+			member -= MUP_PLAN(scratch, plan_count);
+		member &= MUP_MAX_POOL - 1;
+		scratch->plan_best = member;
+		if (down_bucket_take(scratch, member))
+			return MUP_PLAN(scratch, plan_best) + 1;
+	}
+	return -1;
+}
+
+/*
+ * mup_down_plan picks the down paths of a reply of bytes bytes in the down
+ * group of listen port listen_port of a client, when a usable path of the
+ * group has a bandwidth limit or the group has a preferred path or weights.
+ * The failover mode takes the preferred path first, if the group has one and
+ * it is usable, and then the paths by ID, and uses the first one with room.
+ * The balancer mode takes the path of the hash first, and then the others by
+ * ID. When every usable path has a limit and the group has weights, the hash
+ * shares the peers by the weights, and otherwise it is the hash of
+ * send_down_reply. The burst mode takes every usable path with room.
+ *
+ * It returns the mask of the paths, with their member codes in plan_members of
+ * send_scratch, or a negative drop reason: -MUP_DROP_RATE_LIMIT when no path
+ * has room. The caller writes the inputs to send_scratch: plan_ip, plan_nonce,
+ * plan_listen, plan_token and plan_bytes. The function has no arguments and
+ * keeps its running values in send_scratch too, because the server ingress
+ * program leaves only 48 bytes of stack to a function that it calls. The
+ * verifier checks this global function once.
+ */
+__attribute__((noinline)) int mup_down_plan(void)
+{
+	struct send_scratch_layout *scratch;
+	struct down_group_v1 *down;
+	__u32 scratch_key = 0;
+
+	scratch = bpf_map_lookup_elem(&send_scratch, &scratch_key);
+	if (!scratch)
+		return -MUP_DROP_MAP_INVARIANT;
+	scratch->plan_members = 0;
+	__builtin_memset(&scratch->group_key, 0, sizeof(scratch->group_key));
+	scratch->group_key.client.advertised_ip = MUP_PLAN(scratch, plan_ip);
+	scratch->group_key.client.instance_nonce = MUP_PLAN(scratch, plan_nonce);
+	scratch->group_key.listen_port = MUP_PLAN(scratch, plan_listen);
+	down = bpf_map_lookup_elem(&server_down_groups, &scratch->group_key);
+	if (!down)
+		return -MUP_DROP_NO_PATH;
+	scratch->plan_usable = (__u32)down->path_mask & (__u32)down->healthy_mask;
+	if (!MUP_PLAN(scratch, plan_usable))
+		return -MUP_DROP_NO_PATH;
+	scratch->plan_limit = down->limit_mask & MUP_PLAN(scratch, plan_usable);
+	scratch->plan_first = 8;
+	scratch->plan_mode = down->mode;
+	/*
+	 * The plan copies what it needs from the group entry, so the pointer
+	 * to the entry does not stay on the stack over the loops.
+	 */
+	scratch->plan_flags = down->flags;
+	scratch->plan_preferred = down->preferred & 7;
+	__builtin_memcpy(scratch->plan_weights, down->weights,
+			 sizeof(scratch->plan_weights));
+
+	if (MUP_PLAN(scratch, plan_mode) == MUP_MODE_BALANCER) {
+		scratch->plan_weighted =
+			(MUP_PLAN(scratch, plan_flags) & MUP_DOWN_GROUP_WEIGHTED) &&
+			MUP_PLAN(scratch, plan_limit) == MUP_PLAN(scratch, plan_usable);
+		scratch->plan_count = 0;
+		scratch->plan_total = 0;
+		/*
+		 * These loops are not unrolled. Eight copies of their body need
+		 * more registers than the program has, and the rest then goes
+		 * to the stack.
+		 */
+#pragma clang loop unroll(disable)
+		for (__u32 index = 0; index < 8; index++) {
+			if (!((MUP_PLAN(scratch, plan_usable) >> index) & 1))
+				continue;
+			scratch->plan_count += 1;
+			scratch->plan_total += scratch->plan_weights[index & 7];
+		}
+		if (!MUP_PLAN(scratch, plan_total))
+			scratch->plan_weighted = 0;
+		/*
+		 * Without weights the hash is the one of send_down_reply, so
+		 * the group keeps the placement of its peers. plan_best holds
+		 * the point of the hash in the shares.
+		 */
+		scratch->plan_best = MUP_PLAN(scratch, plan_token) * 0x9e3779b1U ^
+				     MUP_PLAN(scratch, plan_usable) * 0x85ebca6bU;
+		scratch->plan_best ^= MUP_PLAN(scratch, plan_best) >> 16;
+		if (MUP_PLAN(scratch, plan_weighted))
+			scratch->plan_best %= MUP_PLAN(scratch, plan_total);
+		else
+			scratch->plan_best %= MUP_PLAN(scratch, plan_count);
+		scratch->plan_walk = 0;
+#pragma clang loop unroll(disable)
+		for (__u32 index = 0; index < 8; index++) {
+			if (!((MUP_PLAN(scratch, plan_usable) >> index) & 1))
+				continue;
+			if (MUP_PLAN(scratch, plan_weighted))
+				scratch->plan_walk += scratch->plan_weights[index & 7];
+			else
+				scratch->plan_walk += 1;
+			if (MUP_PLAN(scratch, plan_first) == 8 &&
+			    MUP_PLAN(scratch, plan_best) < MUP_PLAN(scratch, plan_walk))
+				scratch->plan_first = index;
+		}
+	} else if (MUP_PLAN(scratch, plan_mode) != MUP_MODE_BURST &&
+		   (MUP_PLAN(scratch, plan_flags) & MUP_DOWN_GROUP_PREFERRED)) {
+		__u32 preferred = MUP_PLAN(scratch, plan_preferred) & 7;
+
+		if ((MUP_PLAN(scratch, plan_usable) >> preferred) & 1)
+			scratch->plan_first = preferred;
+	}
+	scratch->plan_now = bpf_ktime_get_ns();
+
+	/*
+	 * One loop serves the three modes, so the function holds one copy of
+	 * the room check. Round 0 is the first choice: the path of the hash, or
+	 * the preferred path. Rounds 1 to 8 are the usable paths by their ID.
+	 * The burst mode has no first choice and collects every path with room.
+	 */
+	scratch->plan_mask = 0;
+#pragma clang loop unroll(disable)
+	for (__u32 round = 0; round < 9; round++) {
+		__u32 index = round ? round - 1 : MUP_PLAN(scratch, plan_first);
+		int code = 0;
+
+		if (index > 7)
+			continue;
+		if (round && index == MUP_PLAN(scratch, plan_first))
+			continue;
+		if (!((MUP_PLAN(scratch, plan_usable) >> index) & 1))
+			continue;
+		if ((MUP_PLAN(scratch, plan_limit) >> index) & 1)
+			code = down_path_room(scratch, index, &scratch_key);
+		if (code < 0)
+			continue;
+		if (MUP_PLAN(scratch, plan_mode) != MUP_MODE_BURST) {
+			scratch->plan_members = (__u64)(code & 0x1f) << (index * 8);
+			return 1U << index;
+		}
+		scratch->plan_mask |= 1U << index;
+		scratch->plan_members |= (__u64)(code & 0x1f) << (index * 8);
+	}
+	if (MUP_PLAN(scratch, plan_mask))
+		return MUP_PLAN(scratch, plan_mask) & 0xff;
+	return -MUP_DROP_RATE_LIMIT;
+}
 
 /*
  * down_send_core rewrites a reply of the target for one down path of a client
@@ -1900,6 +2572,7 @@ static __always_inline int down_send_core(struct __sk_buff *skb,
 	__u32 clone = (meta & MUP_DOWN_META_CLONE) != 0;
 	__u32 partial = (meta & MUP_DOWN_META_PARTIAL) != 0;
 	__u32 peer_token = (meta >> MUP_DOWN_META_TOKEN_SHIFT) & MUP_MAX_PEER_TOKEN;
+	__u32 member_code = (meta >> MUP_DOWN_META_MEMBER_SHIFT) & 0x1f;
 	__u16 listen_port = meta & 0xffff;
 	__u32 cursor_key = 0;
 	__be32 member = 0;
@@ -1954,7 +2627,13 @@ static __always_inline int down_send_core(struct __sk_buff *skb,
 			reason = MUP_DROP_NO_PATH;
 			goto fail;
 		}
-		if (flags & MUP_FLAG_BALANCE_PER_PACKET) {
+		/*
+		 * A limit per member chose the member already, and took the
+		 * step of the cursor.
+		 */
+		if (member_code) {
+			slot = member_code - 1;
+		} else if (flags & MUP_FLAG_BALANCE_PER_PACKET) {
 			__u32 *cursor = bpf_map_lookup_elem(&reflector_cursor,
 							    &cursor_key);
 
@@ -2144,7 +2823,8 @@ __attribute__((noinline)) int mup_down_send(struct __sk_buff *skb,
  * send_down_reply picks the down paths of a reply with the downstream mode of
  * the client, among its healthy down paths. Fallback takes the lowest down
  * path ID, balancer hashes the token as the client upstream does, and burst
- * sends a copy on each healthy down path. The packet itself goes on the
+ * sends a copy on each healthy down path. A group with a bandwidth limit on a
+ * usable path, a preferred path, or weights lets mup_down_plan pick. The packet itself goes on the
  * highest path that it uses. With inline_send, the sends run inline and reuse
  * packet. Otherwise they call mup_down_send.
  */
@@ -2163,6 +2843,9 @@ static __always_inline int send_down_reply(
 	__u32 advertised_ip = reverse->route_key.client.advertised_ip;
 	__u64 instance_nonce = reverse->route_key.client.instance_nonce;
 	__u64 meta = listen_port;
+	struct send_scratch_layout *scratch;
+	__u32 scratch_key = 0;
+	__u64 members;
 	__u32 sending = 0;
 	__u32 count = 0;
 	__u32 ordinal;
@@ -2179,7 +2862,37 @@ static __always_inline int send_down_reply(
 	if (!usable)
 		return count_and_drop(skb, MUP_DROP_NO_PATH);
 
-	if (down->mode == MUP_MODE_BURST) {
+	/*
+	 * mup_down_plan writes the member codes into send_scratch, and this
+	 * function reads them back on both branches. So the verifier sees the
+	 * same kind of value on both, and checks the sends once.
+	 */
+	scratch = bpf_map_lookup_elem(&send_scratch, &scratch_key);
+	if (!scratch)
+		return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
+	scratch->plan_members = 0;
+	/*
+	 * A group without a limit on a usable path, without a preferred path,
+	 * and without weights tests these fields and no more.
+	 */
+	if (down->flags | (down->limit_mask & usable)) {
+		int plan;
+
+		/*
+		 * The plan takes its inputs from scratch and no arguments,
+		 * so it keeps nothing on its stack over its helper calls.
+		 */
+		scratch->plan_ip = advertised_ip;
+		scratch->plan_nonce = instance_nonce;
+		scratch->plan_listen = listen_port;
+		scratch->plan_token = peer_token;
+		scratch->plan_bytes = mup_packet_length(packet);
+		plan = mup_down_plan();
+
+		if (plan < 0)
+			return count_and_drop(skb, (__u32)-plan);
+		sending = plan & 0xff;
+	} else if (down->mode == MUP_MODE_BURST) {
 		sending = usable;
 	} else if (down->mode == MUP_MODE_BALANCER) {
 #pragma clang loop unroll(full)
@@ -2204,6 +2917,10 @@ static __always_inline int send_down_reply(
 	}
 	if (!sending)
 		return count_and_drop(skb, MUP_DROP_NO_PATH);
+	scratch = bpf_map_lookup_elem(&send_scratch, &scratch_key);
+	if (!scratch)
+		return count_and_drop(skb, MUP_DROP_MAP_INVARIANT);
+	members = scratch->plan_members;
 	/*
 	 * Each copy has the same payload, so one sum serves them all. The sum
 	 * is taken before the token is written, and down_send_core adds it.
@@ -2221,7 +2938,9 @@ static __always_inline int send_down_reply(
 	/* A bounded loop keeps one copy of an inline send in the program. */
 #pragma clang loop unroll(disable)
 	for (__u32 index = 0; index < 8; index++) {
-		__u64 clone_meta = meta | MUP_DOWN_META_CLONE | ((__u64)index << 16);
+		__u64 clone_meta = meta | MUP_DOWN_META_CLONE | ((__u64)index << 16) |
+				   (((members >> (index * 8)) & 0x1f)
+				    << MUP_DOWN_META_MEMBER_SHIFT);
 
 		if (!((sending >> index) & 1) || index == final)
 			continue;
@@ -2237,6 +2956,7 @@ static __always_inline int send_down_reply(
 			return TC_ACT_SHOT;
 	}
 	meta |= (__u64)(final & 7) << 16;
+	meta |= ((members >> ((final & 7) * 8)) & 0x1f) << MUP_DOWN_META_MEMBER_SHIFT;
 	if (inline_send)
 		return down_send_core(skb, packet, advertised_ip,
 				      instance_nonce, meta, payload_sum);

@@ -27,13 +27,16 @@ func TestDataSetUsesTheUsablePaths(t *testing.T) {
 		"no healthy path":             {[]dataCandidate{{id: 0, degraded: true}, {id: 1}}, 0},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := dataSet(tt.candidates, nil, time.Unix(1000, 0)); got != tt.want {
-				t.Fatalf("dataSet = %#b, want %#b", got, tt.want)
+			got, _, ok := dataSet(tt.candidates, nil, time.Unix(1000, 0))
+			if got != tt.want || ok {
+				t.Fatalf("dataSet = %#b, %v, want %#b and no choice", got, ok, tt.want)
 			}
 		})
 	}
 }
 
+// TestDataSetTakesThePathOfTheChooser checks that a latency choice keeps the
+// usable set, so a full path can spill, and names the path to try first.
 func TestDataSetTakesThePathOfTheChooser(t *testing.T) {
 	t.Parallel()
 
@@ -44,22 +47,22 @@ func TestDataSetTakesThePathOfTheChooser(t *testing.T) {
 		{id: 1, priority: 1, healthy: true, rtt: 20 * time.Millisecond},
 		{id: 2, priority: 2, healthy: true, degraded: true, rtt: 5 * time.Millisecond},
 	}
-	if got := dataSet(candidates, chooser, now); got != 0b010 {
-		t.Fatalf("dataSet = %#b, want the fastest usable path 1", got)
+	if mask, chosen, ok := dataSet(candidates, chooser, now); mask != 0b011 || !ok || chosen != 1 {
+		t.Fatalf("dataSet = %#b, %d, %v, want the usable paths 0 and 1 with the fastest path 1", mask, chosen, ok)
 	}
 	// A degraded path is usable again when every path is degraded.
 	for index := range candidates {
 		candidates[index].degraded = true
 	}
 	candidates[1].healthy = false
-	if got := dataSet(candidates, chooser, now.Add(2*time.Second)); got != 0b100 {
-		t.Fatalf("dataSet = %#b, want path 2 when all paths are degraded", got)
+	if mask, chosen, ok := dataSet(candidates, chooser, now.Add(2*time.Second)); mask != 0b101 || !ok || chosen != 2 {
+		t.Fatalf("dataSet = %#b, %d, %v, want the healthy paths with path 2 when all paths are degraded", mask, chosen, ok)
 	}
 	for index := range candidates {
 		candidates[index].healthy = false
 	}
-	if got := dataSet(candidates, chooser, now.Add(4*time.Second)); got != 0 {
-		t.Fatalf("dataSet = %#b, want none without a healthy path", got)
+	if mask, _, ok := dataSet(candidates, chooser, now.Add(4*time.Second)); mask != 0 || ok {
+		t.Fatalf("dataSet = %#b, %v, want none without a healthy path", mask, ok)
 	}
 }
 
@@ -67,13 +70,13 @@ func TestTheClientMaskIsTheUnionOfTheGroups(t *testing.T) {
 	t.Parallel()
 
 	now := time.Unix(1000, 0)
-	first := dataSet([]dataCandidate{{id: 0, healthy: true, degraded: true}, {id: 1, healthy: true}}, nil, now)
-	second := dataSet([]dataCandidate{
+	first, _, _ := dataSet([]dataCandidate{{id: 0, healthy: true, degraded: true}, {id: 1, healthy: true}}, nil, now)
+	second, chosen, _ := dataSet([]dataCandidate{
 		{id: 2, priority: 2, healthy: true, rtt: 30 * time.Millisecond},
 		{id: 3, priority: 3, healthy: true, rtt: 10 * time.Millisecond},
 	}, &measure.LatencyChooser{}, now)
-	if got := first | second; got != 0b1010 {
-		t.Fatalf("union = %#b, want paths 1 and 3", got)
+	if got := first | second; got != 0b1110 || chosen != 3 {
+		t.Fatalf("union = %#b with choice %d, want paths 1, 2 and 3 with path 3 first", got, chosen)
 	}
 }
 

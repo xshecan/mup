@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -323,4 +324,55 @@ func TestMembersShowDegraded(t *testing.T) {
 		}
 	}
 	t.Log("\n" + out.String())
+}
+
+func TestWidePathsShowTheBandwidthLimit(t *testing.T) {
+	t.Parallel()
+
+	paths := []api.Path{
+		{ID: 0, ListenPort: 51820, Server: "203.0.113.5", Port: 9000, Transport: "udp",
+			BandwidthBitsPerSecond: 10e6, Measurement: api.Measurement{RateBitsPerSecond: 8.5e6}},
+		{ID: 1, ListenPort: 51820, Server: "203.0.113.6", Port: 9000, Transport: "udp",
+			BandwidthBitsPerSecond: 500e3, BandwidthPerMember: true},
+		{ID: 2, ListenPort: 51820, Server: "203.0.113.7", Port: 9000, Transport: "udp"},
+	}
+	var out strings.Builder
+	printPaths(&out, paths, true, testNow)
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	header := strings.Fields(lines[0])
+	bw := slices.Index(header, "BW")
+	if bw < 0 || header[bw+1] != "RATE" {
+		t.Fatalf("header = %q, want BW directly before RATE", lines[0])
+	}
+	for i, want := range [][]string{{"10.0Mbit", "8.5Mbit"}, {"500kbit/member", "-"}, {"-", "-"}} {
+		cells := strings.Fields(lines[i+1])
+		// SRC, PORTS, PRIORITY and MISSES follow RATE.
+		got := cells[len(cells)-6 : len(cells)-4]
+		if got[0] != want[0] || got[1] != want[1] {
+			t.Fatalf("row %d = %q, want BW %q and RATE %q", i, lines[i+1], want[0], want[1])
+		}
+	}
+	// Without a limit the plain output is unchanged.
+	out.Reset()
+	printPaths(&out, paths, false, testNow)
+	if strings.Contains(out.String(), "BW") {
+		t.Fatalf("plain output shows BW:\n%s", out.String())
+	}
+}
+
+func TestEgressListShowsTheBandwidthLimit(t *testing.T) {
+	t.Parallel()
+
+	groups := []api.EgressGroup{{Mode: "failover", Paths: []api.EgressPath{
+		{ID: 0, Server: "203.0.113.5", Port: 9200, Transport: "icmp", ReturnIP: "198.51.100.0/28", Members: 14, HealthyMembers: 13,
+			BandwidthBitsPerSecond: 10e6, BandwidthPerMember: true, Degraded: true, Active: true, SrcFirst: 40000, SrcLast: 40100,
+			Measurement: api.Measurement{LossPercent: percent(0.3), RTTAvgSeconds: 0.0152}},
+		{ID: 1, Server: "203.0.113.5", Port: 9300, Transport: "udp", BandwidthBitsPerSecond: 2e9},
+		{ID: 2, Server: "203.0.113.5", Port: 9400, Transport: "udp"},
+	}}}
+	want := "*0:icmp:203.0.113.5:9200 via 198.51.100.0/28 (13/14) bw 10.0Mbit/member degraded loss 0.3% rtt 15.2ms src 40000-40100," +
+		"1:udp:203.0.113.5:9300 bw 2.0Gbit,2:udp:203.0.113.5:9400"
+	if got := egressList(groups); got != want {
+		t.Fatalf("egressList = %q, want %q", got, want)
+	}
 }

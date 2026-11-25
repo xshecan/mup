@@ -165,17 +165,26 @@ func (d *egressSet) settingsOf() protocol.EgressSettings {
 }
 
 // frames builds the EGRESS_REGISTER frames that an ingress path sends before its
-// REGISTER with this sequence.
+// REGISTER with this sequence. The EGRESS_REGISTER of a path with a rate limit
+// has an EGRESS_LIMIT right after it, so the two go the same way.
 func (d *egressSet) frames(registration pathRegistration, sequence uint32, now time.Time) [][]byte {
 	if d == nil {
 		return nil
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	frames := make([][]byte, 0, len(d.paths)+len(d.withdrawn))
+	frames := make([][]byte, 0, 2*len(d.paths)+len(d.withdrawn))
 	for slot, path := range d.paths {
-		if frame, err := egressRegisterFrame(registration, slot, path, d.mode, sequence, protocol.PackEgressLease(registrationLeaseSeconds, d.settings)); err == nil {
-			frames = append(frames, frame)
+		frame, err := egressRegisterFrame(registration, slot, path, d.mode, sequence, protocol.PackEgressLease(registrationLeaseSeconds, d.settings))
+		if err != nil {
+			continue
+		}
+		frames = append(frames, frame)
+		if !path.HasBandwidth() {
+			continue
+		}
+		if limit, err := egressLimitFrame(registration, slot, path); err == nil {
+			frames = append(frames, limit)
 		}
 	}
 	for slot, withdrawal := range d.withdrawn {
@@ -227,6 +236,30 @@ func egressRegisterFrame(registration pathRegistration, slot uint16, path config
 	setSourceRange(&frame, path)
 	if frame.Flags&protocol.ControlFlagSourceRange != 0 {
 		frame.Sequence = 0
+	}
+	packet := make([]byte, protocol.ControlFrameLength)
+	if err := protocol.EncodeControlFrame(packet, frame); err != nil {
+		return nil, err
+	}
+	return packet, nil
+}
+
+// egressLimitFrame builds the EGRESS_LIMIT of an egress path with a rate
+// limit. Its head is that of the EGRESS_REGISTER of the path with no flag, and
+// it carries the rate in kilobits per second.
+func egressLimitFrame(registration pathRegistration, slot uint16, path config.Path) ([]byte, error) {
+	frame := protocol.ControlFrame{
+		Type:          protocol.ControlEgressLimit,
+		Transport:     path.Transport,
+		PathID:        slot,
+		ListenPort:    registration.listenPort,
+		ServerPort:    path.ServerPort,
+		InstanceNonce: registration.nonce,
+		AdvertisedIP:  registration.advertisedIP,
+		LimitKbps:     uint32(path.BandwidthBitsPerSecond / 1000),
+	}
+	if path.BandwidthPerMember {
+		frame.LimitFlags = protocol.EgressLimitPerMember
 	}
 	packet := make([]byte, protocol.ControlFrameLength)
 	if err := protocol.EncodeControlFrame(packet, frame); err != nil {

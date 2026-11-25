@@ -230,10 +230,10 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 	if wide {
 		// AVG RTT and JITTER come from the probes of the last 60 seconds.
 		// DATA LOSS is the data loss of the last 10 and 60 seconds, and
-		// PROBE LOSS is the loss of the control probes. RATE is what this end
+		// PROBE LOSS is the loss of the control probes. BW is the bandwidth limit of a path, and RATE is what this end
 		// sent or received in the last 10 seconds. SRC is the source range of
 		// the data packets of a path.
-		header = append(header, "AVG RTT", "JITTER", "DATA LOSS", "PROBE LOSS", "RATE", "SRC", "PORTS", "PRIORITY", "MISSES")
+		header = append(header, "AVG RTT", "JITTER", "DATA LOSS", "PROBE LOSS", "BW", "RATE", "SRC", "PORTS", "PRIORITY", "MISSES")
 	}
 	row(table, header...)
 	for _, path := range paths {
@@ -280,6 +280,7 @@ func printPaths(w io.Writer, paths []api.Path, wide bool, now time.Time) {
 				formatRTT(path.RTTJitterSeconds),
 				dataLossText(path.Measurement),
 				formatLoss(path.ProbeLossPercent),
+				bandwidthText(path.BandwidthBitsPerSecond, path.BandwidthPerMember),
 				formatRate(path.RateBitsPerSecond),
 				srcText(path.SrcFirst, path.SrcLast), ports, strconv.Itoa(int(path.Priority)), strconv.Itoa(path.Misses))
 		}
@@ -473,7 +474,8 @@ func egressSummary(groups []api.EgressGroup) string {
 // the via shows "reflects via". A bridge via path shows "via" alone, because
 // the server sends to the bridge from the via. A path with a source range ends
 // with "src A-B". An active path starts with a star, and a degraded path has
-// the word degraded after its entry.
+// the word degraded after its entry. A path with a bandwidth limit shows
+// "bw RATE" after its address and via part.
 func egressList(groups []api.EgressGroup) string {
 	return joinGroups(groups, func(group api.EgressGroup) string {
 		list := make([]string, 0, len(group.Paths))
@@ -488,6 +490,9 @@ func egressList(groups []api.EgressGroup) string {
 					via = "reflects via"
 				}
 				text += fmt.Sprintf(" %s %s (%d/%d)", via, path.ReturnIP, path.HealthyMembers, path.Members)
+			}
+			if path.BandwidthBitsPerSecond > 0 {
+				text += " bw " + bandwidthText(path.BandwidthBitsPerSecond, path.BandwidthPerMember)
 			}
 			if path.Degraded {
 				text += " degraded"
@@ -505,6 +510,16 @@ func egressList(groups []api.EgressGroup) string {
 		}
 		return orDash(strings.Join(list, ","))
 	})
+}
+
+// bandwidthText shows the bandwidth limit of a path like a rate, with
+// "/member" when each pool member has the limit, or "-" for no limit.
+func bandwidthText(bitsPerSecond float64, perMember bool) string {
+	text := formatRate(bitsPerSecond)
+	if text != "-" && perMember {
+		text += "/member"
+	}
+	return text
 }
 
 // srcText shows a source range as FIRST-LAST, as N for a range of one, or as

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/xshecan/mup/config"
+	"github.com/xshecan/mup/dataplane"
 	"github.com/xshecan/mup/measure"
 	"github.com/xshecan/mup/protocol"
 )
@@ -68,10 +69,11 @@ type dataCandidate struct {
 
 // dataSet returns the mask of the paths that carry data in one group
 // direction. A usable path is healthy and not degraded, and when no path is
-// usable, every healthy path is. With a chooser the set is the one usable
-// path that the chooser picks. Without one it is the usable set, and the mode
-// picks inside it. The set is empty only when no path is healthy.
-func dataSet(candidates []dataCandidate, chooser *measure.LatencyChooser, now time.Time) uint8 {
+// usable, every healthy path is. The set is the usable set, and the mode
+// picks inside it. With a chooser it also returns the usable path that the
+// chooser picks, which the failover mode tries first. The set is empty only
+// when no path is healthy.
+func dataSet(candidates []dataCandidate, chooser *measure.LatencyChooser, now time.Time) (mask uint8, chosen int, ok bool) {
 	var healthy, usable uint8
 	for _, candidate := range candidates {
 		if !candidate.healthy {
@@ -86,7 +88,7 @@ func dataSet(candidates []dataCandidate, chooser *measure.LatencyChooser, now ti
 		usable = healthy
 	}
 	if chooser == nil {
-		return usable
+		return usable, 0, false
 	}
 	paths := make([]measure.LatencyPath, 0, len(candidates))
 	for _, candidate := range candidates {
@@ -97,11 +99,60 @@ func dataSet(candidates []dataCandidate, chooser *measure.LatencyChooser, now ti
 			RTT:      candidate.rtt,
 		})
 	}
-	id, ok := chooser.Choose(paths, now)
-	if !ok {
-		return 0
+	chosen, ok = chooser.Choose(paths, now)
+	return usable, chosen, ok
+}
+
+// maxWeight is the weight of the path with the largest rate in a balancer
+// group whose paths all have a rate limit.
+const maxWeight = 255
+
+// rateShare is the rate limit of one path of a group direction for its
+// balancer weight. members is the number of members of its via, which
+// multiplies a limit per member.
+type rateShare struct {
+	id      int
+	limit   dataplane.RateLimit
+	members int
+}
+
+// rate is the rate of the whole path in bits per second.
+func (s rateShare) rate() uint64 {
+	if s.limit.PerMember {
+		return s.limit.BitsPerSecond * uint64(max(s.members, 1))
 	}
-	return 1 << id
+	return s.limit.BitsPerSecond
+}
+
+// balancerWeights returns the weight of each path of a group direction by its
+// ID. When the mode is balancer and every path has a rate limit, the weights
+// are the rates scaled so the largest is 255, and each other at least 1.
+// Otherwise every weight is zero, and the paths share the peers equally.
+func balancerWeights(mode config.Mode, shares []rateShare) [config.MaxPaths]uint8 {
+	var weights [config.MaxPaths]uint8
+	if mode != config.ModeBalancer || len(shares) == 0 {
+		return weights
+	}
+	var largest uint64
+	for _, share := range shares {
+		if share.limit.BitsPerSecond == 0 {
+			return weights
+		}
+		largest = max(largest, share.rate())
+	}
+	for _, share := range shares {
+		if share.id < 0 || share.id >= len(weights) {
+			continue
+		}
+		weight := (share.rate()*maxWeight + largest/2) / largest
+		weights[share.id] = uint8(max(weight, 1))
+	}
+	return weights
+}
+
+// rateLimitOf is the dataplane form of the rate limit of a path.
+func rateLimitOf(path config.Path) dataplane.RateLimit {
+	return dataplane.RateLimit{BitsPerSecond: path.BandwidthBitsPerSecond, PerMember: path.BandwidthPerMember}
 }
 
 // choiceRTT is the mean round trip time of a probe tracker for a latency

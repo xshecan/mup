@@ -99,6 +99,35 @@ func (d *egressDriver) healthyMask() uint8 {
 	return d.plane.groups[egressGroupOf].HealthyMask
 }
 
+// first is the path that the failover mode of the group tries first: the
+// preferred path, or else the path of the data set with the lowest ID. It is
+// -1 when the data set is empty.
+func (d *egressDriver) first() int {
+	group := d.plane.groups[egressGroupOf]
+	if group.HasPreferred && group.HealthyMask&(1<<group.Preferred) != 0 {
+		return int(group.Preferred)
+	}
+	for id := range dataplane.MaxEgressPaths {
+		if group.HealthyMask&(1<<id) != 0 {
+			return id
+		}
+	}
+	return -1
+}
+
+// runUntilFirst runs rounds until the failover mode tries path want first,
+// and fails after limit rounds.
+func (d *egressDriver) runUntilFirst(t *testing.T, want int, limit int) {
+	t.Helper()
+	for range limit {
+		if d.first() == want {
+			return
+		}
+		d.run(t, 1)
+	}
+	t.Fatalf("first egress path = %d after %d rounds, want %d", d.first(), limit, want)
+}
+
 // runUntil runs rounds until the group mask is want, and fails after limit
 // rounds.
 func (d *egressDriver) runUntil(t *testing.T, want uint8, limit int) {
@@ -193,26 +222,34 @@ func TestTheServerPicksTheFasterEgressPath(t *testing.T) {
 	driver := newEgressDriver(settingsFrame(0, 9300, config.ModeFailover, settings), settingsFrame(1, 9301, config.ModeFailover, settings))
 	driver.rtt[0], driver.rtt[1] = 60*time.Millisecond, 15*time.Millisecond
 	driver.run(t, 1)
-	if mask := driver.healthyMask(); mask != 0b01 {
-		t.Fatalf("first mask = %#b, want path 0 by its order", mask)
+	// The data set keeps both paths, so a full path can spill, and the
+	// choice is the path that the failover mode tries first.
+	if mask, first := driver.healthyMask(), driver.first(); mask != 0b11 || first != 0 {
+		t.Fatalf("first mask = %#b with path %d first, want both with path 0 by its order", mask, first)
 	}
-	driver.runUntil(t, 0b10, 12)
+	driver.runUntilFirst(t, 1, 12)
+	if mask := driver.healthyMask(); mask != 0b11 {
+		t.Fatalf("mask = %#b, want both paths", mask)
+	}
 	if view := driver.egressPath(t, 1); !view.active || view.prefer != "latency" {
 		t.Fatalf("fast egress path = %#v", view)
+	}
+	if view := driver.egressPath(t, 0); view.active {
+		t.Fatalf("slow egress path = %#v, want not active", view)
 	}
 	driver.rtt[0] = 14 * time.Millisecond
 	for range 30 {
 		driver.run(t, 1)
-		if mask := driver.healthyMask(); mask != 0b10 {
-			t.Fatalf("mask = %#b after a small change, want path 1", mask)
+		if mask, first := driver.healthyMask(), driver.first(); mask != 0b11 || first != 1 {
+			t.Fatalf("mask = %#b with path %d first after a small change, want path 1 first", mask, first)
 		}
 	}
 	// The latency choice counts only in the failover mode.
 	repeater := newEgressDriver(settingsFrame(0, 9300, config.ModeRepeater, settings), settingsFrame(1, 9301, config.ModeRepeater, settings))
 	repeater.rtt[0] = 60 * time.Millisecond
 	repeater.run(t, 12)
-	if mask := repeater.healthyMask(); mask != 0b11 {
-		t.Fatalf("repeater mask = %#b, want both paths", mask)
+	if mask := repeater.healthyMask(); mask != 0b11 || repeater.plane.groups[egressGroupOf].HasPreferred {
+		t.Fatalf("repeater group = %#v, want both paths and no preferred path", repeater.plane.groups[egressGroupOf])
 	}
 }
 

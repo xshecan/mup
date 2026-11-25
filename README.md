@@ -150,7 +150,7 @@ server:
 | `client.servers[].ingress.prefer`, `client.servers[].egress.prefer` | `--ingress-prefer`, `--egress-prefer` | Optional. The `prefer` setting of each direction, in place of the `prefer` of the group. |
 | `client.servers[].ingress`, `client.servers[].egress` | `--ingress`, `--egress` | Optional. A `mode` and `routes` for each direction, in place of `mode` and `routes`. See [Separate ingress and egress paths](#separate-ingress-and-egress-paths). |
 | `client.servers[].ingress.bridges`, `client.servers[].egress.bridges` | `--ingress-bridge`, `--egress-bridge` | Optional. The paths through a bridge in each direction. An egress bridge can have `via`. See [Bridges](#bridges). |
-| `client.servers[].routes` | `-u` | The paths of the group, in the form of the `-u` flag. A path can end with `via RETURN_IP`. The server port of a path can be a range, `FIRST-LAST`. See [Server port ranges](#server-port-ranges). A path can also end with `src FIRST-LAST`. See [Source range](#source-range). |
+| `client.servers[].routes` | `-u` | The paths of the group, in the form of the `-u` flag. A path can end with `via RETURN_IP`. The server port of a path can be a range, `FIRST-LAST`. See [Server port ranges](#server-port-ranges). A path can also end with `src FIRST-LAST`. See [Source range](#source-range). A path can also end with `bw RATE`, and `per-member` after it. See [Bandwidth limit](#bandwidth-limit). |
 | `server.port` | `-p` | The UDP ports and the ICMP Echo identifiers that the server accepts, as `PORT` or `FIRST-LAST`, for example `5000-6000`. |
 | `server.target` | `-r` | The WireGuard target that receives all traffic. |
 | `server.control_socket` | `--control-socket` | Optional. The socket for `mupctl`. An empty value turns the socket off. |
@@ -277,6 +277,55 @@ These rules apply:
 - A server before v0.5.1 refuses the REGISTER of a path with a range, so the path does not come up there.
 
 `mupctl paths -o wide` shows the range of each path in the SRC column.
+
+## Bandwidth limit
+
+A bandwidth limit caps the data rate of one path. Some networks drop all traffic above a certain rate on one path. To keep a path under that rate, end its route with `bw RATE`. The client applies the limit to ingress paths, and the server applies it to egress paths.
+
+```yaml
+routes:
+  - 203.0.113.5:9000/udp bw 10mbit
+  - 203.0.113.5:9001/icmp via 198.51.100.0/28 per-packet bw 10mbit per-member
+  - 203.0.113.5:9002/udp via 198.51.100.9 src 5000-50000 bw 500kbit bridge 192.0.2.7
+bridges:
+  - 192.0.2.7:9300/icmp via 198.51.100.0/28 bw 20mbit
+```
+
+The option comes after `via` and `src`, and before `bridge`. A path with a pool can add `per-member` right after the rate.
+
+These rules apply to the rate:
+
+- `RATE` is a positive number, decimals allowed, and a unit with no space. The units are `kbit`, `mbit`, and `gbit`, or `kbps`, `mbps`, and `gbps` as synonyms. The units are case-insensitive.
+- The units are decimal. So 1 mbit is 1,000,000 bits per second.
+- The rate is from 8 kbit to 100 gbit, and it must be a whole number of kbit. So `1.5mbit` is valid, and `8.5kbit` is not.
+- The limit counts the IPv4 packets of the data on the path. Each packet counts its IPv4 total length. A path that wraps the packet for a bridge counts 20 bytes more.
+- Control frames are not counted, and the limit never drops them.
+
+`bw RATE` on a path with a pool sets one limit for the whole path. `bw RATE per-member` gives each member of the pool its own limit of RATE. It needs a `via`, and each member of the pool, or the one return IP of a `via`, has its own limit.
+
+### Full paths
+
+Room means that the limit of a path accepts the packet. A path without a limit always has room. A full path is a path with no room. The paths of a group then take the packets as follows:
+
+- Failover: A full path spills its packets to the next path of the group, in the order of the failover mode.
+- Balancer: The balancer sends a peer to its usual path. If that path is full, the packet spills to the next path with room. When every path of the direction has a limit, the balancer shares the peers in proportion to the rates. A path with twice the rate gets about twice the peers.
+- Repeater: The repeater skips a full path. It sends the copy only on the paths with room.
+- Per-member: A full member is skipped, and the next members of the pool take its packets in order. A path with no member that has room is full.
+
+With `prefer latency`, the chosen path comes first. So a full chosen path spills too. A spill sends a packet on another path. Because two paths have different delays, packets of one peer can arrive out of order while a path is full.
+
+When no path of the group has room, MUP drops the packet and counts the drop reason 26 `RATE_LIMIT`.
+
+The limit lets a burst of about 50 milliseconds of the rate pass. After the burst, the path sends at its rate.
+
+### Versions
+
+An ingress limit needs a client of v0.5.5. An egress limit needs a client and a server of v0.5.5, and an older server ignores it. A bridge needs no update.
+
+### What mupctl shows
+
+- `mupctl paths -o wide` shows the limit in the BW column, before RATE. The column shows `10.0Mbit`, `10.0Mbit/member`, or `-` without a limit.
+- On a server, `mupctl get clients -o wide` shows `bw 10.0Mbit`, or `bw 10.0Mbit/member`, after the address part of each EGRESS LIST entry. Only the entries with a limit show it.
 
 ## Bridges
 
@@ -406,6 +455,7 @@ A bridge entry has the form of a route, with the bridge address in place of the 
 - An egress bridge has one port and no `%IFACE`. In `bridges`, it can have `via`. Without `via`, the bridge sends the replies from the bridge address and the server wraps them from its own address.
 - The routes and the bridges of a direction share its 8 path slots, and the routes come first. So in the failover mode, a healthy route carries the traffic before a bridge.
 - A route or a bridge entry can end with `src FIRST-LAST`. An ICMP ingress entry in `bridges` cannot have it, because the bridge finds its entry by the identifier. See [Source range](#source-range).
+- A route or a bridge entry can end with `bw RATE`, and `per-member` after it. See [Bandwidth limit](#bandwidth-limit).
 - On an egress path through a bridge with a range, a UDP wrapper to the bridge also takes a source port of the range. Its destination port stays the port of the entry. An Echo wrapper keeps the port of the entry as its identifier, and its sequence takes a value of the range.
 - The `port` of the bridge must include the ports of all bridge entries. The bridge sends the ingress to the server of the entry that holds the port, on the same port.
 
@@ -468,13 +518,13 @@ The command `mup --config FILE` reads a [configuration file](#configuration-file
 ### Client
 
 ```text
-mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP] [src FIRST-LAST]" [-u ...] -s CLIENT_IP
+mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP] [src FIRST-LAST] [bw RATE [per-member]]" [-u ...] -s CLIENT_IP
            [-r RETURN_IP] [--mode failover|balancer|repeater] [--max-loss PERCENT] [--prefer latency|order]
            [--control-socket PATH]
-mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP] [src FIRST-LAST]" [--ingress ...]
-           --egress "SERVER_IP:PORT/udp|icmp [via RETURN_IP] [src FIRST-LAST] [bridge BRIDGE_IP]" [--egress ...] -s CLIENT_IP
-           [--ingress-bridge "BRIDGE_IP[%IFACE]:PORT[-LAST]/udp|icmp [src FIRST-LAST]"] [--ingress-bridge ...]
-           [--egress-bridge "BRIDGE_IP:PORT/udp|icmp [via RETURN_IP] [src FIRST-LAST]"] [--egress-bridge ...]
+mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP] [src FIRST-LAST] [bw RATE [per-member]]" [--ingress ...]
+           --egress "SERVER_IP:PORT/udp|icmp [via RETURN_IP] [src FIRST-LAST] [bw RATE [per-member]] [bridge BRIDGE_IP]" [--egress ...] -s CLIENT_IP
+           [--ingress-bridge "BRIDGE_IP[%IFACE]:PORT[-LAST]/udp|icmp [src FIRST-LAST] [bw RATE [per-member]]"] [--ingress-bridge ...]
+           [--egress-bridge "BRIDGE_IP:PORT/udp|icmp [via RETURN_IP] [src FIRST-LAST] [bw RATE [per-member]]"] [--egress-bridge ...]
            [--ingress-mode MODE] [--egress-mode MODE]
            [--ingress-max-loss PERCENT] [--ingress-prefer latency|order]
            [--egress-max-loss PERCENT] [--egress-prefer latency|order] [--control-socket PATH]
@@ -483,13 +533,13 @@ mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via
 | Flag | Value | Meaning |
 | --- | --- | --- |
 | `-p` | port | The UDP port where the client receives WireGuard packets from the peers. |
-| `-u` | `SERVER_IP[%IFACE]:PORT/udp` or `/icmp`, then optionally `via RETURN_IP` | One path to a server. Repeat the flag for up to 8 paths. The optional `%IFACE` binds the path to one interface. The optional `via RETURN_IP` sets the return IP of the path. `PORT` can be a range `FIRST-LAST`, see [Server port ranges](#server-port-ranges). The optional `src FIRST-LAST` sets the [source range](#source-range). |
+| `-u` | `SERVER_IP[%IFACE]:PORT/udp` or `/icmp`, then optionally `via RETURN_IP` | One path to a server. Repeat the flag for up to 8 paths. The optional `%IFACE` binds the path to one interface. The optional `via RETURN_IP` sets the return IP of the path. `PORT` can be a range `FIRST-LAST`, see [Server port ranges](#server-port-ranges). The optional `src FIRST-LAST` sets the [source range](#source-range). The optional `bw RATE`, and `per-member` after it, sets the [bandwidth limit](#bandwidth-limit). |
 | `-s` | IPv4 | The advertised IP. It must be an address of the client host, and no other active client of the server can use it. |
 | `-r` | IPv4 | Optional. The return IP of each `-u` path without its own `via`. On UDP paths, it is the spoofed source of replies. On ICMP paths, it is the reflector host. |
 | `--mode` | `failover`, `balancer`, `repeater` | The path mode. The default is `failover`. |
-| `--ingress` | `SERVER_IP[%IFACE]:PORT/udp` or `/icmp` | One ingress path of a group with separate egress paths. It can end with `via RETURN_IP` and `src FIRST-LAST`. Use it with `--egress`, and not with `-u`. |
-| `--egress` | `SERVER_IP:PORT/udp` or `/icmp`, then optionally `via RETURN_IP`, `src FIRST-LAST`, and `bridge BRIDGE_IP` | One egress path. With `bridge BRIDGE_IP`, the bridge spoofs the reply, and `via` is required. See [Separate ingress and egress paths](#separate-ingress-and-egress-paths) and [Bridges](#bridges). |
-| `--ingress-bridge`, `--egress-bridge` | `BRIDGE_IP:PORT/udp` or `/icmp` | One ingress path or egress path through a bridge. An egress bridge can end with `via RETURN_IP`, and then the server spoofs the wrapper. Both can end with `src FIRST-LAST`. See [Bridges](#bridges) and [Source range](#source-range). |
+| `--ingress` | `SERVER_IP[%IFACE]:PORT/udp` or `/icmp` | One ingress path of a group with separate egress paths. It can end with `via RETURN_IP`, `src FIRST-LAST`, and `bw RATE [per-member]`. Use it with `--egress`, and not with `-u`. |
+| `--egress` | `SERVER_IP:PORT/udp` or `/icmp`, then optionally `via RETURN_IP`, `src FIRST-LAST`, `bw RATE [per-member]`, and `bridge BRIDGE_IP` | One egress path. With `bridge BRIDGE_IP`, the bridge spoofs the reply, and `via` is required. See [Separate ingress and egress paths](#separate-ingress-and-egress-paths) and [Bridges](#bridges). |
+| `--ingress-bridge`, `--egress-bridge` | `BRIDGE_IP:PORT/udp` or `/icmp` | One ingress path or egress path through a bridge. An egress bridge can end with `via RETURN_IP`, and then the server spoofs the wrapper. Both can end with `src FIRST-LAST` and `bw RATE [per-member]`. See [Bridges](#bridges), [Source range](#source-range), and [Bandwidth limit](#bandwidth-limit). |
 | `--ingress-mode`, `--egress-mode` | `failover`, `balancer`, `repeater` | The ingress mode and the egress mode. The default is `failover`. |
 | `--max-loss`, `--ingress-max-loss`, `--egress-max-loss` | percent, for example `5%` | The loss limit of the group, or of one direction. See [Loss limit and latency choice](#loss-limit-and-latency-choice). |
 | `--prefer`, `--ingress-prefer`, `--egress-prefer` | `latency`, `order` | The path choice of the failover mode of the group, or of one direction. The default is `order`. |
@@ -531,7 +581,7 @@ mup bridge -s SERVER_IP -p PORT[-LAST] [-a CIDR] [-a ...] [--control-socket PATH
 | --- | --- | --- |
 | `mupctl status` | all | Shows an overview. A client lists its groups and paths, and a server lists its clients. A bridge shows its server and the packets that it sent in each direction. A bridge with more than one entry shows a table with the columns SERVER, PORT and ALLOW, with one row for each entry. The packet counters and the drop counters are for the whole bridge. |
 | `mupctl groups` | client | Lists the groups with their mode, healthy paths, and peers. |
-| `mupctl paths` | client | Lists the paths with their server port, return IP, state, the age of the last answer, round-trip time, and loss. With `-o wide`, it also shows the port range, the source range (SRC), the priority, and the missed ACKs. It also shows the average RTT, the jitter, the data loss, the probe loss, and the rate. |
+| `mupctl paths` | client | Lists the paths with their server port, return IP, state, the age of the last answer, round-trip time, and loss. With `-o wide`, it also shows the port range, the source range (SRC), the priority, and the missed ACKs. It also shows the average RTT, the jitter, the data loss, the probe loss, the bandwidth limit, and the rate. |
 | `mupctl members` | both | Lists the pool members of ingress paths on a client and egress paths on a server, with their state, RTT, jitter, and probe loss. See [Path measurement](#path-measurement). |
 | `mupctl peers` | both | Lists the WireGuard peers of a client, or the peer routes of a server. |
 | `mupctl clients` | server | Lists the registered clients with their paths, peers, and lease. |
@@ -625,9 +675,10 @@ With `-o wide`, the paths table adds these columns:
 | JITTER | The jitter over 60 seconds. |
 | DATA LOSS | The data loss over 10 seconds and over 60 seconds, as `10s/60s`, for example `0.4%/0.2%`. |
 | PROBE LOSS | The probe loss. |
+| BW | The bandwidth limit of the path, for example `10.0Mbit` or `10.0Mbit/member`. `-` means no limit. See [Bandwidth limit](#bandwidth-limit). |
 | RATE | The data rate over the last 10 seconds, in bits per second, for example `850kbit` or `12.4Mbit`. `-` means zero. |
 
-On a server, `mupctl get clients -o wide` adds the loss and the average RTT to each entry of the EGRESS LIST. If the path has them, the entry ends with them, for example `loss 0.3% rtt 15.2ms`.
+On a server, `mupctl get clients -o wide` adds the loss and the average RTT to each entry of the EGRESS LIST. If the path has them, the entry ends with them, for example `loss 0.3% rtt 15.2ms`. An entry with a limit shows `bw 10.0Mbit`, or `bw 10.0Mbit/member`, after the address part.
 
 ### Members
 

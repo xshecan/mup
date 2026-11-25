@@ -20,17 +20,22 @@ import (
 const usage = `usage:
   mup --config FILE
   mup server -p PORT[-LAST] -r TARGET_IP:PORT [--target-ingress] [--control-socket PATH]
-  mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP]" [-u ...] -s CLIENT_IP
+  mup client -p LISTEN_PORT -u "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [via RETURN_IP] [ROUTE_OPTIONS]" [-u ...] -s CLIENT_IP
              [-r RETURN_IP] [--mode failover|balancer|repeater] [--max-loss PERCENT] [--prefer latency|order]
              [--control-socket PATH]
-  mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp" [--ingress ...]
-             --egress "SERVER_IP:PORT/udp|icmp [via RETURN_IP [bridge BRIDGE_IP]]" [--egress ...] -s CLIENT_IP
-             [--ingress-bridge "BRIDGE_IP[%IFACE]:PORT[-LAST]/udp|icmp"] [--ingress-bridge ...]
-             [--egress-bridge "BRIDGE_IP:PORT/udp|icmp [via RETURN_IP]"] [--egress-bridge ...]
+  mup client -p LISTEN_PORT --ingress "SERVER_IP[%IFACE]:PORT[-LAST]/udp|icmp [ROUTE_OPTIONS]" [--ingress ...]
+             --egress "SERVER_IP:PORT/udp|icmp [via RETURN_IP] [ROUTE_OPTIONS] [bridge BRIDGE_IP]" [--egress ...] -s CLIENT_IP
+             [--ingress-bridge "BRIDGE_IP[%IFACE]:PORT[-LAST]/udp|icmp [ROUTE_OPTIONS]"] [--ingress-bridge ...]
+             [--egress-bridge "BRIDGE_IP:PORT/udp|icmp [via RETURN_IP] [ROUTE_OPTIONS]"] [--egress-bridge ...]
              [--ingress-mode MODE] [--egress-mode MODE]
              [--ingress-max-loss PERCENT] [--ingress-prefer latency|order]
              [--egress-max-loss PERCENT] [--egress-prefer latency|order] [--control-socket PATH]
   mup bridge -s SERVER_IP -p PORT[-LAST] [-a CIDR] [-a ...] [--control-socket PATH]
+
+  ROUTE_OPTIONS, in this order: [src FIRST-LAST] [bw RATE [per-member]]
+    bw RATE limits the data on the route, such as bw 10mbit, 500kbit or 1.5gbit
+    (kbit, mbit, gbit, or kbps, mbps, gbps; from 8kbit to 100gbit). per-member gives
+    each member of the via its own limit, and needs a via.
 `
 
 type applicationRunner func(context.Context, config.App) error
@@ -143,7 +148,7 @@ func parseClientArgs(args []string) (*config.Client, error) {
 	var advertisedText, returnIPText, modeName, ingressModeName, egressModeName, controlSocket string
 	var maxLossText, preferName, ingressMaxLossText, ingressPreferName, egressMaxLossText, egressPreferName string
 	fs.IntVar(&port, "p", 0, "local WireGuard UDP listen port")
-	fs.Var(&rawPaths, "u", "server path as IPv4:PORT/udp or /icmp, where PORT can be a range FIRST-LAST")
+	fs.Var(&rawPaths, "u", "server path as IPv4:PORT/udp or /icmp, where PORT can be a range FIRST-LAST, with an optional via, src, and bw RATE")
 	fs.Var(&rawIngress, "ingress", "ingress path as IPv4:PORT/udp or /icmp, for the ingress only")
 	fs.Var(&rawEgress, "egress", "egress path as IPv4:PORT/udp or /icmp, for the egress only")
 	fs.Var(&rawIngressBridges, "ingress-bridge", "ingress path through a MUP bridge, as BRIDGE_IP:PORT/udp or /icmp")

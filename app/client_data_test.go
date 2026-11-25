@@ -107,6 +107,41 @@ func (f *dataFixture) state() (uint8, uint32) {
 	return f.dataplane.mask, f.dataplane.generation
 }
 
+// first is the path that the failover mode tries first: the path of the mask
+// with the lowest priority in the dataplane, or -1 for an empty mask. A path
+// that was never written has the priority of the plan.
+func (f *dataFixture) first() int {
+	f.dataplane.mu.Lock()
+	defer f.dataplane.mu.Unlock()
+	selected, priority := -1, 0
+	for slot := range config.MaxPaths {
+		if f.dataplane.mask&(1<<slot) == 0 {
+			continue
+		}
+		settings, ok := f.dataplane.paths[slot]
+		if !ok {
+			settings = f.controller.initial[slot]
+		}
+		if selected < 0 || int(settings.Priority) < priority {
+			selected, priority = slot, int(settings.Priority)
+		}
+	}
+	return selected
+}
+
+// runUntilFirst runs rounds until the failover mode tries path want first,
+// and fails after limit rounds.
+func (f *dataFixture) runUntilFirst(t *testing.T, want, limit int) {
+	t.Helper()
+	for range limit {
+		if f.first() == want {
+			return
+		}
+		f.run(t, 1)
+	}
+	t.Fatalf("first path = %d after %d rounds, want %d", f.first(), limit, want)
+}
+
 // runUntil runs rounds until the mask is want, and fails after limit rounds.
 func (f *dataFixture) runUntil(t *testing.T, want uint8, limit int) {
 	t.Helper()
@@ -199,33 +234,38 @@ func TestPreferLatencyPicksTheFasterIngressPathAndKeepsIt(t *testing.T) {
 
 	fixture := newDataFixture(t, lossGroup(t, config.ModeFailover, 0, config.PreferLatency))
 	fixture.rtt[0], fixture.rtt[1] = 50*time.Millisecond, 20*time.Millisecond
-	// The order picks path 0 until the RTTs are known, and the faster path
-	// takes over after it stayed better for the switch time.
-	if mask, _ := fixture.state(); mask != 0b01 {
-		t.Fatalf("first mask = %#b, want path 0", mask)
+	// The data set keeps both paths, so a full path can spill, and the
+	// choice is the path that the failover mode tries first. The order picks
+	// path 0 until the RTTs are known, and the faster path takes over after
+	// it stayed better for the switch time.
+	if mask, _ := fixture.state(); mask != 0b11 || fixture.first() != 0 {
+		t.Fatalf("first mask = %#b with path %d first, want both with path 0 first", mask, fixture.first())
 	}
 	fixture.run(t, 5)
-	if mask, _ := fixture.state(); mask != 0b01 {
-		t.Fatalf("mask = %#b right after the RTTs are known, want path 0", mask)
+	if first := fixture.first(); first != 0 {
+		t.Fatalf("path %d is first right after the RTTs are known, want path 0", first)
 	}
-	fixture.runUntil(t, 0b10, 7)
-	if path := fixture.path(t, "", 1); !path.InUse {
-		t.Fatalf("fast path = %#v, want in use", path)
+	fixture.runUntilFirst(t, 1, 7)
+	if mask, _ := fixture.state(); mask != 0b11 {
+		t.Fatalf("mask = %#b, want both paths", mask)
 	}
-	if path := fixture.path(t, "", 0); path.InUse || path.Degraded {
-		t.Fatalf("slow path = %#v, want healthy and not in use", path)
+	if path := fixture.path(t, "", 1); !path.InUse || path.Priority != 1 {
+		t.Fatalf("fast path = %#v, want in use with its configured priority", path)
+	}
+	if path := fixture.path(t, "", 0); path.InUse || path.Degraded || path.Priority != 0 {
+		t.Fatalf("slow path = %#v, want healthy, not in use, with its configured priority", path)
 	}
 	// A small gain of the other path moves nothing.
 	fixture.rtt[0] = 19 * time.Millisecond
 	for range 40 {
 		fixture.run(t, 1)
-		if mask, _ := fixture.state(); mask != 0b10 {
-			t.Fatalf("mask = %#b after a small change, want path 1", mask)
+		if first := fixture.first(); first != 1 {
+			t.Fatalf("path %d is first after a small change, want path 1", first)
 		}
 	}
 	// The current path that fails moves the data at once.
 	fixture.miss(t, 1, missLimit)
-	if mask, _ := fixture.state(); mask != 0b01 {
+	if mask, _ := fixture.state(); mask != 0b01 || fixture.first() != 0 {
 		t.Fatalf("mask = %#b after path 1 failed, want path 0", mask)
 	}
 }

@@ -41,7 +41,11 @@ type Runtime struct {
 	// receiving, the monotonic time of that report. A UDP pool member is healthy
 	// while its confirmation is fresh.
 	confirmations map[netip.Addr]uint64
-	closed        bool
+	// egressLimits holds, for each client on a server, a bit for each egress
+	// path with a bandwidth limit. The egress groups get it as their limit
+	// mask.
+	egressLimits map[ClientKey]uint8
+	closed       bool
 }
 
 func Load(cfg Config) (runtime *Runtime, err error) {
@@ -240,6 +244,9 @@ func (r *Runtime) ConfigureClient(settings ClientSettings) error {
 	if err := r.deleteOtherGroups(settings.Groups); err != nil {
 		return err
 	}
+	if err := applyConfiguredBuckets(r.clientPathMaps(), settings.Paths); err != nil {
+		return err
+	}
 	return applyClientSettings(configurationMaps{
 		client:         r.objects.ClientConfig,
 		groups:         r.objects.PathGroups,
@@ -296,6 +303,11 @@ func (r *Runtime) ConfigureServer(settings ServerSettings) error {
 	if err := clearMap[mupPathCounterKeyV1, []mupPathCounterV1](r.objects.ServerPathCounters); err != nil {
 		return fmt.Errorf("clear server path counters: %w", err)
 	}
+	// So do the buckets, which come back with the egress paths.
+	if err := clearMap[mupRateBucketKeyV1, mupRateBucketV1](r.objects.ServerRateBuckets); err != nil {
+		return fmt.Errorf("clear server rate buckets: %w", err)
+	}
+	r.egressLimits = nil
 	if settings.Target.Addr() == settings.SourceIP {
 		return r.releaseLocalTargetPort(settings.Target.Port())
 	}

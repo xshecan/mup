@@ -109,6 +109,10 @@ type EgressPathEntry struct {
 	LocalIP    netip.Addr
 	SrcFirst   uint16
 	SrcLast    uint16
+	// Limit is the bandwidth limit of the replies on the path.
+	// SetServerEgressPath creates the state of the limit, and
+	// DeleteServerEgressPath removes it.
+	Limit RateLimit
 }
 
 // EgressGroupEntry is the egress group of one listen port of a client on a
@@ -120,6 +124,13 @@ type EgressGroupEntry struct {
 	PathMask    uint8
 	HealthyMask uint8
 	ICMPMask    uint8
+	// Weights holds the share of each egress path in the balancer mode. A
+	// zero means the same share as a weight of one.
+	Weights [MaxEgressPaths]uint8
+	// With HasPreferred, the failover mode tries the path Preferred first,
+	// and then the other paths by their ID.
+	HasPreferred bool
+	Preferred    uint8
 }
 
 func encodeClientKey(client ClientKey) (mupClientKeyV1, error) {
@@ -201,6 +212,7 @@ func encodeEgressPathEntry(entry EgressPathEntry) (mupDownPathKeyV1, mupDownPath
 		}
 		value.Flags |= protocol.ControlFlagBridgeVia
 	}
+	setEgressPathLimitFields(&value, entry.Limit)
 	return key, value, nil
 }
 
@@ -223,10 +235,12 @@ func encodeEgressGroupEntry(entry EgressGroupEntry) (mupDownGroupKeyV1, mupDownG
 	if entry.Mode > config.ModeRepeater {
 		return key, mupDownGroupV1{}, errors.New("egress group needs a valid mode")
 	}
-	return key, mupDownGroupV1{
+	value := mupDownGroupV1{
 		Mode:        uint8(entry.Mode),
 		PathMask:    entry.PathMask,
 		HealthyMask: entry.HealthyMask & entry.PathMask,
 		IcmpMask:    entry.ICMPMask & entry.PathMask,
-	}, nil
+	}
+	setEgressGroupShares(&value, entry)
+	return key, value, nil
 }

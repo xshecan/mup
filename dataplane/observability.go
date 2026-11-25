@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	dropReasonCount = int(protocol.DropBridgeSize) + 1
+	dropReasonCount = int(protocol.DropRateLimit) + 1
 	eventRecordSize = 32
 )
 

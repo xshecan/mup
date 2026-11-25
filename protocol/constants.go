@@ -50,6 +50,24 @@ const (
 	// the count code of the data packets that the server received on the
 	// path, and the server sends it like a REGISTER_ACK.
 	ControlMeasureReply
+	// ControlEgressLimit carries the rate limit of one egress path. The client
+	// sends it right after each EGRESS_REGISTER of a path with a limit, in the
+	// same way. Its first 36 bytes are those of the EGRESS_REGISTER with no
+	// flag, and the rate and its flags follow. A server that does not know the
+	// type drops it and applies no limit.
+	ControlEgressLimit
+)
+
+// EgressLimitPerMember is the flag of an EGRESS_LIMIT that gives each member
+// of the via of the path its own limit of the rate.
+const EgressLimitPerMember uint32 = 1 << 0
+
+// MinEgressLimitKbps and MaxEgressLimitKbps are the smallest and the largest
+// rate of an EGRESS_LIMIT in kilobits per second, 8 kbit and 100 gbit. A rate
+// of zero removes the limit.
+const (
+	MinEgressLimitKbps uint32 = 8
+	MaxEgressLimitKbps uint32 = 100_000_000
 )
 
 type ControlStatus uint16
@@ -133,6 +151,9 @@ const (
 	DropBridgeSource
 	DropBridgePacket
 	DropBridgeSize
+	// DropRateLimit drops a data packet when no path of its group has room
+	// for it under the bandwidth limits of the paths.
+	DropRateLimit
 )
 
 // dropReasonNames matches the MUP_DROP_* names in bpf/include/mup_abi.h.
@@ -163,6 +184,7 @@ var dropReasonNames = [...]string{
 	DropBridgeSource:      "BRIDGE_SOURCE",
 	DropBridgePacket:      "BRIDGE_PACKET",
 	DropBridgeSize:        "BRIDGE_SIZE",
+	DropRateLimit:         "RATE_LIMIT",
 }
 
 func (r DropReason) String() string {

@@ -95,7 +95,18 @@ type serverEgressPath struct {
 	// degradedMembers holds the members that the gates degraded in the
 	// latest sync.
 	degradedMembers []netip.Addr
+	// limit is the rate limit that the latest EGRESS_LIMIT of the path set,
+	// or zero for none. unlimited counts the EGRESS_REGISTER frames of the
+	// path in a row with no EGRESS_LIMIT after them, and the path loses its
+	// limit after egressLimitMisses of them.
+	limit     dataplane.RateLimit
+	unlimited int
 }
+
+// egressLimitMisses is the number of EGRESS_REGISTER frames of a path in a row
+// with no EGRESS_LIMIT after them that remove the limit of the path, because
+// the client removed it.
+const egressLimitMisses = 3
 
 func (p *serverEgressPath) pool() bool {
 	return p.prefix != 0
@@ -155,21 +166,27 @@ type egressGroupKey struct {
 
 // serverEgressGroup is one egress group of a client. Its mode and its
 // settings come from the latest EGRESS_REGISTER of the group. dataMask holds
-// the paths that carry replies.
+// the paths that carry replies. With hasPreferred, the failover mode tries the
+// path preferred first: the path of the latency choice.
 type serverEgressGroup struct {
-	mode     config.Mode
-	settings protocol.EgressSettings
-	chooser  measure.LatencyChooser
-	dataMask uint8
-	written  *dataplane.EgressGroupEntry
+	mode         config.Mode
+	settings     protocol.EgressSettings
+	chooser      measure.LatencyChooser
+	dataMask     uint8
+	hasPreferred bool
+	preferred    uint8
+	written      *dataplane.EgressGroupEntry
 }
 
 // activeMask holds the paths that the server sends replies on now, as the
-// program picks them from the data set: the path with the lowest ID in the
-// failover mode, which is the chosen path with a latency choice, and every
+// program picks them from the data set: in the failover mode the preferred
+// path of a latency choice, or else the path with the lowest ID, and every
 // path of the data set in the other modes.
 func (g *serverEgressGroup) activeMask() uint8 {
 	if g.mode == config.ModeFailover {
+		if g.hasPreferred && g.dataMask&(1<<g.preferred) != 0 {
+			return 1 << g.preferred
+		}
 		return g.dataMask & -g.dataMask
 	}
 	return g.dataMask
@@ -325,6 +342,14 @@ func (r *egressRegistry) register(frame protocol.ControlFrame, now time.Time) er
 	// below also visits the old group.
 	path.listenPort = frame.ListenPort
 	path.expires = now.Add(r.lease)
+	// An EGRESS_LIMIT follows each EGRESS_REGISTER of a path with a limit, so
+	// a path that misses it again and again has none any more.
+	if path.limit.BitsPerSecond != 0 {
+		path.unlimited++
+		if path.unlimited >= egressLimitMisses {
+			path.limit, path.unlimited = dataplane.RateLimit{}, 0
+		}
+	}
 	groupKey := egressGroupKey{client: client, listenPort: frame.ListenPort}
 	group := r.groups[groupKey]
 	if group == nil {
@@ -336,6 +361,38 @@ func (r *egressRegistry) register(frame protocol.ControlFrame, now time.Time) er
 	// an older client has none.
 	_, group.settings = protocol.UnpackEgressLease(frame.LeaseSeconds)
 	r.syncClientLocked(client, now)
+	return nil
+}
+
+// limit keeps the rate limit of an EGRESS_LIMIT with the egress path that it
+// names. The service checks the source of the frame before, as for an
+// EGRESS_REGISTER. The path must be a live path of the client on this server
+// with the same server port, transport and listen port, so a limit never
+// creates a path. A rate of zero removes the limit at once. The dataplane
+// gets the limit with the next sync.
+func (r *egressRegistry) limit(frame protocol.ControlFrame, now time.Time) error {
+	if frame.Type != protocol.ControlEgressLimit {
+		return errors.New("not an EGRESS_LIMIT frame")
+	}
+	if frame.PathID >= dataplane.MaxEgressPaths {
+		return fmt.Errorf("egress path ID %d is too large", frame.PathID)
+	}
+	client := dataplane.ClientKey{AdvertisedIP: frame.AdvertisedIP, InstanceNonce: frame.InstanceNonce}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	path := r.paths[egressKey{client: client, id: frame.PathID}]
+	if path == nil || now.After(path.expires) {
+		return nil
+	}
+	if path.port != frame.ServerPort || path.transport != frame.Transport || path.listenPort != frame.ListenPort {
+		return fmt.Errorf("EGRESS_LIMIT names server port %d/%s of listen port %d, but the egress path has %d/%s of listen port %d",
+			frame.ServerPort, frame.Transport, frame.ListenPort, path.port, path.transport, path.listenPort)
+	}
+	path.unlimited = 0
+	path.limit = dataplane.RateLimit{
+		BitsPerSecond: uint64(frame.LimitKbps) * 1000,
+		PerMember:     frame.LimitKbps != 0 && frame.LimitFlags&protocol.EgressLimitPerMember != 0,
+	}
 	return nil
 }
 
@@ -563,6 +620,7 @@ func (r *egressRegistry) syncClientLocked(client dataplane.ClientKey, now time.T
 	type masks struct {
 		path, icmp uint8
 		candidates []dataCandidate
+		shares     []rateShare
 	}
 	byPort := make(map[uint16]*masks)
 	for key, path := range r.paths {
@@ -604,6 +662,7 @@ func (r *egressRegistry) syncClientLocked(client dataplane.ClientKey, now time.T
 			LocalIP:    path.localIP,
 			SrcFirst:   path.srcFirst,
 			SrcLast:    path.srcLast,
+			Limit:      path.limit,
 		}
 		if path.pool() {
 			entry.Members = publishedMembers(healthy, path.degradedMembers)
@@ -631,6 +690,7 @@ func (r *egressRegistry) syncClientLocked(client dataplane.ClientKey, now time.T
 			degraded: degraded,
 			rtt:      choiceRTT(&path.measure.probes, now),
 		})
+		group.shares = append(group.shares, rateShare{id: int(key.id), limit: path.limit, members: len(r.candidatesLocked(path))})
 	}
 	for key, group := range r.groups {
 		if key.client != client {
@@ -649,14 +709,33 @@ func (r *egressRegistry) syncClientLocked(client dataplane.ClientKey, now time.T
 		if group.policy().latency {
 			chooser = &group.chooser
 		}
-		group.dataMask = dataSet(mask.candidates, chooser, now)
+		dataMask, chosen, ok := dataSet(mask.candidates, chooser, now)
+		group.dataMask = dataMask
+		// The latency choice names the path that the failover mode tries
+		// first. The data set stays the usable set, so a full path can
+		// spill to the others. The last choice stays while no path is
+		// usable.
+		if chooser == nil {
+			group.hasPreferred = false
+		} else if ok {
+			group.hasPreferred, group.preferred = true, uint8(chosen)
+		}
+		if group.hasPreferred && mask.path&(1<<group.preferred) == 0 {
+			group.hasPreferred = false
+		}
 		entry := dataplane.EgressGroupEntry{
-			Client:      client,
-			ListenPort:  key.listenPort,
-			Mode:        group.mode,
-			PathMask:    mask.path,
-			HealthyMask: group.dataMask,
-			ICMPMask:    mask.icmp,
+			Client:       client,
+			ListenPort:   key.listenPort,
+			Mode:         group.mode,
+			PathMask:     mask.path,
+			HealthyMask:  group.dataMask,
+			ICMPMask:     mask.icmp,
+			Weights:      balancerWeights(group.mode, mask.shares),
+			HasPreferred: group.hasPreferred,
+			Preferred:    group.preferred,
+		}
+		if !entry.HasPreferred {
+			entry.Preferred = 0
 		}
 		if group.written != nil && *group.written == entry {
 			continue
@@ -725,7 +804,7 @@ func sameEgressEntry(a, b dataplane.EgressPathEntry) bool {
 		a.ServerPort == b.ServerPort && a.Transport == b.Transport && a.Ifindex == b.Ifindex &&
 		a.ReturnIP == b.ReturnIP && a.Pool == b.Pool && a.PerPacket == b.PerPacket &&
 		a.Bridge == b.Bridge && a.BridgeVia == b.BridgeVia && a.LocalIP == b.LocalIP &&
-		a.SrcFirst == b.SrcFirst && a.SrcLast == b.SrcLast
+		a.SrcFirst == b.SrcFirst && a.SrcLast == b.SrcLast && a.Limit == b.Limit
 }
 
 // clients returns the egress groups of each client for mupctl, keyed by client
@@ -764,6 +843,9 @@ func (r *egressRegistry) clients(now time.Time) map[dataplane.ClientKey][]api.Eg
 				Active:         active&(1<<key.id) != 0,
 				Degraded:       len(healthy) > 0 && path.gate.Degraded(),
 				Measurement:    path.measure.view(now),
+
+				BandwidthBitsPerSecond: float64(path.limit.BitsPerSecond),
+				BandwidthPerMember:     path.limit.PerMember,
 			}
 			if egress.Degraded {
 				egress.Reason = path.gate.Reason()

@@ -23,11 +23,14 @@ func TestGeneratedABISizes(t *testing.T) {
 		{name: "server reverse value", got: unsafe.Sizeof(mupServerReverseValueV1{}), want: 64},
 		{name: "registered path value", got: unsafe.Sizeof(mupRegisteredPathValueV1{}), want: 40},
 		{name: "down group key", got: unsafe.Sizeof(mupDownGroupKeyV1{}), want: 24},
-		{name: "down group value", got: unsafe.Sizeof(mupDownGroupV1{}), want: 4},
-		{name: "down path value", got: unsafe.Sizeof(mupDownPathV1{}), want: 92},
+		{name: "down group value", got: unsafe.Sizeof(mupDownGroupV1{}), want: 16},
+		{name: "down path value", got: unsafe.Sizeof(mupDownPathV1{}), want: 96},
 		{name: "path source range", got: unsafe.Sizeof(mupPathSrcV1{}), want: 4},
 		{name: "path counter key", got: unsafe.Sizeof(mupPathCounterKeyV1{}), want: 24},
 		{name: "path counter value", got: unsafe.Sizeof(mupPathCounterV1{}), want: 16},
+		{name: "path config", got: unsafe.Sizeof(mupPathConfigV1{}), want: 24},
+		{name: "rate bucket", got: unsafe.Sizeof(mupRateBucketV1{}), want: 24},
+		{name: "rate bucket key", got: unsafe.Sizeof(mupRateBucketKeyV1{}), want: 24},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -126,6 +126,10 @@ type clientPath struct {
 	missed int
 	// moves counts the port moves since the last answer.
 	moves int
+	// written is the latest setting of the path that the dataplane has. Its
+	// priority and its weight can differ from the configuration, because the
+	// latency choice and the rate limits of the group set them.
+	written dataplane.PathSettings
 }
 
 // runtimePath is the path on the server port that it uses now.
@@ -147,6 +151,12 @@ type pathGroup struct {
 	chosen    int
 	hasChosen bool
 	dataMask  uint8
+	// head is the latest path that the latency choice picked. The failover
+	// mode tries it first, because the priority of the path in the dataplane
+	// is zero, and the other paths follow in their configured order. It stays
+	// while no path is usable, so the order changes only with the choice.
+	head    int
+	hasHead bool
 }
 
 // clientEgressPath is one egress path of a group. It is healthy while the probes
@@ -375,7 +385,7 @@ func (c *clientController) start(ctx context.Context) error {
 	for index, group := range c.groups {
 		for _, path := range c.client.Groups[index].Paths {
 			settings := c.initial[slot]
-			current := &clientPath{path: path, group: group, ifindex: settings.Ifindex, priority: settings.Priority, port: path.ServerPort}
+			current := &clientPath{path: path, group: group, ifindex: settings.Ifindex, priority: settings.Priority, port: path.ServerPort, written: settings}
 			conn, err := c.controls.open(c.registrationLocked(group, current.runtimePath(), slot))
 			if err != nil {
 				return err
@@ -585,11 +595,12 @@ func (c *clientController) movePortLocked(slot int) error {
 		current.missed = 0
 		return nil
 	}
-	settings := clientPathSettings(moved.runtimePath(), c.client.AdvertisedIP, current.ifindex, current.priority)
+	settings := c.pathSettingsLocked(slot, moved)
 	if err := c.dataplane.SetPath(slot, settings); err != nil {
 		_ = conn.Close()
 		return err
 	}
+	moved.written = settings
 	c.logger.Printf("client path %d: no answer to %d registrations on server port %d, so it moved to port %d",
 		slot, current.missed, current.port, port)
 	current.cancel()
@@ -610,6 +621,9 @@ func randomOtherPort(ports config.PortRange, current uint16) uint16 {
 // publishHealthLocked writes the path state after a change of the health.
 func (c *clientController) publishHealthLocked() error {
 	c.dataMasksLocked(false)
+	if err := c.syncPathSettingsLocked(); err != nil {
+		return err
+	}
 	return c.writePathStateLocked(true)
 }
 
@@ -730,12 +744,13 @@ func (c *clientController) addPath(raw string, listenPort uint16, bridge bool) (
 		_ = conn.Close()
 		return api.Path{}, err
 	}
-	priority := uint8(c.nextPriority)
-	settings := clientPathSettings(path.AtPort(path.ServerPort), c.client.AdvertisedIP, ifindex, priority)
+	added := &clientPath{path: path, group: group, ifindex: ifindex, priority: uint8(c.nextPriority), port: path.ServerPort}
+	settings := c.pathSettingsLocked(slot, added)
 	if err := c.dataplane.SetPath(slot, settings); err != nil {
 		_ = conn.Close()
 		return api.Path{}, err
 	}
+	added.written = settings
 	if err := c.setPathMaskLocked(group, group.settings.PathMask|1<<slot); err != nil {
 		_ = conn.Close()
 		_ = c.dataplane.ClearPath(slot)
@@ -748,7 +763,11 @@ func (c *clientController) addPath(raw string, listenPort uint16, bridge bool) (
 		return api.Path{}, err
 	}
 	c.nextPriority++
-	c.launchLocked(slot, &clientPath{path: path, group: group, ifindex: ifindex, priority: priority, port: path.ServerPort}, conn)
+	c.launchLocked(slot, added, conn)
+	// The weights of the other paths of the group follow the new path.
+	if err := c.syncPathSettingsLocked(); err != nil {
+		c.logger.Printf("client path %d: cannot write the settings of its group: %v", slot, err)
+	}
 	return c.pathLocked(slot, c.inUseSlotsLocked()), nil
 }
 
@@ -1081,6 +1100,9 @@ func (c *clientController) RemovePath(id int) error {
 	}
 	c.slots[id].cancel()
 	c.slots[id] = nil
+	if group.hasHead && group.head == id {
+		group.hasHead = false
+	}
 	c.clearIngressRTTLocked(id)
 	if _, err := c.health.Forget(id); err != nil {
 		return err
@@ -1091,7 +1113,11 @@ func (c *clientController) RemovePath(id int) error {
 	if err := c.setPathMaskLocked(group, group.settings.PathMask&^(1<<id)); err != nil {
 		return err
 	}
-	return c.dataplane.ClearPath(id)
+	if err := c.dataplane.ClearPath(id); err != nil {
+		return err
+	}
+	// The weights of the other paths of the group follow the removal.
+	return c.syncPathSettingsLocked()
 }
 
 func (c *clientController) SetMode(raw string, listenPort uint16) error {
@@ -1111,8 +1137,12 @@ func (c *clientController) SetMode(raw string, listenPort uint16) error {
 		return err
 	}
 	group.settings = updated
-	// A latency choice counts only in the failover mode.
+	// A latency choice counts only in the failover mode, and the weights
+	// only in the balancer mode.
 	c.dataMasksLocked(false)
+	if err := c.syncPathSettingsLocked(); err != nil {
+		return err
+	}
 	return c.writePathStateLocked(false)
 }
 
@@ -1264,6 +1294,9 @@ func (c *clientController) egressPathLocked(slot int, seen [dataplane.MaxEgressP
 		SrcFirst:    egress.path.SrcFirst,
 		SrcLast:     egress.path.SrcLast,
 		Measurement: c.egressMeasurementLocked(slot, now),
+
+		BandwidthBitsPerSecond: float64(egress.path.BandwidthBitsPerSecond),
+		BandwidthPerMember:     egress.path.BandwidthPerMember,
 	}
 }
 
@@ -1321,11 +1354,15 @@ func (c *clientController) pathLocked(slot int, inUse [config.MaxPaths]bool) api
 		SrcFirst:    current.path.SrcFirst,
 		SrcLast:     current.path.SrcLast,
 		Measurement: c.ingressMeasurementLocked(slot, time.Now()),
+
+		BandwidthBitsPerSecond: float64(current.path.BandwidthBitsPerSecond),
+		BandwidthPerMember:     current.path.BandwidthPerMember,
 	}
 }
 
 // inUseSlotsLocked mirrors the path choice of the client program in each group.
-// Failover uses the path of the data set with the lowest priority. The other
+// Failover uses the path of the data set with the lowest priority in the
+// dataplane, which is the chosen path of a latency choice. The other
 // modes use every path of the data set. Without a loss limit or a latency
 // choice, the data set is the healthy paths.
 func (c *clientController) inUseSlotsLocked() [config.MaxPaths]bool {
@@ -1343,7 +1380,7 @@ func (c *clientController) inUseSlotsLocked() [config.MaxPaths]bool {
 				inUse[slot] = true
 				continue
 			}
-			if selected < 0 || current.priority < c.slots[selected].priority {
+			if selected < 0 || current.written.Priority < c.slots[selected].written.Priority {
 				selected = slot
 			}
 		}

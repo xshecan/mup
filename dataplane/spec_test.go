@@ -45,9 +45,9 @@ func TestMupCollectionSpec(t *testing.T) {
 		"path_state":               {ebpf.Array, 1},
 		"duplicate_cache":          {ebpf.LRUHash, 16384},
 		"encap_programs":           {ebpf.ProgramArray, 3},
-		"stats":                    {ebpf.PerCPUArray, 26},
+		"stats":                    {ebpf.PerCPUArray, 27},
 		"events":                   {ebpf.RingBuf, 256 * 1024},
-		"event_limits":             {ebpf.Array, 26},
+		"event_limits":             {ebpf.Array, 27},
 		"client_down_paths":        {ebpf.Array, 8},
 		"client_path_src":          {ebpf.Array, 8},
 		"client_down_src":          {ebpf.Array, 8},
@@ -60,6 +60,8 @@ func TestMupCollectionSpec(t *testing.T) {
 		"bridge_counters":          {ebpf.PerCPUArray, 4},
 		"client_path_counters":     {ebpf.PerCPUArray, 16},
 		"server_path_counters":     {ebpf.PerCPUHash, 8192},
+		"client_rate_buckets":      {ebpf.Array, rateMemberBase + 8*MaxPool},
+		"server_rate_buckets":      {ebpf.Hash, 32768},
 	}
 	for name, want := range wantMaps {
 		m := spec.Maps[name]

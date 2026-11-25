@@ -467,3 +467,35 @@ func TestParseArgsClientLossAndPreferErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestParseArgsClientReadsTheBandwidthOfARoute(t *testing.T) {
+	t.Parallel()
+
+	app, err := parseArgs([]string{"client", "-p", "51820", "-s", "192.0.2.10", "--ingress-mode", "balancer",
+		"--ingress", "203.0.113.5:9000/udp bw 10mbit",
+		"--ingress", "203.0.113.6:9000/udp src 5000-6000 bw 1.5gbit",
+		"--egress", "203.0.113.5:9100/icmp via 198.51.100.0/28 per-packet bw 20Mbps per-member",
+		"--egress", "203.0.113.5:9101/udp via 198.51.100.9 bw 500kbit bridge 192.0.2.7",
+		"--egress-bridge", "192.0.2.8:9300/udp bw 3mbit"})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	group := app.Client.Groups[0]
+	for index, want := range []uint64{10_000_000, 1_500_000_000} {
+		if got := group.Paths[index].BandwidthBitsPerSecond; got != want {
+			t.Fatalf("ingress %d bandwidth = %d, want %d", index, got, want)
+		}
+	}
+	for index, want := range []struct {
+		rate      uint64
+		perMember bool
+	}{{20_000_000, true}, {500_000, false}, {3_000_000, false}} {
+		path := group.EgressPaths[index]
+		if path.BandwidthBitsPerSecond != want.rate || path.BandwidthPerMember != want.perMember {
+			t.Fatalf("egress %d = %#v, want %d per-member %v", index, path, want.rate, want.perMember)
+		}
+	}
+	if _, err := parseArgs([]string{"client", "-p", "51820", "-s", "192.0.2.10", "-u", "203.0.113.5:9000/udp bw 10mbit per-member"}); err == nil || !strings.Contains(err.Error(), "per-member needs a via") {
+		t.Fatalf("parseArgs error = %v, want the per-member error", err)
+	}
+}

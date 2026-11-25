@@ -14,7 +14,11 @@ package dataplane
 // client_down_src at each start, like path_config. v0.5.3 added the path
 // counters: client_path_counters only grows and the measurement uses its
 // differences, and Go creates the entries of server_path_counters again when
-// the paths register.
+// the paths register. v0.5.5 added the bandwidth limits: path_config,
+// server_down_paths and server_down_groups grew, and the buckets of
+// client_rate_buckets and server_rate_buckets start over with a fresh limit.
+// The client writes its buckets at each start, and the server creates them
+// again with the egress paths.
 //
 // A pinned map that is not in this list must keep its layout, or the daemon
 // does not start over its old pin. TestChangedPinsAreRebuilt checks this
@@ -25,4 +29,5 @@ var rebuiltPins = []string{
 	"registered_paths", "server_route_by_key", "server_route_by_port",
 	"client_path_src", "client_down_src",
 	"client_path_counters", "server_path_counters",
+	"client_rate_buckets", "server_rate_buckets",
 }

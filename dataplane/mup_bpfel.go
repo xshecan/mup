@@ -77,6 +77,11 @@ type mupDownGroupV1 struct {
 	PathMask    uint8
 	HealthyMask uint8
 	IcmpMask    uint8
+	LimitMask   uint8
+	Flags       uint8
+	Preferred   uint8
+	Padding     uint8
+	Weights     [8]uint8
 }
 
 type mupDownPathKeyV1 struct {
@@ -99,6 +104,8 @@ type mupDownPathV1 struct {
 	Members    [16]uint32
 	SrcFirst   uint16
 	SrcLast    uint16
+	Limit      uint8
+	Padding    [3]uint8
 }
 
 type mupDuplicateKeyV1 struct {
@@ -126,6 +133,9 @@ type mupPathConfigV1 struct {
 	Transport     uint8
 	Priority      uint8
 	Bridge        uint32
+	Limit         uint8
+	Weight        uint8
+	Padding       [2]uint8
 }
 
 type mupPathCounterKeyV1 struct {
@@ -192,6 +202,20 @@ type mupPeerTokenValueV1 struct {
 	LastSeenNs uint64
 }
 
+type mupRateBucketKeyV1 struct {
+	_      structs.HostLayout
+	Client mupClientKeyV1
+	PathId uint32
+	Member uint32
+}
+
+type mupRateBucketV1 struct {
+	_       structs.HostLayout
+	TatNs   uint64
+	CostQ16 uint64
+	BurstNs uint64
+}
+
 type mupReflectorKeyV1 struct {
 	_         structs.HostLayout
 	Base      uint32
@@ -241,7 +265,7 @@ type mupRegistrationValueV1 struct {
 
 type mupSendScratch struct {
 	_     structs.HostLayout
-	Words [11]uint64
+	Words [26]uint64
 }
 
 type mupServerConfigV1 struct {
@@ -321,6 +345,7 @@ const (
 	mupMapClientPathCounters       = "client_path_counters"
 	mupMapClientPathSrc            = "client_path_src"
 	mupMapClientPeerByEndpoint     = "client_peer_by_endpoint"
+	mupMapClientRateBuckets        = "client_rate_buckets"
 	mupMapClientRoutesBySource     = "client_routes_by_source"
 	mupMapCsumScratch              = "csum_scratch"
 	mupMapDuplicateCache           = "duplicate_cache"
@@ -343,6 +368,7 @@ const (
 	mupMapServerDownPaths          = "server_down_paths"
 	mupMapServerPathCounters       = "server_path_counters"
 	mupMapServerPorts              = "server_ports"
+	mupMapServerRateBuckets        = "server_rate_buckets"
 	mupMapServerRouteByKey         = "server_route_by_key"
 	mupMapServerRouteByPort        = "server_route_by_port"
 	mupMapStats                    = "stats"
@@ -427,6 +453,7 @@ type mupMapSpecs struct {
 	ClientPathCounters    *ebpf.MapSpec `ebpf:"client_path_counters"`
 	ClientPathSrc         *ebpf.MapSpec `ebpf:"client_path_src"`
 	ClientPeerByEndpoint  *ebpf.MapSpec `ebpf:"client_peer_by_endpoint"`
+	ClientRateBuckets     *ebpf.MapSpec `ebpf:"client_rate_buckets"`
 	ClientRoutesBySource  *ebpf.MapSpec `ebpf:"client_routes_by_source"`
 	CsumScratch           *ebpf.MapSpec `ebpf:"csum_scratch"`
 	DuplicateCache        *ebpf.MapSpec `ebpf:"duplicate_cache"`
@@ -449,6 +476,7 @@ type mupMapSpecs struct {
 	ServerDownPaths       *ebpf.MapSpec `ebpf:"server_down_paths"`
 	ServerPathCounters    *ebpf.MapSpec `ebpf:"server_path_counters"`
 	ServerPorts           *ebpf.MapSpec `ebpf:"server_ports"`
+	ServerRateBuckets     *ebpf.MapSpec `ebpf:"server_rate_buckets"`
 	ServerRouteByKey      *ebpf.MapSpec `ebpf:"server_route_by_key"`
 	ServerRouteByPort     *ebpf.MapSpec `ebpf:"server_route_by_port"`
 	Stats                 *ebpf.MapSpec `ebpf:"stats"`
@@ -495,6 +523,7 @@ type mupMaps struct {
 	ClientPathCounters    *ebpf.Map `ebpf:"client_path_counters"`
 	ClientPathSrc         *ebpf.Map `ebpf:"client_path_src"`
 	ClientPeerByEndpoint  *ebpf.Map `ebpf:"client_peer_by_endpoint"`
+	ClientRateBuckets     *ebpf.Map `ebpf:"client_rate_buckets"`
 	ClientRoutesBySource  *ebpf.Map `ebpf:"client_routes_by_source"`
 	CsumScratch           *ebpf.Map `ebpf:"csum_scratch"`
 	DuplicateCache        *ebpf.Map `ebpf:"duplicate_cache"`
@@ -517,6 +546,7 @@ type mupMaps struct {
 	ServerDownPaths       *ebpf.Map `ebpf:"server_down_paths"`
 	ServerPathCounters    *ebpf.Map `ebpf:"server_path_counters"`
 	ServerPorts           *ebpf.Map `ebpf:"server_ports"`
+	ServerRateBuckets     *ebpf.Map `ebpf:"server_rate_buckets"`
 	ServerRouteByKey      *ebpf.Map `ebpf:"server_route_by_key"`
 	ServerRouteByPort     *ebpf.Map `ebpf:"server_route_by_port"`
 	Stats                 *ebpf.Map `ebpf:"stats"`
@@ -539,6 +569,7 @@ func (m *mupMaps) Close() error {
 		m.ClientPathCounters,
 		m.ClientPathSrc,
 		m.ClientPeerByEndpoint,
+		m.ClientRateBuckets,
 		m.ClientRoutesBySource,
 		m.CsumScratch,
 		m.DuplicateCache,
@@ -561,6 +592,7 @@ func (m *mupMaps) Close() error {
 		m.ServerDownPaths,
 		m.ServerPathCounters,
 		m.ServerPorts,
+		m.ServerRateBuckets,
 		m.ServerRouteByKey,
 		m.ServerRouteByPort,
 		m.Stats,

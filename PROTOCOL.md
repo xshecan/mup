@@ -15,15 +15,16 @@ This document describes version 1 of the MUP protocol as the code implements it.
 9. [Path health](#path-health)
 10. [Path measurement](#path-measurement)
 11. [Loss limit and latency choice](#loss-limit-and-latency-choice)
-12. [Dataplane state](#dataplane-state)
-13. [Lifetimes and cleanup](#lifetimes-and-cleanup)
-14. [Input rules](#input-rules)
-15. [Drop reasons](#drop-reasons)
-16. [Attachment and restarts](#attachment-and-restarts)
-17. [Observability](#observability)
-18. [Control socket](#control-socket)
-19. [Trust model](#trust-model)
-20. [Limits](#limits)
+12. [Bandwidth limit](#bandwidth-limit)
+13. [Dataplane state](#dataplane-state)
+14. [Lifetimes and cleanup](#lifetimes-and-cleanup)
+15. [Input rules](#input-rules)
+16. [Drop reasons](#drop-reasons)
+17. [Attachment and restarts](#attachment-and-restarts)
+18. [Observability](#observability)
+19. [Control socket](#control-socket)
+20. [Trust model](#trust-model)
+21. [Limits](#limits)
 
 ## Terms
 
@@ -298,13 +299,13 @@ A packet with a nonzero token arrives at the advertised IP. The client program t
   <img alt="Failover, balancer, and repeater modes" src=".docs/images/modes-light.svg">
 </picture>
 
-Go writes the data set of each group, not the set of healthy paths. The client writes it to `path_state`, and the server writes it to `server_down_groups`. A data set holds the paths that carry data, as defined in [Usable paths and data sets](#usable-paths-and-data-sets). The rules of the three modes then apply inside the data set. Each healthy path in the rules below means a path of the data set.
+Go writes the data set of each group, not the set of healthy paths. The client writes it to `path_state`, and the server writes it to `server_down_groups`. A data set holds the paths that carry data, as defined in [Usable paths and data sets](#usable-paths-and-data-sets). The rules of the three modes then apply inside the data set. Each healthy path in the rules below means a path of the data set. Room means that the bandwidth limit of a path accepts the packet. A path without a limit always has room. When no path of the data set has room, the program drops the packet and counts reason 26. See [Bandwidth limit](#bandwidth-limit).
 
 The client program reads the data set mask from `path_state` for each packet. It keeps only the bits in the path mask of the group of the peer. The mode of the group then selects one of three rules:
 
-- Failover: The program uses the healthy path with the lowest priority. The priority is the position of the path in the configuration.
-- Balancer: The program computes a hash of the token and the mask, and uses it to pick one healthy path.
-- Repeater: The program sends the packet on every healthy path.
+- Failover: The program uses the healthy path with the lowest priority that has room. The priority is the position of the path in the configuration. A full path spills its packets to the next path in priority order.
+- Balancer: The program computes a hash of the token and the mask, and uses it to pick one healthy path. If that path has no room, the program takes the other paths of the data set in the failover order. It uses the first one with room. With a limit on every path of the direction, the weights of [Bandwidth limit](#bandwidth-limit) apply.
+- Repeater: The program sends the packet on every healthy path that has room.
 
 The balancer hash is `h = token * 0x9e3779b1 ^ mask * 0x85ebca6b`, then `h ^= h >> 16`. The index of the path in the list of healthy paths is `h % count`. A peer thus stays on one path until the set of healthy paths in its group changes. A health change in another group does not move the peer.
 
@@ -312,11 +313,13 @@ Without egress paths, the server does not select paths. It replies on the path o
 
 The server keeps the egress paths of each group apart, by the client key and the listen port. For a group with egress paths, the server picks the egress path of each reply from the healthy egress paths of the listen port of its route. The egress mode uses the rules of the client:
 
-- Failover: The server uses the healthy egress path with the lowest ID.
-- Balancer: The server hashes the token and the mask with the formula above.
-- Repeater: The server sends the reply on every healthy egress path.
+- Failover: The server uses the healthy egress path with the lowest ID that has room. A full path spills its replies to the next egress path in ID order.
+- Balancer: The server hashes the token and the mask with the formula above. If that path has no room, the server takes the other paths of the data set in the failover order. It uses the first one with room.
+- Repeater: The server sends the reply on every healthy egress path that has room.
 
 In repeater mode, the client keeps the first copy of each message for 2 seconds and drops the other copies with reason 16. If the group has no healthy egress path on the server, the server drops the reply and counts reason 15.
+
+With failover and `prefer: latency`, the data set is the usable set, and the chosen path comes first. On the client, Go writes the chosen path with priority 0, and the other paths follow in their configured order. On the server, the failover rule tries the preferred path in `server_down_groups` first, then the lowest ID. So a full chosen path can spill to the next path. A group without limits chooses the same path as before.
 
 ## Control plane
 
@@ -354,6 +357,8 @@ A EGRESS_REGISTER with flag bit 4 declares an egress bridge, and its egress serv
 
 A EGRESS_REGISTER with flag bits 4 and 6 declares an egress bridge with a via. The return IP field holds the via, or the base of the return pool, and it applies to the leg from the server to the bridge. A server before v0.5.0 refuses the frame.
 
+The client sends an EGRESS_LIMIT frame right after each EGRESS_REGISTER of an egress path that has a limit. The frame has type 10. It has the same sender, path, and reflect handling as that EGRESS_REGISTER. The server accepts it under the same checks as an EGRESS_REGISTER, and only for an egress path that it keeps. The server keeps the limit with the path. When 3 EGRESS_REGISTER frames arrive in a row with no EGRESS_LIMIT after them, the server removes the limit. An EGRESS_LIMIT with a rate of zero also removes the limit. An older server drops the frame without a reply and applies no limit.
+
 The server sends each REGISTER_ACK directly, and also on every egress path of the client, with the next member of a pool each time. One ACK makes the ingress path healthy, on any of these ways. So an ingress path stays healthy, even with no packet back on its own flow.
 
 ### Ingress reflect registration
@@ -379,7 +384,7 @@ The control frame is 48 bytes long, and all integers are big-endian.
 | ---: | ---: | --- | --- |
 | 0 | 4 | magic | 0x4d555043, which is "MUPC" in ASCII. |
 | 4 | 1 | version | 1. |
-| 5 | 1 | type | 1 is REGISTER, 2 is REGISTER_ACK, 3 is PROBE, 4 is PROBE_REPLY, 7 is EGRESS_REGISTER, 8 is MEASURE, and 9 is MEASURE_REPLY. Type 5 and type 6 are reserved. |
+| 5 | 1 | type | 1 is REGISTER, 2 is REGISTER_ACK, 3 is PROBE, 4 is PROBE_REPLY, 7 is EGRESS_REGISTER, 8 is MEASURE, 9 is MEASURE_REPLY, and 10 is EGRESS_LIMIT. Type 5 and type 6 are reserved. |
 | 6 | 1 | transport | 0 is UDP and 1 is ICMP. |
 | 7 | 1 | flags | Bit 0 means that the return IP field holds one return IP. Bit 1 means that it holds the base of a return pool. Bit 2 selects the per-packet balance mode of a pool. Bit 3 marks a PROBE or a PROBE_REPLY of an egress path, and its path ID is then an egress path ID. Bit 4 marks a EGRESS_REGISTER of an egress bridge. Bit 6 marks a EGRESS_REGISTER of an egress bridge whose return IP or pool applies to the leg from the server to the bridge. Bit 6 needs bit 4 and bit 0 or bit 1. Bit 5 marks a REGISTER or a MEASURE whose return IP is the via of an ingress reflect path. Bit 7 marks a REGISTER or a EGRESS_REGISTER of a path with a source range. The other bits must be zero. |
 | 8 | 2 | length | 48. |
@@ -392,9 +397,9 @@ The control frame is 48 bytes long, and all integers are big-endian.
 | 20 | 4 | advertised IP | The client `-s` address. |
 | 24 | 4 | return IP | The return IP or the pool base of the path, or zero. In a PROBE_REPLY, the reflector that reached the client. |
 | 28 | 8 | instance nonce | The nonzero random number of the client process. |
-| 36 | 4 | sequence | A counter that goes up by one with each REGISTER on the path. A EGRESS_REGISTER does not use it. A MEASURE uses its own counter for each ingress path, and its MEASURE_REPLY copies it. With flag bit 7, it holds the range: the first value at offsets 36 and 37, and the last value at offsets 38 and 39. |
-| 40 | 4 | lease seconds or count code | In a REGISTER or a REGISTER_ACK, 30. In an EGRESS_REGISTER, bits 0 to 7 hold the lease, 30. Bit 8 is prefer latency, with 1 for latency and 0 for order. Bits 16 to 31 hold the loss limit in tenths of a percent, from 0 for none to 1000. A whole field of zero withdraws an egress path. A server before v0.5.4 tests the field only against zero, so it ignores the new bits. In a PROBE or a PROBE_REPLY of an egress path, the count code of the path, or zero. In a MEASURE or a MEASURE_REPLY, the count code of the packets that the client sent on the ingress path. |
-| 44 | 4 | egress server | In a EGRESS_REGISTER, the server address of the egress path, or the bridge address with flag bit 4. A REGISTER does not use it. In a MEASURE_REPLY, it holds the count code of the packets that the server received on the ingress path. In a MEASURE, it is zero. With flag bit 7, it holds the range: the first value at offsets 44 and 45, and the last value at offsets 46 and 47. Zero otherwise. |
+| 36 | 4 | sequence | A counter that goes up by one with each REGISTER on the path. A EGRESS_REGISTER does not use it. A MEASURE uses its own counter for each ingress path, and its MEASURE_REPLY copies it. With flag bit 7, it holds the range: the first value at offsets 36 and 37, and the last value at offsets 38 and 39. In an EGRESS_LIMIT, the rate in kilobits per second. |
+| 40 | 4 | lease seconds or count code | In a REGISTER or a REGISTER_ACK, 30. In an EGRESS_REGISTER, bits 0 to 7 hold the lease, 30. Bit 8 is prefer latency, with 1 for latency and 0 for order. Bits 16 to 31 hold the loss limit in tenths of a percent, from 0 for none to 1000. A whole field of zero withdraws an egress path. A server before v0.5.4 tests the field only against zero, so it ignores the new bits. In a PROBE or a PROBE_REPLY of an egress path, the count code of the path, or zero. In a MEASURE or a MEASURE_REPLY, the count code of the packets that the client sent on the ingress path. In an EGRESS_LIMIT, the flags. Bit 0 means per-member, and the other bits are zero. |
+| 44 | 4 | egress server | In a EGRESS_REGISTER, the server address of the egress path, or the bridge address with flag bit 4. A REGISTER does not use it. In a MEASURE_REPLY, it holds the count code of the packets that the server received on the ingress path. In a MEASURE, it is zero. With flag bit 7, it holds the range: the first value at offsets 44 and 45, and the last value at offsets 46 and 47. In an EGRESS_LIMIT, zero. Zero otherwise. |
 
 Some payloads are exactly 48 bytes long and start with the magic, version 1, and length 48. The TCX programs pass such a payload to the kernel as a control frame.
 
@@ -509,7 +514,7 @@ The client and the server act on the loss and RTT values of [Path measurement](#
 
 A usable path is healthy and not degraded. If no path of a group direction is usable, every healthy path counts as usable. The data set of a group direction holds the paths that carry data.
 
-With failover and `prefer: latency`, the data set is the one path that the latency chooser returns. In every other case, the data set is the usable set. The rule of the mode then picks a path inside the data set. Failover takes the lowest priority or the lowest ID, balancer takes the hash, and repeater takes every path.
+The data set is the usable set in every case. With failover and `prefer: latency`, the path that the latency chooser returns comes first in the failover order. The rule of the mode then picks a path inside the data set. Failover takes the first path with room in the failover order, balancer takes the hash, and repeater takes every path with room.
 
 ### Loss gate
 
@@ -562,6 +567,46 @@ The client sends both egress keys in each EGRESS_REGISTER of the group, in the l
 - A server before v0.5.4 keeps its egress paths and ignores the keys. It has no gate and no latency choice for them.
 - The latency chooser needs only the RTT of the local side, so it works with any peer.
 - A bridge passes these control frames, so it needs no change.
+
+## Bandwidth limit
+
+A path with `bw RATE` has a bandwidth limit. The client applies it to the ingress paths, and the server applies it to the egress paths. Each limit is a GCRA bucket. GCRA is a token bucket in virtual scheduling form. Its state is one 64-bit time, so the decision needs no lock.
+
+Go computes two values for each limit:
+
+- `cost_q16` is the time for one byte, in nanoseconds, in 48.16 fixed point. It is `(8e9 / rate_bps) * 65536`.
+- `burst_ns` is the larger of 50 milliseconds and the time for 3000 bytes.
+
+The state is `tat_ns`, the theoretical arrival time. All CPUs share it.
+
+For a packet of `bytes` bytes at time `now`, the program does these steps:
+
+1. It sets `start` to the larger of `now` and `tat_ns`.
+2. It sets `new` to `start + ((bytes * cost_q16) >> 16)`.
+3. If `new - now` is at most `burst_ns`, the packet has room.
+4. If the packet has room, it writes `new` with one compare and swap against the value that it read. If another CPU changed the value in between, the swap fails. The packet then has room without a write, so the limit lets a little more pass in that case.
+
+So a path sends a burst of about 50 milliseconds of its rate, and then sends at its rate. Below 480 kbit per second, the burst is the time of 3000 bytes.
+
+A packet costs its IPv4 total length in bytes. A path that wraps the packet for a bridge adds 20 bytes to that cost. Control frames do not count against the bucket, and the limit never drops them.
+
+The decision is made once per packet per path, before the rewrite. A packet that the program then cannot send for another reason still counts against the bucket.
+
+### Buckets
+
+The client keeps one bucket for each ingress path slot. It keeps one bucket for each member of a per-member path. The server keeps one bucket for each egress path, and one bucket for each member of a per-member path. When a path slot gets a new path, its bucket starts again. A path with a pool and a plain RATE uses one bucket for the path, and its member choice does not change.
+
+### Per-member limits
+
+A packet on a per-member path starts with the member that the normal choice gives. That choice is the per-packet cursor or the per-peer hash. If that member has no room, the program tries the next members of the published list in order. A path with no member that has room has no room.
+
+### Weights
+
+When every path of a group direction has a limit, Go gives each path a weight that follows its RATE. Go then normalizes the weights of the direction. The balancer picks a path in proportion to the weights. A path with twice the rate gets about twice the peers. Otherwise, every path has the same weight, as before.
+
+### Compatibility
+
+Without `bw`, every decision and every map content that matters equals v0.5.4. An ingress limit needs only a v0.5.5 client. An egress limit needs a v0.5.5 client and server. An older server drops EGRESS_LIMIT and applies no limit. A bridge needs no change.
 
 ## Dataplane state
 
@@ -684,6 +729,7 @@ A program returns `TCX_NEXT` for traffic that it does not own. This traffic incl
 | 23 | `BRIDGE_SOURCE` | A bridge got a wrapped reply from a sender that is neither the entry server nor in its `allow` range. |
 | 24 | `BRIDGE_PACKET` | A bridge got a wrapped reply with a bad version, a bad inner protocol, or no MUP packet inside. If a wrap or an unwrap fails half way, a server also counts it. |
 | 25 | `BRIDGE_SIZE` | A reply for an egress bridge does not fit the MTU of the interface to the bridge after the wrap. |
+| 26 | `RATE_LIMIT` | No path of the group has room under its bandwidth limit, so the packet is dropped. |
 
 ## Attachment and restarts
 
