@@ -900,11 +900,13 @@ static __always_inline int redirect_packet(__u32 ifindex)
  * packet. The transport header and the payload do not move, so the inner
  * checksum stays valid, and a partial checksum stays partial. Not every
  * device completes a partial checksum behind the wrapper, so the bridge
- * completes one that arrives incomplete. The outer UDP
- * checksum is zero. The function returns MUP_DROP_BRIDGE_SIZE without a
- * change if the wrapped packet does not fit the MTU of ifindex, and another
- * drop reason if it fails after the change. The verifier checks this global
- * function once for all callers.
+ * completes one that arrives incomplete. The outer UDP checksum is zero. A
+ * wrapper that a reflector answers to the bridge goes from the bridge address
+ * to the reflector, so its caller passes those two addresses as local_ip and
+ * bridge_ip, and then calls mup_bridge_echo. The function returns
+ * MUP_DROP_BRIDGE_SIZE without a change if the wrapped packet does not fit
+ * the MTU of ifindex, and another drop reason if it fails after the change.
+ * The verifier checks this global function once for all callers.
  */
 __attribute__((noinline)) int mup_bridge_wrap(struct __sk_buff *skb,
 					      __u32 local_ip, __u32 bridge_ip,
@@ -959,10 +961,56 @@ __attribute__((noinline)) int mup_bridge_wrap(struct __sk_buff *skb,
 }
 
 /*
- * mup_bridge_unwrap removes the wrapper of a MUP bridge. It writes the
- * protocol and the addresses of the bridge header into the IPv4 header, and
- * removes the 20 bytes after it. The caller checks the wrapper first. The
- * function returns a drop reason.
+ * mup_bridge_echo turns the UDP wrapper that mup_bridge_wrap just built into
+ * an ICMP Echo Request, so a reflector answers it to the bridge. The UDP
+ * destination port becomes the identifier, which picks the entry of the
+ * bridge, and the UDP source port becomes the sequence. The bridge header
+ * stays in place as the start of the Echo payload, so the overhead stays
+ * MUP_BRIDGE_OVERHEAD. The reflector checks the ICMP checksum. The inner
+ * packet is an ICMP message with a valid checksum, and its words sum to
+ * 0xffff, which adds nothing in one's complement. So the checksum of the Echo
+ * Request is the checksum of its 20 wrapper bytes alone. The inner packet does
+ * not change, so mup_bridge_unwrap restores it. The verifier checks this
+ * global function once for all callers.
+ */
+__attribute__((noinline)) int mup_bridge_echo(struct __sk_buff *skb)
+{
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	struct mup_iphdr *ipv4 = data + sizeof(struct ethhdr);
+	__u8 *wrapper = (__u8 *)(ipv4 + 1);
+	__u8 sequence_high;
+	__u8 sequence_low;
+	__u32 sum = 0;
+
+	if (wrapper + MUP_BRIDGE_OVERHEAD > (__u8 *)data_end)
+		return MUP_DROP_BRIDGE_PACKET;
+	if (ipv4->protocol != MUP_IPPROTO_UDP)
+		return MUP_DROP_BRIDGE_PACKET;
+	sequence_high = wrapper[0];
+	sequence_low = wrapper[1];
+	wrapper[4] = wrapper[2];
+	wrapper[5] = wrapper[3];
+	wrapper[6] = sequence_high;
+	wrapper[7] = sequence_low;
+	wrapper[0] = MUP_ICMP_ECHO_REQUEST;
+	wrapper[1] = 0;
+	wrapper[2] = 0;
+	wrapper[3] = 0;
+#pragma clang loop unroll(full)
+	for (int offset = 0; offset < MUP_BRIDGE_OVERHEAD; offset += 2)
+		sum += mup_read_be16(wrapper + offset);
+	mup_write_be16((__be16 *)(wrapper + 2), ~mup_csum_fold(sum));
+	ipv4->protocol = MUP_IPPROTO_ICMP;
+	mup_refresh_ipv4_checksum(ipv4);
+	return MUP_DROP_NONE;
+}
+
+/*
+ * mup_bridge_unwrap removes the wrapper of a MUP bridge, the UDP form or the
+ * ICMP Echo form. It writes the protocol and the addresses of the bridge
+ * header into the IPv4 header, and removes the 20 bytes after it. The caller
+ * checks the wrapper first. The function returns a drop reason.
  */
 __attribute__((noinline)) int mup_bridge_unwrap(struct __sk_buff *skb)
 {
@@ -1721,7 +1769,9 @@ __attribute__((noinline)) __be32 pick_reflector(__be32 base, __u8 transport,
  *
  * A partial reply on an ICMP path needs the sum of its payload. The caller
  * computes it once in payload_sum, because a call from here to
- * mup_payload_sum_of makes the stack of the server program too deep. The
+ * mup_payload_sum_of makes the stack of the server program too deep. It is
+ * the sum of the payload before the peer token, whose reserved bytes are
+ * zero, so the rewrite adds the token to it. The
  * function parses the packet again into packet, because a clone invalidates
  * the packet pointers.
  */
@@ -1739,7 +1789,7 @@ static __always_inline int down_send_core(struct __sk_buff *skb,
 	__u16 listen_port = meta & 0xffff;
 	__u32 cursor_key = 0;
 	__be32 member = 0;
-	__be32 wrap_source;
+	__be32 via_member = 0;
 	__be32 source_ip;
 	__be32 destination_ip;
 	__u32 reason = MUP_DROP_NONE;
@@ -1819,11 +1869,10 @@ static __always_inline int down_send_core(struct __sk_buff *skb,
 	}
 	/*
 	 * A bridge path with MUP_FLAG_BRIDGE_VIA builds the direct reply from
-	 * the bridge address and wraps it from the member.
+	 * the bridge address and applies the member to the wrapper instead.
 	 */
-	wrap_source = mapped->local_ip;
 	if ((flags & MUP_FLAG_BRIDGE_VIA) && member) {
-		wrap_source = member;
+		via_member = member;
 		member = 0;
 	}
 
@@ -1854,8 +1903,13 @@ static __always_inline int down_send_core(struct __sk_buff *skb,
 							  destination_ip, type,
 							  server_port,
 							  peer_token);
+			/*
+			 * The token is at most MUP_MAX_PEER_TOKEN and fills
+			 * payload bytes 2 and 3, so it is exactly one
+			 * big-endian word of the sum.
+			 */
 			if (!result)
-				mup_finish_rewrite(packet, payload_sum);
+				mup_finish_rewrite(packet, payload_sum + peer_token);
 		} else {
 			__u32 sequence = peer_token;
 
@@ -1880,16 +1934,32 @@ static __always_inline int down_send_core(struct __sk_buff *skb,
 		return count_and_drop(skb, MUP_DROP_CHECKSUM);
 	}
 	/*
-	 * A path through a bridge wraps the reply for the bridge. A copy of a
-	 * burst loses the wrapper again after the clone, so the next path gets
-	 * the reply as it was.
+	 * A path through a bridge wraps the reply for the bridge. The wrapper
+	 * of a plain bridge path leaves from the local address. A UDP bridge
+	 * via path forges the wrapper from the member. An ICMP bridge via path
+	 * reflects it: the wrapper is an Echo Request from the bridge address
+	 * to the member, and the Echo Reply of the member reaches the bridge.
+	 * A copy of a burst loses the wrapper again after the clone, so the
+	 * next path gets the reply as it was.
 	 */
 	if (flags & MUP_FLAG_BRIDGE) {
-		reason = mup_bridge_wrap(skb, wrap_source, mapped->server_ip,
+		__be32 wrap_source = mapped->local_ip;
+		__be32 wrap_destination = mapped->server_ip;
+		__u32 echo = via_member && transport == MUP_TRANSPORT_ICMP;
+
+		if (echo) {
+			wrap_source = mapped->server_ip;
+			wrap_destination = via_member;
+		} else if (via_member) {
+			wrap_source = via_member;
+		}
+		reason = mup_bridge_wrap(skb, wrap_source, wrap_destination,
 					 ((__u32)source_port << 16) | server_port,
 					 ifindex);
 		if (reason == MUP_DROP_BRIDGE_SIZE)
 			goto fail;
+		if (reason == MUP_DROP_NONE && echo)
+			reason = mup_bridge_echo(skb);
 		*packet = (struct mup_packet){};
 		if (reason != MUP_DROP_NONE ||
 		    parse_ipv4_l4(skb, packet) != MUP_DROP_NONE) {
@@ -2012,7 +2082,10 @@ static __always_inline int send_down_reply(
 	}
 	if (!sending)
 		return count_and_drop(skb, MUP_DROP_NO_PATH);
-	/* Each copy has the same payload, so one sum serves them all. */
+	/*
+	 * Each copy has the same payload, so one sum serves them all. The sum
+	 * is taken before the token is written, and down_send_core adds it.
+	 */
 	if (partial && (sending & down->icmp_mask)) {
 		payload_sum = mup_payload_sum_of(skb, packet->payload_length);
 		if (payload_sum < 0)
@@ -2474,11 +2547,23 @@ static __always_inline int bridge_is_mup(const struct mup_packet *packet)
 	       validate_wg(packet, 1, &peer_token) == MUP_DROP_NONE;
 }
 
-/* bridge_is_wrapped reports a UDP payload that starts with the bridge magic. */
+/*
+ * bridge_is_wrapped reports a bridge wrapper: a UDP payload, or the payload of
+ * an ICMP Echo Reply, that starts with the bridge magic. A reflector answers
+ * the Echo Request of an ICMP bridge via path with that Echo Reply. An Echo
+ * Request with the magic is not a wrapper.
+ */
 static __always_inline int bridge_is_wrapped(const struct mup_packet *packet)
 {
-	return packet->transport == MUP_TRANSPORT_UDP &&
-	       mup_payload_fits(packet, MUP_BRIDGE_HEADER_LEN + 8) &&
+	if (packet->transport == MUP_TRANSPORT_ICMP) {
+		const struct mup_icmphdr *icmp = packet->l4;
+
+		if (icmp->type != MUP_ICMP_ECHO_REPLY || icmp->code != 0)
+			return 0;
+	} else if (packet->transport != MUP_TRANSPORT_UDP) {
+		return 0;
+	}
+	return mup_payload_fits(packet, MUP_BRIDGE_HEADER_LEN + 8) &&
 	       packet->payload[0] == MUP_BRIDGE_MAGIC_0 &&
 	       packet->payload[1] == MUP_BRIDGE_MAGIC_1;
 }
@@ -2512,7 +2597,9 @@ static __always_inline int bridge_send(struct __sk_buff *skb,
  * mup_bridge_ingress runs on a MUP bridge. A MUP packet from a client to a
  * port of the bridge goes on to the server of the bridge, from the same
  * source. A wrapped reply from the server or an allowed sender loses its
- * wrapper and goes on to its inner destination, with its inner source. Every
+ * wrapper and goes on to its inner destination, with its inner source. The
+ * wrapper is UDP, or an ICMP Echo Reply that a reflector sends. For ICMP the
+ * identifier is the port that picks the entry. Every
  * other packet goes on to the kernel, so a normal ping still gets its reply.
  * The bridge has up to MUP_MAX_BRIDGES entries, and the port of a packet
  * picks the entry with its server and its allowed senders.

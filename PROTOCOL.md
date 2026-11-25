@@ -33,7 +33,7 @@ This document describes version 1 of the MUP protocol as the code implements it.
 | Ingress path | A path of a group with separate egress paths. It carries only the packets from the client to the server. |
 | Egress path | A way that the server sends the replies of a group to the client. One `egress` route sets one egress path. |
 | Bridge | A host that runs `mup bridge` between the clients and its servers. It has up to 8 entries, each with one server. One `bridges` entry sets one ingress path or egress path through it. An egress route with a `bridge` suffix also sets one egress path through it. |
-| Bridge wrapper | The 20 bytes that a server puts after the IPv4 header of a reply for a bridge: a UDP header and the bridge header. |
+| Bridge wrapper | The 20 bytes after the IPv4 header of a bridge reply: a UDP or ICMP Echo header, and the bridge header. |
 | Group | One listen port with its mode and its paths. Each path has an optional return IP. |
 | Port | The number in `-u SERVER:PORT` and in server `-p`. For UDP, it is the destination port. For ICMP, it is the Echo identifier. |
 | Listen port | The client `-p` port of a group. The peers send to it, and egress packets arrive on it. |
@@ -169,7 +169,7 @@ The client keeps the range of each ingress path in `client_path_src`, and the ra
 - ICMP: The peer token needs 12 of the 16 bits of the Echo sequence. Bits 12 to 15 carry the path tag. The tag is the path slot plus 1, from 1 to 8, on a packet of a path with a range. It is 0 on every other packet. Each side finds the path by the tag and makes sure that the identifier is in the range. So the identifier can vary.
 - ICMP on the server: A tagged packet reaches its path also when its identifier is outside the server ports. The server looks up a key with the tag and no port. A tagged WireGuard message without a registered path counts reason 8, so the kernel does not echo it back.
 - Partial checksum: A local socket whose device completes the checksum sends an ICMP packet with a partial checksum. This packet cannot carry the tag. It keeps the fixed identifier and no tag, and both sides accept this form on a path with a range. A device can write 0xffff into the sequence, so a tag above 8 counts as tag 0.
-- Bridges: An ICMP ingress entry of a `bridges` list cannot have a range, because the bridge finds its entry by the identifier. On an egress path through a bridge, the wrapper also takes a source port of the range. Its destination port stays the port of the entry.
+- Bridges: An ICMP ingress entry of a `bridges` list cannot have a range, because the bridge finds its entry by the identifier. On an egress path through a bridge, a UDP wrapper also takes a source port of the range. Its destination port stays the port of the entry. An Echo wrapper keeps the port of the entry as its identifier, and its sequence takes a value of the range.
 - A client behind NAT cannot use a source range.
 - A server before v0.5.1 refuses a frame with flag bit 7, so the path does not come up there. A UDP ingress range needs no server change.
 
@@ -179,22 +179,35 @@ A bridge has up to 8 entries, and each entry has one server. A bridge passes the
 
 An ingress bridge carries the ingress of a path. The client sends to the bridge in the same way as to a server. The bridge changes the destination to the server of the entry, and it keeps the source, the port, and the ICMP identifier. It updates the IPv4 checksum and the UDP checksum. So the server gets the same packet as from the client.
 
-An egress bridge carries the replies of an egress path. The server rewrites each reply as for an egress route, with the bridge address as the server address of the path. A direct reply thus comes from the bridge address. Then the server puts the reply in the bridge wrapper. An egress bridge has three forms, and they differ in the return IP of the path and in the source of the wrapper. An egress route with a bridge suffix, `SERVER:PORT/t via X bridge B`, builds the reply as for an egress route with that via. The bridge then sends the reply with the source that the via needs. An egress bridge with a via, `B:PORT/t via X`, builds the direct reply from the bridge address. The server sends the wrapper from X or from a member of the pool. An egress bridge without a via sends the wrapper from the server address, and the bridge sends the reply from its own address.
+An egress bridge carries the replies of an egress path. The server rewrites each reply as for an egress route, with the bridge address as the server address of the path. A direct reply thus comes from the bridge address. Then the server puts the reply in the bridge wrapper. An egress bridge has three forms, and they differ in the return IP of the path and in the source of the wrapper. An egress route with a bridge suffix, `SERVER:PORT/t via X bridge B`, builds the reply as for an egress route with that via. The bridge then sends the reply with the source that the via needs. An egress bridge with a via, `B:PORT/t via X`, builds the direct reply from the bridge address. The server uses X, or a member of the pool, as the source of a UDP wrapper, or as the reflector of an Echo wrapper. An egress bridge without a via sends the wrapper from the server address, and the bridge sends the reply from its own address.
 
+The server uses this UDP wrapper for each egress bridge, except for an ICMP entry with a via. That entry uses the Echo wrapper, which the next paragraphs describe.
 
 | Part | Size | Content |
 | --- | ---: | --- |
 | IPv4 header | 20 | From the server to the bridge, with protocol UDP. The other fields do not change. |
 | UDP header | 8 | The port of the egress path at both ends. The checksum is zero. |
 | Bridge header | 12 | The magic 0x4d42 ("MB"), version 1, the inner protocol, the inner source address, and the inner destination address. |
-| Inner header | 8 | The UDP or ICMP header of the reply, with no change. |
+| Inner header | 8 | The ICMP header of the reply, an Echo Reply from the bridge address, with no change. |
 | Payload | n | The WireGuard message or the control frame, with no change. |
 
-The transport header and the payload do not move. So the inner checksum stays valid, and a partial checksum stays partial. The server sends the wrapped reply to the bridge through the interface of its route. The source of the wrapper is the source address of the route. With a bridge via, it is the member. If the wrapped reply does not fit the MTU of that interface, the server drops it and counts reason 25. In the egress repeater mode, the server removes the wrapper again after the copy of an egress bridge. So the next egress path gets the reply as it was.
+The transport header and the payload do not move. So the inner checksum stays valid, and a partial checksum stays partial. The server sends a UDP wrapper to the bridge through the interface of its route. The source of the UDP wrapper is the source address of the route. With a bridge via, it is the member. An Echo wrapper goes to X through the interface of its route, with the bridge address as its source. If the wrapped reply does not fit the MTU of that interface, the server drops it and counts reason 25. In the egress repeater mode, the server removes the wrapper again after the copy of an egress bridge. So the next egress path gets the reply as it was.
+
+The Echo wrapper is the wrapper of an ICMP entry with a via. When the EGRESS_REGISTER has transport 1, flag bit 4, flag bit 6, and flag bit 0 or bit 1, the server uses it. The bridge must be v0.5.2 or later for this wrapper. The server sends the wrapper as an Echo Request to X or to a pool member with B as the source address. X answers with an Echo Reply to B, so the wrapper reaches the bridge from X. The table shows the Echo wrapper.
+
+| Part | Size | Content |
+| --- | ---: | --- |
+| IPv4 header | 20 | The source is B and the destination is X, with protocol ICMP. The reflector swaps the addresses in its reply. |
+| ICMP header | 8 | Type 8 and code 0 for an Echo Request. The identifier is the port of the entry. If the path has a source range, the sequence is a random value of that range. Otherwise, it is the port of the entry. The checksum is valid for the whole ICMP message. |
+| Bridge header | 12 | The same as in the UDP wrapper. |
+| Inner header | 8 | The ICMP header of the reply, an Echo Reply from the bridge address, with no change. |
+| Payload | n | The WireGuard message or the control frame, with no change. |
+
+The reply inside an Echo wrapper always has a complete ICMP checksum, because the reflector checks the whole message. The reflector returns the same message with type 0, an Echo Reply. It keeps the identifier, the sequence, and the bytes after the ICMP header. The bridge takes the Echo Reply only from a sender that its entry allows. It then removes the 8-byte ICMP header and the bridge header, and it sends the reply to the client from its own address.
 
 The bridge program handles each packet to an address of the bridge host and a port of the bridge:
 
-1. A UDP payload that starts with the bridge magic is a wrapped reply. It must come from the server of the entry for its port, or from an `allow` range of that entry. A member that such a range holds also counts. Otherwise, the program counts reason 23. It must have version 1, UDP or ICMP inside, and a MUP packet inside, or the program counts reason 24. The program removes the wrapper and writes the inner protocol and addresses into the IPv4 header.
+1. A UDP payload, or an ICMP Echo Reply payload, that starts with the bridge magic is a wrapped reply. It must come from the server of the entry for its port, or from an `allow` range of that entry. A member that such a range holds also counts. Otherwise, the program counts reason 23. It must have version 1, UDP or ICMP inside, and a MUP packet inside, or the program counts reason 24. The program removes the wrapper and writes the inner protocol and addresses into the IPv4 header. The wrapper of an Echo Reply is its 8-byte ICMP header and the bridge header.
 2. Any other MUP packet goes to the server of the entry for its port, except a packet from that server itself. A MUP packet is a control frame, or a WireGuard message with a token, in UDP or in an ICMP Echo Request.
 3. Every other packet goes on to the kernel. So a normal ping to the bridge still gets its reply.
 

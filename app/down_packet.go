@@ -11,8 +11,13 @@ import (
 // an egress path, as the server program sends a reply on it, and returns its
 // destination. A direct path sends egressPacket. A bridge path wraps a packet
 // for the bridge. Without bridgeVia, the wrapper leaves from localIP and holds
-// the packet of the via. With bridgeVia, the wrapper leaves from the member and
-// holds the direct packet from the bridge address, which the bridge sends.
+// the packet of the via. With bridgeVia, the wrapper holds the direct packet
+// from the bridge address, which the bridge sends. On a UDP path the server
+// forges the wrapper from the member to the bridge. On an ICMP path the
+// wrapper is an Echo Request from the bridge address to the member, so its
+// destination is the member, and the Echo Reply of the member reaches the
+// bridge. Its identifier is the server port and its sequence the wrapper
+// source port, which is also the server port here.
 func egressWirePacket(target egressTarget, frame []byte, sequence uint16) ([]byte, netip.Addr) {
 	if !target.bridge {
 		return egressPacket(target, frame, sequence)
@@ -21,14 +26,16 @@ func egressWirePacket(target egressTarget, frame []byte, sequence uint16) ([]byt
 		inner, _ := egressPacket(target, frame, sequence)
 		return protocol.WrapForBridge(inner, target.localIP, target.server, target.port), target.server
 	}
-	outerSource := target.member
-	if !outerSource.IsValid() {
-		outerSource = target.localIP
-	}
 	direct := target
 	direct.member = netip.Addr{}
 	inner, _ := egressPacket(direct, frame, sequence)
-	return protocol.WrapForBridge(inner, outerSource, target.server, target.port), target.server
+	if !target.member.IsValid() {
+		return protocol.WrapForBridge(inner, target.localIP, target.server, target.port), target.server
+	}
+	if target.reflectsWrapper() {
+		return protocol.WrapForBridgeEcho(inner, target.server, target.member, target.port, target.port), target.member
+	}
+	return protocol.WrapForBridge(inner, target.member, target.server, target.port), target.server
 }
 
 // egressPacket builds the IPv4 packet of a frame on an egress path, and returns its

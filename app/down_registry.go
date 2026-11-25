@@ -54,8 +54,12 @@ type egressKey struct {
 
 // serverEgressPath is one egress path of one client on this server. A path with
 // bridge goes through a MUP bridge: server is the bridge address, and the
-// wrapped replies leave from localIP. A path with bridgeVia as well sends the
-// wrapped replies from a member, and the bridge sends them from its own address.
+// wrapped replies leave from localIP. A path with bridgeVia as well wraps the
+// direct reply from the bridge address, which the bridge sends from its own
+// address, and applies the member to the wrapper. A UDP path forges the
+// wrapper from the member to the bridge. An ICMP path reflects it: the wrapper
+// is an Echo Request from the bridge address to the member, and the member
+// answers it to the bridge (reflectsWrapper).
 type serverEgressPath struct {
 	key        egressKey
 	listenPort uint16
@@ -86,12 +90,23 @@ func (p *serverEgressPath) pool() bool {
 	return p.prefix != 0
 }
 
+// reflectsWrapper reports a bridge via path on ICMP with a return IP or a
+// pool. Its wrapper is an Echo Request from the bridge address to a member, so
+// it leaves on the route to the member, and the members must answer pings.
+func (p *serverEgressPath) reflectsWrapper() bool {
+	return p.bridge && p.bridgeVia && p.transport == protocol.TransportICMP && p.returnIP.IsValid()
+}
+
 // poolTransport is the transport of the pool of the path. The members of a
-// bridge via path are only the forged sources of the UDP wrapper to the
-// bridge, whatever the transport of the path is. An ICMP pool lists only the
-// hosts that answer pings, so the path uses the UDP pool, which lists every
-// address that the server can forge.
+// UDP bridge via path are only the forged sources of the UDP wrapper to the
+// bridge, so the path uses the UDP pool, which lists every address that the
+// server can forge. A path that reflects its wrapper uses the ICMP pool, which
+// lists only the hosts that answer pings. Every other path uses the pool of
+// its transport.
 func (p *serverEgressPath) poolTransport() protocol.TransportID {
+	if p.reflectsWrapper() {
+		return protocol.TransportICMP
+	}
 	if p.bridgeVia {
 		return protocol.TransportUDP
 	}
@@ -135,8 +150,9 @@ type serverEgressGroup struct {
 // egressTarget is one way to send a control frame on an egress path. Member is the
 // reflector of a path with a return IP or a pool, and invalid for a direct
 // path. A target with bridge goes through the bridge at server, wrapped from
-// localIP. A target with bridgeVia as well is wrapped from member, and the
-// bridge sends the direct form from its own address.
+// localIP. A target with bridgeVia as well wraps the direct form, which the
+// bridge sends from its own address. On UDP the wrapper is forged from member
+// to the bridge. On ICMP the wrapper reflects off member (reflectsWrapper).
 type egressTarget struct {
 	client     dataplane.ClientKey
 	pathID     uint16
@@ -148,6 +164,12 @@ type egressTarget struct {
 	bridge     bool
 	bridgeVia  bool
 	localIP    netip.Addr
+}
+
+// reflectsWrapper reports a target whose wrapper is an Echo Request from the
+// bridge address to member, which member answers to the bridge.
+func (t egressTarget) reflectsWrapper() bool {
+	return t.bridge && t.bridgeVia && t.transport == protocol.TransportICMP && t.member.IsValid()
 }
 
 // egressRegistry holds the egress paths that clients declare with EGRESS_REGISTER
@@ -235,6 +257,19 @@ func (r *egressRegistry) register(frame protocol.ControlFrame, now time.Time) er
 				return fmt.Errorf("route to bridge %s has no IPv4 source or interface", path.server)
 			}
 			path.localIP, path.ifindex = localIP, ifindex
+			// A reflected wrapper goes to the member, so it leaves on
+			// the route to the member, as on a reflect route.
+			if path.reflectsWrapper() {
+				destination := path.destination()
+				_, ifindex, err := r.route(destination)
+				if err != nil {
+					return fmt.Errorf("route to bridge via member %s: %w", destination, err)
+				}
+				if ifindex <= 0 {
+					return fmt.Errorf("route to bridge via member %s has no interface", destination)
+				}
+				path.ifindex = ifindex
+			}
 		} else {
 			ifindex, err := r.locate(path.server, path.destination())
 			if err != nil {

@@ -33,8 +33,10 @@
 /*
  * A server down path with MUP_FLAG_BRIDGE and MUP_FLAG_BRIDGE_VIA applies its
  * return IP or pool to the leg to the bridge. The server wraps the direct
- * reply from the bridge address in a UDP packet from the member to the
- * bridge. It must match protocol.ControlFlagBridgeVia.
+ * reply from the bridge address. On a UDP path the wrapper is a UDP packet
+ * from the member to the bridge. On an ICMP path the wrapper is an ICMP Echo
+ * Request from the bridge to the member, and the member reflects it to the
+ * bridge as an Echo Reply. It must match protocol.ControlFlagBridgeVia.
  */
 #define MUP_FLAG_BRIDGE_VIA (1U << 6)
 #define MUP_MAX_POOL 16
@@ -47,7 +49,9 @@
  * The bridge wrapper is a UDP header and a 12-byte bridge header between the
  * IPv4 header and the transport header of a packet. The bridge header holds
  * the magic "MB", the version, the inner protocol, and the inner source and
- * destination addresses.
+ * destination addresses. The wrapper of an ICMP bridge via path has an 8-byte
+ * ICMP Echo header in place of the UDP header, with the server port as the
+ * identifier, so the overhead is the same.
  */
 #define MUP_BRIDGE_MAGIC_0 0x4d
 #define MUP_BRIDGE_MAGIC_1 0x42
@@ -252,7 +256,9 @@ struct down_path_key_v1 {
  * path with MUP_FLAG_RETURN_POOL returns through the first count members,
  * which are the healthy members of the pool for this client. A path with
  * MUP_FLAG_BRIDGE wraps the reply from local_ip to the bridge at server_ip.
- * With MUP_FLAG_BRIDGE_VIA as well, the wrapper is from the member instead.
+ * With MUP_FLAG_BRIDGE_VIA as well, the UDP wrapper of a UDP path is from the
+ * member instead, and the wrapper of an ICMP path is an Echo Request from
+ * server_ip to the member, which the member reflects to the bridge.
  */
 struct down_path_v1 {
 	__be32 server_ip;

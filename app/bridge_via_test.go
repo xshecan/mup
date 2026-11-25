@@ -220,20 +220,25 @@ func TestRuntimeEgressPathsMatchTheFile(t *testing.T) {
 	}
 }
 
+// bridgeViaRegistry routes the bridge from viaLocal on interface 4, and every
+// address of the pool 198.51.100.0/28 on interface 6.
 func bridgeViaRegistry(t *testing.T, plane *fakeEgressPlane) *egressRegistry {
 	t.Helper()
 	registry := newTestEgressRegistry(plane)
 	registry.route = func(address netip.Addr) (netip.Addr, int, error) {
-		if address != viaBridge {
-			return netip.Addr{}, 0, errors.New("no route")
+		switch {
+		case address == viaBridge:
+			return viaLocal, 4, nil
+		case netip.PrefixFrom(egressPool, 28).Contains(address):
+			return viaLocal, 6, nil
 		}
-		return viaLocal, 4, nil
+		return netip.Addr{}, 0, errors.New("no route")
 	}
 	return registry
 }
 
-func bridgeViaPoolFrame(id uint16) protocol.ControlFrame {
-	frame := egressFrame(id, 12000, protocol.TransportICMP, config.ModeFailover)
+func bridgeViaPoolFrame(id uint16, transport protocol.TransportID) protocol.ControlFrame {
+	frame := egressFrame(id, 12000, transport, config.ModeFailover)
 	frame.Flags = protocol.ControlFlagReturnPool | protocol.ControlFlagBridge | protocol.ControlFlagBridgeVia
 	frame.ReturnIP = egressPool
 	frame.ReturnPrefix = 28
@@ -241,15 +246,15 @@ func bridgeViaPoolFrame(id uint16) protocol.ControlFrame {
 	return frame
 }
 
+// A UDP bridge via path forges its wrappers from the members, so it reads the
+// UDP pool and leaves on the route to the bridge.
 func TestEgressRegistryKeepsABridgeViaPathWithTheUDPPool(t *testing.T) {
 	t.Parallel()
 
 	plane := newFakeEgressPlane()
-	// The members of a bridge via path are forged sources of the UDP wrapper,
-	// so the path reads the UDP pool also when it is an ICMP path.
 	plane.members[dataplane.PoolKey{Base: egressPool, Transport: protocol.TransportUDP}] = egressMembers
 	registry := bridgeViaRegistry(t, plane)
-	frame := bridgeViaPoolFrame(0)
+	frame := bridgeViaPoolFrame(0, protocol.TransportUDP)
 	start := time.Unix(1000, 0)
 	if err := registry.register(frame, start); err != nil {
 		t.Fatalf("register: %v", err)
@@ -259,19 +264,19 @@ func TestEgressRegistryKeepsABridgeViaPathWithTheUDPPool(t *testing.T) {
 	}
 	key := egressKey{client: egressKeyOf, id: 0}
 	entry := plane.paths[key]
-	if !entry.Bridge || !entry.BridgeVia || entry.LocalIP != viaLocal || entry.Server != viaBridge || len(entry.Members) != 0 {
-		t.Fatalf("entry = %#v, want a bridge via path without healthy members", entry)
+	if !entry.Bridge || !entry.BridgeVia || entry.LocalIP != viaLocal || entry.Server != viaBridge || entry.Ifindex != 4 || len(entry.Members) != 0 {
+		t.Fatalf("entry = %#v, want a bridge via path on the route to the bridge without healthy members", entry)
 	}
 	targets := registry.probeTargets(start)
 	if len(targets) != len(egressMembers) {
 		t.Fatalf("probe targets = %#v, want one for each member", targets)
 	}
 	for _, target := range targets {
-		if !target.bridge || !target.bridgeVia || !slices.Contains(egressMembers, target.member) {
+		if !target.bridge || !target.bridgeVia || target.reflectsWrapper() || !slices.Contains(egressMembers, target.member) {
 			t.Fatalf("probe target = %#v", target)
 		}
 	}
-	if !registry.confirm(probeReply(0, protocol.TransportICMP, egressMembers[1]), start.Add(time.Second)) {
+	if !registry.confirm(probeReply(0, protocol.TransportUDP, egressMembers[1]), start.Add(time.Second)) {
 		t.Fatal("confirm of a member failed")
 	}
 	registry.sync(start.Add(time.Second))
@@ -292,8 +297,61 @@ func TestEgressRegistryKeepsABridgeViaPathWithTheUDPPool(t *testing.T) {
 	if entry := plane.paths[key]; entry.BridgeVia || !entry.Bridge || len(entry.Members) != 0 {
 		t.Fatalf("entry = %#v, want a new bridge path that reflects", entry)
 	}
-	if last := plane.pools[len(plane.pools)-1]; last.Transport != protocol.TransportICMP {
-		t.Fatalf("observed pool = %#v, want the ICMP pool of a bridge that reflects", last)
+	if last := plane.pools[len(plane.pools)-1]; last.Transport != protocol.TransportUDP {
+		t.Fatalf("observed pool = %#v, want the UDP pool of the path", last)
+	}
+}
+
+// An ICMP bridge via path reflects its wrappers off the members, so it reads
+// the ICMP pool, whose members answer pings, and leaves on the route to the
+// members. It keeps the source of the route to the bridge.
+func TestEgressRegistryKeepsAnICMPBridgeViaPathWithTheICMPPool(t *testing.T) {
+	t.Parallel()
+
+	plane := newFakeEgressPlane()
+	plane.members[dataplane.PoolKey{Base: egressPool, Transport: protocol.TransportICMP}] = egressMembers
+	registry := bridgeViaRegistry(t, plane)
+	frame := bridgeViaPoolFrame(0, protocol.TransportICMP)
+	start := time.Unix(1000, 0)
+	if err := registry.register(frame, start); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if !slices.Equal(plane.pools, []dataplane.PoolKey{{Base: egressPool, Transport: protocol.TransportICMP}}) {
+		t.Fatalf("observed pools = %#v, want the ICMP pool", plane.pools)
+	}
+	key := egressKey{client: egressKeyOf, id: 0}
+	entry := plane.paths[key]
+	if !entry.Bridge || !entry.BridgeVia || entry.LocalIP != viaLocal || entry.Server != viaBridge || entry.Ifindex != 6 {
+		t.Fatalf("entry = %#v, want a bridge via path on the route to the members with the source of the bridge route", entry)
+	}
+	targets := registry.probeTargets(start)
+	if len(targets) != len(egressMembers) {
+		t.Fatalf("probe targets = %#v, want one for each member", targets)
+	}
+	for _, target := range targets {
+		if !target.reflectsWrapper() || !slices.Contains(egressMembers, target.member) {
+			t.Fatalf("probe target = %#v, want a target that reflects off a member", target)
+		}
+		if _, destination := egressWirePacket(target, make([]byte, protocol.ControlFrameLength), 1); destination != target.member {
+			t.Fatalf("probe goes to %s, want the member %s", destination, target.member)
+		}
+	}
+	if !registry.confirm(probeReply(0, protocol.TransportICMP, egressMembers[1]), start.Add(time.Second)) {
+		t.Fatal("confirm of a member failed")
+	}
+	registry.sync(start.Add(time.Second))
+	if entry := plane.paths[key]; !slices.Equal(entry.Members, []netip.Addr{egressMembers[1]}) {
+		t.Fatalf("entry = %#v, want the confirmed member", entry)
+	}
+
+	// A return IP without a route has no interface for the reflected
+	// wrapper, so the registration fails.
+	single := egressFrame(1, 12001, protocol.TransportICMP, config.ModeFailover)
+	single.Flags = protocol.ControlFlagReturnIP | protocol.ControlFlagBridge | protocol.ControlFlagBridgeVia
+	single.ReturnIP = viaMember
+	single.EgressServer = viaBridge
+	if err := registry.register(single, start); err == nil {
+		t.Fatal("register of a member without a route succeeded")
 	}
 }
 
@@ -414,35 +472,78 @@ func TestTheBridgeViaPacketIsTheDirectReplyWrappedFromTheMember(t *testing.T) {
 	t.Parallel()
 
 	frame := bytes.Repeat([]byte{0xab}, protocol.ControlFrameLength)
-	for _, transport := range []protocol.TransportID{protocol.TransportUDP, protocol.TransportICMP} {
-		packet, destination := egressWirePacket(bridgeTarget(transport, true), frame, 7)
-		if destination != viaBridge {
-			t.Fatalf("%s: destination = %s, want the bridge", transport, destination)
-		}
-		outerSource, inner := unwrapTestBridge(t, packet, 12000)
-		if outerSource != viaMember {
-			t.Fatalf("%s: wrapper source = %s, want the member %s", transport, outerSource, viaMember)
-		}
-		source, target, protocolNumber, payload := parseTestIPv4(t, inner)
-		if source != viaBridge || target != egressClient {
-			t.Fatalf("%s: inner packet = %s to %s, want the bridge to the client", transport, source, target)
-		}
-		switch transport {
-		case protocol.TransportUDP:
-			if protocolNumber != ipProtocolUDP || binary.BigEndian.Uint16(payload[0:2]) != 12000 ||
-				binary.BigEndian.Uint16(payload[2:4]) != 51820 || !bytes.Equal(payload[8:], frame) {
-				t.Fatalf("inner UDP = protocol %d, % x", protocolNumber, payload[:8])
-			}
-		case protocol.TransportICMP:
-			echo, err := parseICMPEcho(payload)
-			if err != nil {
-				t.Fatalf("parseICMPEcho: %v", err)
-			}
-			if protocolNumber != ipProtocolICMP || echo.echoType != icmpEchoReply || echo.identifier != 12000 ||
-				echo.sequence != 7 || !bytes.Equal(echo.payload, frame) {
-				t.Fatalf("inner echo = %#v", echo)
-			}
-		}
+	packet, destination := egressWirePacket(bridgeTarget(protocol.TransportUDP, true), frame, 7)
+	if destination != viaBridge {
+		t.Fatalf("destination = %s, want the bridge", destination)
+	}
+	outerSource, inner := unwrapTestBridge(t, packet, 12000)
+	if outerSource != viaMember {
+		t.Fatalf("wrapper source = %s, want the member %s", outerSource, viaMember)
+	}
+	source, target, protocolNumber, payload := parseTestIPv4(t, inner)
+	if source != viaBridge || target != egressClient {
+		t.Fatalf("inner packet = %s to %s, want the bridge to the client", source, target)
+	}
+	if protocolNumber != ipProtocolUDP || binary.BigEndian.Uint16(payload[0:2]) != 12000 ||
+		binary.BigEndian.Uint16(payload[2:4]) != 51820 || !bytes.Equal(payload[8:], frame) {
+		t.Fatalf("inner UDP = protocol %d, % x", protocolNumber, payload[:8])
+	}
+}
+
+// An ICMP bridge via path reflects the wrapper off the member: an Echo
+// Request from the bridge address to the member, with a valid checksum, that
+// holds the direct Echo Reply from the bridge address to the client.
+func TestTheICMPBridgeViaPacketIsAnEchoRequestToTheMember(t *testing.T) {
+	t.Parallel()
+
+	frame := bytes.Repeat([]byte{0xab}, protocol.ControlFrameLength)
+	target := bridgeTarget(protocol.TransportICMP, true)
+	packet, destination := egressWirePacket(target, frame, 7)
+	if destination != viaMember {
+		t.Fatalf("destination = %s, want the member %s", destination, viaMember)
+	}
+	source, outerDestination, protocolNumber, payload := parseTestIPv4(t, packet)
+	if source != viaBridge || outerDestination != viaMember || protocolNumber != ipProtocolICMP {
+		t.Fatalf("wrapper = protocol %d from %s to %s, want ICMP from the bridge to the member", protocolNumber, source, outerDestination)
+	}
+	if payload[0] != icmpEchoRequest || payload[1] != 0 || binary.BigEndian.Uint16(payload[4:6]) != 12000 ||
+		binary.BigEndian.Uint16(payload[6:8]) != 12000 {
+		t.Fatalf("Echo header = % x, want an Echo Request with identifier and sequence 12000", payload[:8])
+	}
+	if internetChecksum(payload) != 0 {
+		t.Fatal("the ICMP checksum of the wrapper is invalid")
+	}
+	direct := target
+	direct.member = netip.Addr{}
+	want, _ := egressPacket(direct, frame, 7)
+	if wrapped := protocol.WrapForBridgeEcho(want, viaBridge, viaMember, 12000, 12000); !bytes.Equal(packet, wrapped) {
+		t.Fatal("packet differs from the Echo wrapper of the direct reply")
+	}
+	inner, err := protocol.UnwrapBridge(packet)
+	if err != nil {
+		t.Fatalf("UnwrapBridge: %v", err)
+	}
+	if !bytes.Equal(inner, want) {
+		t.Fatal("the inner packet is not the direct reply")
+	}
+	innerSource, innerDestination, innerProtocol, innerPayload := parseTestIPv4(t, inner)
+	if innerSource != viaBridge || innerDestination != egressClient || innerProtocol != ipProtocolICMP {
+		t.Fatalf("inner packet = protocol %d from %s to %s, want ICMP from the bridge to the client", innerProtocol, innerSource, innerDestination)
+	}
+	echo, err := parseICMPEcho(innerPayload)
+	if err != nil {
+		t.Fatalf("parseICMPEcho: %v", err)
+	}
+	if echo.echoType != icmpEchoReply || echo.identifier != 12000 || echo.sequence != 7 || !bytes.Equal(echo.payload, frame) {
+		t.Fatalf("inner echo = %#v", echo)
+	}
+
+	// Without a member the path has nothing to reflect off, and the wrapper
+	// leaves from the local address to the bridge, as the dataplane does.
+	target.member = netip.Addr{}
+	packet, destination = egressWirePacket(target, frame, 7)
+	if outerSource, _ := unwrapTestBridge(t, packet, 12000); destination != viaBridge || outerSource != viaLocal {
+		t.Fatalf("wrapper without a member = from %s via %s, want from %s to the bridge", outerSource, destination, viaLocal)
 	}
 }
 

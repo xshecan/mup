@@ -279,14 +279,15 @@ These rules apply:
 A bridge is a second host between a client and a server. It runs `mup bridge`. It passes the ingress on to one MUP server, its `server`. It unwraps the replies of that server and of the senders in `bridge.allow`. A bridge can have up to 8 entries, each with its own server. See [More than one server](#more-than-one-server).
 
 - An ingress bridge takes the packets of the client, in the same way as a server. It changes only the destination to its server, and it keeps the client address as the source. So the server gets the same packets as from the client, and it needs no change.
-- An egress bridge sends the replies of the server. The server builds each reply as for an egress route, wraps it in a UDP packet, and sends it to the bridge. The bridge removes the wrapper and sends the reply on to the client.
+- An egress bridge sends the replies of the server. The server builds each reply as for an egress route and wraps it. For an ICMP entry with a via, the wrapper is an Echo Request that a reflector answers. For every other form, the wrapper is a UDP packet. The bridge removes the wrapper and sends the reply on to the client.
 
-An egress bridge has three forms:
+An egress bridge has four forms:
 
 | Form | Where | What the bridge sends |
 | --- | --- | --- |
 | `SERVER:PORT/t via X bridge B` | `egress.routes` | The reply with the source that `via X` needs. The bridge spoofs. |
-| `B:PORT/t via X` | `egress.bridges` | The reply from the bridge address. The server spoofs the wrapper. |
+| `B:PORT/udp via X` | `egress.bridges` | The reply from the bridge address. The server spoofs a UDP wrapper. |
+| `B:PORT/icmp via X` | `egress.bridges` | The reply from the bridge address. X reflects an Echo wrapper that the server spoofs. |
 | `B:PORT/t` | `egress.bridges` | The reply from the bridge address. Nothing is spoofed. |
 
 An ingress bridge is a `bridges` entry in `ingress`. The client configuration names each bridge, next to `routes`.
@@ -318,9 +319,9 @@ bridge:
 
 ### The bridge via
 
-A `bridges` entry with a `via` lets the server spoof the wrapper. Use it when the network of the client treats packets from the server address badly, for example with a bandwidth limit on foreign sources. A host near the client then passes the replies on. The server sends the wrapped reply to the bridge B. It uses X, or a member of the pool, as the source address of the wrapper. The bridge removes the wrapper and sends the reply to the client from its own address. For UDP, this is a packet from the bridge address and the port. For ICMP, it is an Echo Reply from the bridge address.
+A `bridges` entry with a `via` lets the server spoof the wrapper. Use it when the network of the client treats packets from the server address badly, for example with a bandwidth limit on foreign sources. A host near the client then passes the replies on. The transport of the entry sets the form of the wrapper and the form of the last leg. For UDP, the server sends the wrapped reply to the bridge B, with X or a member of the pool as the source address. For ICMP, the server sends it to X or a member of the pool, and X reflects it to the bridge B. The bridge removes the wrapper and sends the reply to the client from its own address. For UDP, this is a packet from the bridge address and the port. For ICMP, it is an Echo Reply from the bridge address.
 
-The bridge spoofs nothing, so its network needs no special rule. The network of the server must let the spoofed wrapper out. The bridge takes wrapped replies only from allowed sources, so it must list X, or the pool, in `bridge.allow`. The host X never gets a packet. The entry transport sets only the form of the last leg. The wrapper to the bridge is always UDP. In this example, the bridge 5.6.7.8 sends the replies, and the server wraps them from the pool:
+The bridge spoofs nothing, so its network needs no special rule. The network of the server must let the spoofed wrapper out. The bridge takes wrapped replies only from allowed sources, so it must list X, or the pool, in `bridge.allow`. For UDP, the host X never gets a packet. For ICMP, the host X gets one Echo Request for each reply, and it answers the bridge. In this example, the bridge 5.6.7.8 sends the replies, and the server wraps them from the pool:
 
 ```yaml
 client:
@@ -343,7 +344,26 @@ bridge:
     - 87.107.117.192/28
 ```
 
-This form needs a server and a client of v0.5.0 or later. The bridge needs no update. A server before v0.5.0 refuses the EGRESS_REGISTER of this form.
+The UDP form needs a server and a client of v0.5.0 or later. The bridge needs no update for it. A server before v0.5.0 refuses the EGRESS_REGISTER of this form.
+
+The ICMP form uses an Echo wrapper. The server sends an Echo Request to X, or to a member of the pool, with the bridge address B as the source. The Echo payload is the bridge header and the reply. The identifier of the Echo Request is the port of the entry. If the entry has a `src` range, the sequence is a random value of that range. Otherwise, the sequence is the same port. X answers with an Echo Reply to B, so the wrapper reaches the bridge from X, on the route of X. The bridge removes the 20 bytes of the wrapper, and it sends the reply to the client from its own address. The overhead is the same 20 bytes as for UDP.
+
+When the route from the server to the bridge is long, but the route from X to the bridge is short, use this form. It also fits a network that passes only packets that X sends. X must answer an Echo Request of the full packet size. It must not rate-limit the Echo Requests too hard, so a pool is better than one router. The server keeps only the members of the pool that answer pings. The network of the server must let out a packet with the bridge address as the source. The bridge keeps the configuration of the UDP example. In this example, the server reflects the replies through the pool:
+
+```yaml
+client:
+  advertise: 160.119.74.74
+  servers:
+    - port: 51820
+      ingress:
+        routes:
+          - 46.102.130.95:9000/icmp
+      egress:
+        bridges:
+          - 5.6.7.8:9300/icmp via 87.107.117.192/28 per-packet
+```
+
+The ICMP form needs a server and a bridge of v0.5.2 or later. The client needs v0.5.0 or later, as for the UDP form. An older bridge does not know the Echo wrapper, so the path stays unhealthy. Upgrade the bridge first, then the server. When the server gets v0.5.2, an entry `B:PORT/icmp via X` that ran with v0.5.0 or v0.5.1 changes its behavior. The server then reflects the wrapper through X, and it stops sending the forged UDP wrapper.
 
 An older configuration can have an egress `bridges` entry with a `via` that means the first form. Move such an entry to `routes` with the server address and `bridge B`, or it gets the meaning of the second form. There is no alias.
 
@@ -382,7 +402,7 @@ A bridge entry has the form of a route, with the bridge address in place of the 
 - An egress bridge has one port and no `%IFACE`. In `bridges`, it can have `via`. Without `via`, the bridge sends the replies from the bridge address and the server wraps them from its own address.
 - The routes and the bridges of a direction share its 8 path slots, and the routes come first. So in the failover mode, a healthy route carries the traffic before a bridge.
 - A route or a bridge entry can end with `src FIRST-LAST`. An ICMP ingress entry in `bridges` cannot have it, because the bridge finds its entry by the identifier. See [Source range](#source-range).
-- On an egress path through a bridge with a range, the wrapper to the bridge also takes a source port of the range. Its destination port stays the port of the entry.
+- On an egress path through a bridge with a range, a UDP wrapper to the bridge also takes a source port of the range. Its destination port stays the port of the entry. An Echo wrapper keeps the port of the entry as its identifier, and its sequence takes a value of the range.
 - The `port` of the bridge must include the ports of all bridge entries. The bridge sends the ingress to the server of the entry that holds the port, on the same port.
 
 The bridge takes wrapped replies from the server of their entry and from the ranges in the `allow` of that entry. So one entry can pass the replies of more than one server, with each server address in its `allow`. A server behind NAT reaches the bridge from its NAT address, so put that address in `bridge.allow`. The bridge passes every other packet to the kernel, so a normal ping to the bridge still gets its reply.

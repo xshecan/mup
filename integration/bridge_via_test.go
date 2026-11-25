@@ -12,19 +12,16 @@ import (
 	"github.com/xshecan/mup/api"
 )
 
-// TestPrivilegedEgressBridgeVia runs a group whose egress is a bridge entry with a
-// via. The server sends the wrapped replies to the bridge with the via address as
-// the source, and the bridge sends them to the client from its own address. The
-// switch drops every packet of the bridge with another source, so the bridge
-// cannot spoof. It also drops every packet from the server to the client, so no
-// reply goes straight. The bridge lists the via address in its allow list.
+// TestPrivilegedEgressBridgeVia runs a group whose egress is a UDP bridge entry
+// with a via. The server sends the wrapped replies to the bridge with the via
+// address as the source, and the bridge sends them to the client from its own
+// address. The switch drops every packet of the bridge with another source, so
+// the bridge cannot spoof. It also drops every packet from the server to the
+// client, so no reply goes straight. The bridge lists the via address in its
+// allow list. An ICMP entry reflects the wrapper off a real via host, and
+// TestPrivilegedEgressBridgeReflect covers it.
 func TestPrivilegedEgressBridgeVia(t *testing.T) {
-	t.Run("udp", func(t *testing.T) {
-		runEgressBridgeVia(t, "10.215", "udp", true)
-	})
-	t.Run("icmp", func(t *testing.T) {
-		runEgressBridgeVia(t, "10.216", "icmp", true)
-	})
+	runEgressBridgeVia(t, "10.215", "udp", true)
 }
 
 // TestPrivilegedEgressBridgeViaNeedsAllow starts the same group with a bridge that

@@ -384,3 +384,44 @@ func TestServerIngressSendsTheReplyOnAEgressPath(t *testing.T) {
 		collection.Close()
 	}
 }
+
+// partialTargetReply runs the server egress program on a reply of the target
+// from a local socket, which still has CHECKSUM_PARTIAL, with a WireGuard
+// message of length bytes.
+func partialTargetReply(t *testing.T, collection *ebpf.Collection, length int) (uint32, []byte) {
+	t.Helper()
+	reply := udpPartialWireGuardFrame(t, ingressTarget, ingressClient, ingressTargetPort, 20000, length)
+	result, output, err := collection.Programs["mup_server_egress"].Test(reply)
+	if err != nil {
+		t.Fatalf("length %d: program test: %v", length, err)
+	}
+	return result, output
+}
+
+// A partial reply on an ICMP egress path gets a full ICMP checksum. The sum of
+// the payload is taken before the token is written, so the checksum must add
+// the token. The test program does not complete a partial checksum, so a
+// checksum without the token fails here.
+func TestServerWritesTheChecksumOfAPartialReplyOnAnICMPEgressPath(t *testing.T) {
+	// 92 bytes take only the short parts of the sum, and 1440 bytes also
+	// take two full chunks.
+	for _, length := range []int{protocol.HandshakeResponseLength, 1440} {
+		// Failover with only path 1 healthy takes the ICMP path that
+		// reflects through the pool.
+		collection := egressReplyCollection(t, 0, 0b10)
+		result, output := partialTargetReply(t, collection, length)
+		collection.Close()
+		if result != tcActOK && result != tcActRedirect {
+			t.Fatalf("length %d: return value = %d, want pass or redirect", length, int32(result))
+		}
+		assertReflectedICMP(t, output)
+		ip := output[14:]
+		icmp := ip[20:binary.BigEndian.Uint16(ip[2:4])]
+		if len(icmp) != 8+length {
+			t.Fatalf("length %d: ICMP length = %d, want %d", length, len(icmp), 8+length)
+		}
+		if got := binary.BigEndian.Uint16(icmp[6:8]); got != 0 {
+			t.Fatalf("length %d: ICMP sequence = %#x, want 0 on a partial reply", length, got)
+		}
+	}
+}
